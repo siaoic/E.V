@@ -1,0 +1,25 @@
+# 敏感配置与运行时产物
+.env
+data/vts_token.json
+data/emotion_embedding_cache.npz
+
+# TTS 本地模型（体积巨大，不入库，需自行下载/拷贝）
+gsv_tts/API/models/
+
+# 临时目录
+temp/
+probe_result.txt
+
+# Python
+__pycache__/
+*.pyc
+
+# 临时 TTS 音频（GPT-SoVITS 为 wav，edge 为 mp3）
+vtuber_tts_*
+
+# 桌宠模式本地依赖（pip --target 安装，避免污染系统环境）
+vendor_pet/
+
+# IDE / 工具
+.trae/
+.vscode/

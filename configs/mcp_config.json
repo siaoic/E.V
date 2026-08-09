@@ -1,0 +1,31 @@
+{
+  "tavily_remote": {
+    "type": "streamable_http",
+    "url": "https://mcp.tavily.com/mcp/?tavilyApiKey=${TAVILY_API_KEY}",
+    "headers": {
+      "DEFAULT_PARAMETERS": "{\"include_images\": false, \"max_results\": 5}"
+    }
+  },
+  "playwright_disabled": {
+    "command": "npx",
+    "args": [
+      "@playwright/mcp@latest"
+    ]
+  },
+  "tavily_local_disabled": {
+    "command": "npx",
+    "args": [
+      "-y",
+      "tavily-mcp@latest"
+    ],
+    "env": {
+      "TAVILY_API_KEY": "${TAVILY_API_KEY}"
+    }
+  },
+  "example_time": {
+    "command": "python",
+    "args": [
+      "./tools/example_time.py"
+    ]
+  }
+}

@@ -1,0 +1,923 @@
+"""AI 虚拟主播主程序封装：Application.run() 对应原 main() 的全部生命周期。
+
+原 main.py 中与「启动程序」无关的所有业务逻辑都搬到这里，使根目录
+main.py 仅保留最薄的入口层（编码设置、vendor 路径注入、调用 run）。
+"""
+
+import asyncio
+import logging
+import os
+import random
+from datetime import datetime
+
+from src.utils import config, console
+
+# 压制 httpx/openai 客户端的 HTTP 请求 INFO 日志（噪音）
+logging.getLogger("httpx").setLevel(logging.WARNING)
+logging.getLogger("httpcore").setLevel(logging.WARNING)
+logging.getLogger("openai").setLevel(logging.WARNING)
+
+from src.memory import memory
+from src.llm import stream
+from src.utils.content_filter import ProfanityFilter
+from src.llm.butler_agent import ButlerAgent
+from src.mcp.manager import MCPManager
+from src.llm.proactive import ProactiveEngine
+from src.vts.face_driver import FaceDriver
+from src.llm.llm_brain import LLMBrain
+from src.vts.model_scanner import scan_model
+from src.tts.engine import TTSEngine
+from src.vts.controller import VTSController
+from src.utils.perf_tracker import PerfTracker
+from src.utils.subtitle_server import SubtitleServer
+from src.core.output_lock import (
+    get_output_lock, set_output_owner, is_rejecting_input,
+)
+
+
+class Application:
+    """封装整份运行时状态：原 main() 内的局部变量全部变为 self 属性。"""
+
+    # ---------- 输入等待：轮询 + 心跳主动引擎 ----------
+
+    async def _wait_input(self, show_prompt: bool = True) -> str:
+        """轮询式输入：等待用户输入，空闲心跳期间由主动引擎决定是否开口。
+
+        主动对话 / 弹幕回复在播报期间，本方法收到的任何键盘 / 语音识别输入
+        会被**直接丢弃**（不返回给主循环、也不缓存）——确保「说话期间
+        不接收任何信息」。
+        """
+        loop = asyncio.get_running_loop()
+        if show_prompt:
+            print("你 > ", end="", flush=True)
+        if self._pending_stdin_fut is not None and not self._pending_stdin_fut.done():
+            input_fut = self._pending_stdin_fut
+        else:
+            input_fut = loop.run_in_executor(None, lambda: input(""))
+        if self.proactive is None and self.stt_engine is None:
+            # 未启用主动对话/语音识别：纯阻塞等待（与原行为一致）
+            return await input_fut
+        stt_fut = self.stt_engine.result_future() if self.stt_engine is not None else None
+        while True:
+            pending = {input_fut}
+            if stt_fut is not None:
+                pending.add(stt_fut)
+            timeout = (self.proactive.tick_seconds
+                       if self.proactive is not None else 0.2)
+            done, _ = await asyncio.wait(
+                pending, timeout=timeout,
+                return_when=asyncio.FIRST_COMPLETED)
+
+            if input_fut in done:
+                text = input_fut.result()
+                # ---- 拒收：主动 / 弹幕正在播报 → 丢本条，换新 input_fut 继续等 ----
+                if is_rejecting_input():
+                    console.dim("[输入丢弃] 正在回复弹幕 / 主动说话，忽略本次键盘输入")
+                    input_fut = loop.run_in_executor(None, lambda: input(""))
+                    continue
+                return text
+
+            if stt_fut is not None and stt_fut in done:
+                text = stt_fut.result()
+                stt_fut = self.stt_engine.result_future()  # 拿下一个识别结果
+                if not text:
+                    continue
+                # ---- 拒收：主动 / 弹幕正在播报 → 丢本条，继续等 ----
+                if is_rejecting_input():
+                    console.dim("[输入丢弃] 正在回复弹幕 / 主动说话，忽略本次语音输入")
+                    continue
+                print(f"[语音识别] {text}", flush=True)
+                return text
+
+            if self.proactive is None:
+                continue
+            # 换行：让心跳日志 / 主动发言独占一行，不与「你 > 」粘连
+            print()
+            # 空闲心跳：可能触发主动发言（内部等待其播完，随后继续等输入）
+            try:
+                await self.proactive.heartbeat()
+            except Exception as e:
+                import traceback as _tb
+                console.error(
+                    f"主动对话心跳出错：{e}\n"
+                    f"{''.join(_tb.format_exception(type(e), e, e.__traceback__))}")
+            # 心跳日志已换行打印，重印提示符等待输入
+            print("你 > ", end="", flush=True)
+
+    # ---------- 弹幕回复：_chat_danmaku + 队列循环 + 启停辅助 ----------
+
+    async def _chat_danmaku(self, uid, username, text) -> None:
+        """弹幕精选回复：走完整的 LLM→TTS→字幕→口型→记忆链路。
+
+        注意：到达这里的弹幕已经过 KeyboardFilter（data/keyboard.txt）过滤，
+        命中词库的弹幕在 _on_danmaku 入口就被丢弃（不显示、不回复）。
+        所以这里直接用原文，不做任何替换/过滤。
+
+        若当前已有播报在进行（主动对话 / 用户对话 / 弹幕），本条弹幕
+        直接丢弃、不排队等锁——播放结束后才重新接受新的弹幕，避免
+        「主动播完立刻又接弹幕」的连续开口。
+        """
+        cfg = self.cfg
+
+        # 正在播报中（锁被占用）：丢弃本条，播放完才接受新弹幕
+        if get_output_lock().locked():
+            console.dim(f"[弹幕] 正在播报，跳过本条（{username}：{text}）")
+            return
+
+        wrapped = (
+            f"[系统提示] 现在你在直播间，收到观众弹幕请自然地回一句。"
+            f"观众昵称：{username}，弹幕内容：\n{text}\n"
+            f"请用 stream-chat 技能的直播闲聊风格回复（先回应情绪或接话，"
+            f"一句话说完即可，不要连续追问）。"
+        )
+
+        # 主动引擎：有观众说话也算"有人互动"——清 0 一下孤独/无聊
+        if self.proactive is not None:
+            try:
+                self.proactive.on_user_message()
+            except Exception:
+                pass
+
+        # —— 每轮对话性能埋点 ——
+        turn_tracker = PerfTracker(f"弹幕回复@{username}")
+        turn_tracker.begin("端到端")
+
+        # 弹幕内容也推送到字幕网页（打字机气泡）
+        try:
+            self.sub.push("user", f"@{username}：{text}")
+        except Exception:
+            pass
+
+        _turn_user = text
+
+        async def _on_llm_done(reply_text: str) -> None:
+            if not (cfg.MEMORY_ENABLED and self.butler and self.mm):
+                return
+            try:
+                self.mm.add_turn("user", f"[弹幕@{username}] {_turn_user}")
+                self.mm.add_turn("muika", reply_text)
+                await self.butler.submit_extract_and_store(
+                    [{"role": "user", "content": f"[弹幕@{username}] {_turn_user}"},
+                     {"role": "assistant", "content": reply_text}],
+                    self.mm.recent_turns[:-2],
+                )
+            except Exception as e:
+                console.dim(f"[ButlerAgent] 弹幕记忆提取出错：{e}")
+
+        try:
+            # 全局输出互斥（owner="danmaku"）+ 不带打断监听的 stream.converse：
+            # - 锁防止用户/主动并发抢占；
+            # - owner 标记让 _wait_input 丢弃此间到达的输入；
+            # - 无打断监听保证内部不会自己跳。
+            output_lock = get_output_lock()
+            async with output_lock:
+                set_output_owner("danmaku")
+                try:
+                    await stream.converse(
+                        self.brain, wrapped, tts=self.tts, face=self.face, sub=self.sub,
+                        profanity_filter=self.pf,
+                        profanity_filter_rate=cfg.PROFANITY_FILTER_RATE,
+                        on_llm_done=_on_llm_done if cfg.MEMORY_ENABLED else None,
+                    )
+                finally:
+                    set_output_owner(None)
+        except asyncio.CancelledError:
+            raise
+        except Exception as e:
+            console.error(f"弹幕回复出错：{e}")
+
+        turn_tracker.end("端到端")
+        turn_tracker.print_report()
+
+    async def _danmaku_reply_loop(self, q) -> None:
+        """后台协程：从弹幕队列取精选，走 _chat_danmaku 完整对话链路。"""
+        while True:
+            try:
+                uid, username, text = await q.get()
+                await self._chat_danmaku(uid=uid, username=username, text=text)
+            except asyncio.CancelledError:
+                raise
+            except Exception as e:
+                console.error(f"[弹幕] 回复出错：{e}")
+
+    def _stop_bili(self):
+        """关闭弹幕服务；返回 reply_task cancel 协程或 None。"""
+        cancel_coro = None
+        if self.danmaku_picker is not None:
+            try:
+                self.danmaku_picker.stop()
+                from src.danmaku.bili_danmaku import set_danmaku_picker
+                set_danmaku_picker(None)
+            except Exception:
+                pass
+        if self.bili_svc is not None:
+            try:
+                self.bili_svc.stop()
+            except Exception:
+                pass
+        if self.danmaku_reply_task is not None and not self.danmaku_reply_task.done():
+            self.danmaku_reply_task.cancel()
+            cancel_coro = self.danmaku_reply_task
+        return cancel_coro
+
+    async def _start_bili(self):
+        """启动 B 站弹幕服务 + DanmakuPicker + 回复协程。"""
+        cfg = self.cfg
+        if not (cfg.BILI_ENABLED and cfg.BILI_ROOM_ID):
+            if cfg.BILI_ENABLED and not cfg.BILI_ROOM_ID:
+                console.dim("[弹幕] BILI_ENABLED=true 但 BILI_ROOM_ID=0，不启用弹幕精选回复")
+            return None, None, None
+        try:
+            from src.danmaku.bili_danmaku import (
+                BiliDanmakuService, DanmakuPicker, set_danmaku_picker,
+            )
+        except Exception as e:
+            console.warn(f"[弹幕] 模块导入失败：{e}")
+            return None, None, None
+
+        queue: asyncio.Queue = asyncio.Queue(maxsize=64)
+        loop = asyncio.get_running_loop()
+
+        def _on_pick(uid: int, username: str, text: str) -> None:
+            try:
+                loop.call_soon_threadsafe(queue.put_nowait, (uid, username, text))
+            except Exception as e:
+                console.error(f"[弹幕] 入队失败：{e}")
+
+        picker = DanmakuPicker(_on_pick)
+        set_danmaku_picker(picker)
+        svc = BiliDanmakuService()
+        svc.start()
+        task = asyncio.create_task(
+            self._danmaku_reply_loop(queue),
+            name="danmaku_reply_loop",
+        )
+        return picker, svc, task
+
+    # ---------- 可打断对话：用户自己说话 ----------
+
+    async def _interruptible_converse(self, text, on_llm_done=None,
+                                       profanity_filter=None,
+                                       profanity_filter_rate: float = 0.7) -> tuple:
+        """用户对话期间同时监听键盘/语音输入：到达即打断当前输出。
+
+        仅用户自己说话时运行：打断只能是用户打断自己；主动 / 弹幕无法并发
+        抢占（锁保护）。
+        """
+        tts = self.tts
+        face = self.face
+        sub = self.sub
+        stt = self.stt_engine
+        loop = asyncio.get_running_loop()
+        print()  # 回复起始换行
+        output_lock = get_output_lock()
+        async with output_lock:
+            set_output_owner("user")
+            try:
+                if tts is not None:
+                    try:
+                        tts.clear_interrupt()  # 新一轮输出：复位上一轮打断标志
+                    except Exception:
+                        pass
+                conv = asyncio.create_task(
+                    stream.converse(self.brain, text, tts=tts, face=face, sub=sub,
+                                    profanity_filter=profanity_filter,
+                                    profanity_filter_rate=profanity_filter_rate,
+                                    on_llm_done=on_llm_done))
+                input_fut = loop.run_in_executor(None, lambda: input(""))
+                _stdin_eof = False
+                stt_fut = stt.result_future() if stt is not None else None
+                watch = {conv, input_fut}
+                if stt_fut is not None:
+                    watch.add(stt_fut)
+                while True:
+                    done, _ = await asyncio.wait(
+                        watch, return_when=asyncio.FIRST_COMPLETED)
+                    buzz = ""
+                    got_input = False
+                    if input_fut is not None and input_fut in done:
+                        try:
+                            buzz = input_fut.result()
+                        except EOFError:
+                            _stdin_eof = True
+                            watch.discard(input_fut)
+                            input_fut = None
+                            continue
+                        got_input = True
+                        if not buzz.strip():
+                            watch.discard(input_fut)
+                            input_fut = loop.run_in_executor(None, lambda: input(""))
+                            watch.add(input_fut)
+                            continue
+                    elif stt_fut is not None and stt_fut in done:
+                        buzz = stt_fut.result()
+                        got_input = True
+                        old = stt_fut
+                        stt_fut = stt.result_future()
+                        watch.discard(old)
+                        watch.add(stt_fut)
+                        if not buzz.strip():
+                            continue
+                    if got_input:
+                        # 打断：立即闭嘴 → 取消 LLM 流
+                        console.dim("[打断] 用户输入/语音打断当前播报")
+                        if tts is not None:
+                            try:
+                                tts.interrupt()
+                            except Exception:
+                                pass
+                        if face is not None:
+                            try:
+                                face.stop_speaking()
+                            except Exception:
+                                pass
+                        if sub is not None:
+                            try:
+                                sub.push("clear", "")
+                            except Exception:
+                                pass
+                        conv.cancel()
+                        try:
+                            await conv
+                        except (asyncio.CancelledError, Exception):
+                            pass
+                        print()  # 打断换行
+                        buzz = buzz.strip()
+                        if stt_fut is not None and not stt_fut.done():
+                            stt_fut.cancel()
+                        if input_fut is not None and input_fut in done:
+                            return True, buzz, None
+                        print(f"[语音识别] {buzz}", flush=True)
+                        return True, buzz, None
+                    if conv in done:
+                        try:
+                            await conv
+                        except Exception as e:
+                            console.error(f"对话流程出错：{e}")
+                        if stt_fut is not None and not stt_fut.done():
+                            stt_fut.cancel()
+                        print()  # 回复结束换行
+                        if input_fut is not None and not input_fut.done():
+                            return False, "", input_fut
+                        return False, "", None
+            finally:
+                set_output_owner(None)
+
+    # ---------- 控制中心命令热更新：_dispatch ----------
+
+    async def _dispatch(self, cmd: str) -> bool:
+        """命令分发（!model / !config / !stt / !tools / /expr 等）。
+
+        消费返回 True（不进入 LLM）。所有热修改直接写 self.* 属性。
+        """
+        # 桌宠模式热切换模型
+        if cmd.startswith("!model "):
+            new_path = cmd[len("!model "):].strip()
+            if self.pet_widget is not None:
+                if self.pet_widget.switch_model(new_path):
+                    console.ok(f"已热切换桌宠模型：{new_path}")
+                else:
+                    console.error(f"模型切换失败：{new_path}（文件不存在）")
+            else:
+                console.dim("已收到模型切换指令（当前非桌宠模式，忽略）")
+            return True
+
+        # 资源清理
+        if cmd == "!clean":
+            from src.utils import cleaner
+            cleaner.cleanup_runtime_memory(verbose=True)
+            cleaner.cleanup_temp_files(verbose=True)
+            return True
+
+        # 工具热更新
+        if cmd == "!tools":
+            from src.utils import config as cfg_mod
+            cfg_mod.reload_tool_runtime()
+            if cfg_mod.cfg.MCP_ENABLED and cfg_mod.cfg.TOOLS_ENABLED:
+                if self.mcp is not None:
+                    await self.mcp.stop()
+                    self.mcp.is_enabled = True
+                    self.mcp.load_mcp_config()
+                    await self.mcp.start_all_servers()
+                else:
+                    self.mcp = MCPManager()
+                    await self.mcp.initialize()
+                    self.brain.mcp = self.mcp
+            else:
+                if self.mcp is not None:
+                    await self.mcp.stop()
+                    self.mcp = None
+                    self.brain.mcp = None
+            from src.llm.tools import get_merged_tools
+            merged = get_merged_tools(self.mcp)
+            if merged:
+                names = [t["function"]["name"] for t in merged]
+                console.ok(
+                    f"工具配置已热更新（{len(names)} 个）：{'、'.join(names)}")
+            else:
+                console.warn("工具配置已热更新：当前无可用工具（纯对话模式）")
+            return True
+
+        # 统一配置热更新
+        if cmd == "!config":
+            from src.utils import config as cfg_mod
+            cfg_mod.reload_config()
+            # LLM 客户端重建
+            self.brain.reload_client()
+            # 主动对话热启停
+            if cfg_mod.cfg.PROACTIVE_ENABLED and self.proactive is None:
+                self.proactive = ProactiveEngine(
+                    brain=self.brain, tts=self.tts, face=self.face, sub=self.sub,
+                    cfg=cfg_mod.cfg,
+                    butler=self.butler if cfg_mod.cfg.MEMORY_ENABLED else None,
+                    memory_manager=self.mm if cfg_mod.cfg.MEMORY_ENABLED else None,
+                    profanity_filter=self.pf,
+                    profanity_filter_rate=cfg_mod.cfg.PROFANITY_FILTER_RATE,
+                )
+                console.ok("主动对话已热启用")
+            elif not cfg_mod.cfg.PROACTIVE_ENABLED:
+                self.proactive = None
+                console.ok("主动对话已热关闭")
+            # 内容过滤热重建
+            if cfg_mod.cfg.PROFANITY_FILTER_ENABLED and self.pf is None:
+                self.pf = ProfanityFilter()
+                console.ok("内容过滤已热启用")
+            elif not cfg_mod.cfg.PROFANITY_FILTER_ENABLED:
+                self.pf = None
+                console.ok("内容过滤已热关闭")
+            # 记忆管家热重建
+            if cfg_mod.cfg.MEMORY_ENABLED and self.butler is None:
+                self.butler = ButlerAgent()
+                console.ok("记忆系统已热启用")
+            elif not cfg_mod.cfg.MEMORY_ENABLED:
+                self.butler = None
+                console.ok("记忆系统已热关闭")
+            # B 站弹幕热重建
+            was_on = self.bili_svc is not None
+            want_on = bool(cfg_mod.cfg.BILI_ENABLED and cfg_mod.cfg.BILI_ROOM_ID)
+            if was_on:
+                cancel = self._stop_bili()
+                self.danmaku_picker, self.bili_svc, self.danmaku_reply_task = None, None, None
+                if cancel is not None:
+                    try:
+                        await cancel
+                    except (asyncio.CancelledError, Exception):
+                        pass
+                if not want_on:
+                    console.ok("B 站弹幕服务已热关闭")
+            if want_on:
+                self.danmaku_picker, self.bili_svc, self.danmaku_reply_task = await self._start_bili()
+                if self.bili_svc is not None:
+                    console.ok(
+                        f"B 站弹幕服务已热启用（房间 {cfg_mod.cfg.BILI_ROOM_ID}）")
+            # 桌宠窗口置顶/尺寸/待机动作热应用
+            if self.pet_widget is not None:
+                self.pet_widget.apply_config(cfg_mod.cfg)
+            # 情绪控制热启停（仅桌宠模式生效）：开启时创建 actor 并加载映射，
+            # 关闭时置空（每轮用户消息的分类调用点自动跳过）；开启中则热重载映射
+            want_emotion = bool(cfg_mod.cfg.EMOTION_ACTOR_ENABLED)
+            if self.emotion_actor is not None and not want_emotion:
+                self.emotion_actor = None
+                console.ok("情绪控制已热关闭")
+            elif want_emotion:
+                if self.emotion_actor is None:
+                    if self.pet_widget is not None:
+                        from src.pet.emotion_actor import PetEmotionActor
+                        self.emotion_actor = PetEmotionActor(self.pet_widget, self.cfg)
+                        self.emotion_actor.scan()
+                        console.ok("情绪控制已热启用")
+                self.emotion_actor.load_map()
+            console.ok("配置已全部热更新（立即生效，无需重启）")
+            return True
+
+        # 语音识别热更新
+        if cmd == "!stt":
+            from src.utils import config as cfg_mod
+            cfg_mod.reload_tool_runtime()
+            if cfg_mod.cfg.STT_ENABLED:
+                if self.stt_engine is not None:
+                    self.stt_engine.stop()
+                    self.stt_engine = None
+                try:
+                    from src.asr.stt import STTEngine
+                    self.stt_engine = STTEngine(cfg_mod.cfg)
+                    self.stt_engine.start()
+                    console.ok(
+                        "语音识别已开启：对着麦克风说话即可输入"
+                        f"（{cfg_mod.cfg.STT_MODEL}）")
+                except Exception as e:
+                    console.warn(f"语音识别启动失败：{e}")
+            elif self.stt_engine is not None:
+                self.stt_engine.stop()
+                self.stt_engine = None
+                console.ok("语音识别已关闭")
+            return True
+
+        # TTS 参考音频 / 文本热更新
+        if self.tts is not None and cmd.startswith("!tts_audio "):
+            new_audio = cmd[len("!tts_audio "):].strip()
+            self.tts.apply_ref(new_audio, self.tts.ref_text)
+            if new_audio:
+                console.ok(f"已热更新 TTS 参考音频：{new_audio}")
+            else:
+                console.warn("TTS 参考音频已清空，语音合成已关闭")
+            return True
+        if self.tts is not None and cmd.startswith("!tts_text "):
+            new_text = cmd[len("!tts_text "):].strip()
+            self.tts.apply_ref(self.tts.ref_audio, new_text)
+            console.ok(f"已热更新 TTS 参考音频文本：{new_text}")
+            return True
+
+        # 桌宠表情/动作命令
+        if self.emotion_actor is not None and cmd.startswith("/"):
+            await self.emotion_actor.handle(cmd)
+            return True
+        return False
+
+    # ---------- 主运行入口 ----------
+
+    async def run(self) -> None:
+        """原 main() 的完整生命周期：初始化 → 主循环 → 资源清理。"""
+        self.cfg = config.cfg
+        self.cfg.validate()
+
+        # 启动清理上次残留临时文件
+        try:
+            from src.utils import cleaner
+            cleaner.cleanup_temp_files(verbose=False)
+        except Exception:
+            pass
+
+        # —— 渲染/驱动目标 ——
+        self.pet_widget = None
+        self.vts: "VTSController | None" = None
+        vts_ok = False
+        self.face: "FaceDriver | None" = None
+        self.emotion_actor = None
+
+        if self.cfg.RUN_MODE == "pet":
+            from src.pet.widget import PetWidget, BubbleSub
+            from src.pet.driver import PetFaceDriver
+
+            console.header("E.V")
+            console.kv("模型", f"{self.cfg.LLM_MODEL}（深度思考 {'开' if self.cfg.LLM_THINKING else '关'}）")
+            console.kv("桌宠", os.path.basename(self.cfg.PET_MODEL_PATH))
+            console.dim("拖动模型移动位置 | 点击模型播放动作 | 输入 /quit 退出")
+            if self.cfg.EMOTION_ACTOR_ENABLED:
+                console.dim("表情/动作：Embedding 情绪自动控制已启用（用户消息分类情绪播放；"
+                            "也可用 /expr /motion /face list 手动控制）")
+
+            self.pet_widget = PetWidget(self.cfg)
+            self.pet_widget.show()
+            if self.cfg.EMOTION_ACTOR_ENABLED:
+                from src.pet.emotion_actor import PetEmotionActor
+                self.emotion_actor = PetEmotionActor(self.pet_widget, self.cfg)
+                self.emotion_actor.scan()
+                self.emotion_actor.load_map()
+                self.pet_widget.on_model_loaded = lambda w: self.emotion_actor.scan()
+            self.face = PetFaceDriver(self.pet_widget, self.cfg)
+            self.pet_widget.attach_driver(self.face)
+            self.face.start()
+            if self.cfg.PET_MOTION_PATH:
+                self.face.set_motion(self.cfg.PET_MOTION_PATH)
+            self.sub = BubbleSub(self.pet_widget)
+
+            # 桌宠模型热切换兜底监控
+            async def _watch_pet_model_change() -> None:
+                env_file = os.path.join(self.cfg.PROJECT_ROOT, ".env")
+                active = str(self.cfg.PET_MODEL_PATH or "").strip()
+                while True:
+                    await asyncio.sleep(2.0)
+                    try:
+                        if not os.path.isfile(env_file):
+                            continue
+                        new_path = ""
+                        with open(env_file, "r", encoding="utf-8") as f:
+                            for line in f:
+                                line = line.strip()
+                                if line.startswith("PET_MODEL_PATH="):
+                                    new_path = line.split("=", 1)[1].strip()
+                                    new_path = new_path.strip('"').strip("'")
+                                    break
+                        if new_path and new_path != active:
+                            active = new_path
+                            if self.pet_widget.switch_model(new_path):
+                                console.ok(
+                                    f"检测到模型配置变更，已热切换桌宠：{new_path}")
+                            else:
+                                console.warn(f"模型配置变更但切换失败：{new_path}")
+                    except Exception:
+                        pass
+
+            asyncio.create_task(_watch_pet_model_change())
+        else:
+            console.header("E.V")
+            console.kv("模型", f"{self.cfg.LLM_MODEL}（深度思考 {'开' if self.cfg.LLM_THINKING else '关'}）")
+            console.kv("VTS", f"端口 {self.cfg.VTS_PORT}")
+            console.dim("AI 全权接管：自动眨眼 / 呼吸 / 身体摇摆 | 基线动画由 .motion3.json 驱动")
+            console.dim("输入 /quit 退出")
+
+            self.vts = VTSController()
+            vts_ok = await self.vts.connect()
+            if not vts_ok:
+                console.warn("将以「纯对话」模式运行，无口型/动作/表情控制。")
+
+            self.sub = SubtitleServer().start()
+            console.dim(f"字幕网页：http://127.0.0.1:{self.sub.port}/（打字机效果，浏览器打开即可）")
+
+        # ButlerAgent 记忆管家
+        if self.cfg.MEMORY_ENABLED:
+            self.butler = ButlerAgent()
+        else:
+            self.butler = None
+
+        # MCP 管理器
+        self.mcp = MCPManager() if (self.cfg.MCP_ENABLED and self.cfg.TOOLS_ENABLED) else None
+        if self.mcp is not None:
+            await self.mcp.initialize()
+        from src.llm.tools import get_merged_tools
+        merged_tools = get_merged_tools(self.mcp)
+        if merged_tools:
+            names = [t["function"]["name"] for t in merged_tools]
+            console.dim(f"工具已就绪（{len(names)} 个）：{'、'.join(names)}")
+        else:
+            console.dim("无可用工具：AI 将以纯对话模式运行（MCP 未启用且未配置搜索/天气 key）")
+
+        # 技能系统
+        from src.llm.tools.skills import get_skill_manager
+        skill_mgr = get_skill_manager()
+        if skill_mgr.skills:
+            names = [s.name for s in skill_mgr.skills]
+            console.dim(f"技能已就绪（{len(names)} 个）：{'、'.join(names)}"
+                        f"（load_skill 按需加载，改文件无需重启）")
+        else:
+            console.dim("技能目录为空：未发现技能（SKILLS_DIR/<技能名>/SKILL.md）")
+
+        # 运行时 try/finally 保护
+        self.mm: "memory.MemoryManager | None" = None
+        self.stt_engine = None
+        self.bili_svc = None
+        self.danmaku_picker = None
+        self.danmaku_reply_task = None
+        self._pending_stdin_fut = None  # 交还复用的 stdin 监听
+        try:
+            # vtuber 模式：启动时模型扫描适配
+            profile = None
+            if vts_ok and self.vts is not None:
+                profile = await scan_model(self.vts, self.cfg)
+                if self.cfg.MOUTH_PARAMETER and profile.mouth_param:
+                    profile.mouth_param = self.cfg.MOUTH_PARAMETER
+                if profile.mouth_param:
+                    self.cfg.MOUTH_PARAMETER = profile.mouth_param
+                    self.cfg.MOUTH_GAIN = profile.mouth_gain
+
+                self.face = FaceDriver(self.vts, profile)
+                self.face.start()
+                if self.cfg.MOTION_PATH:
+                    self.face.set_motion(self.cfg.MOTION_PATH)
+
+            # TTS 引擎
+            self.tts = None
+            if self.cfg.GPTSOVITS_REF_AUDIO:
+                self.tts = TTSEngine()
+                tts_ok = await self.tts.start()
+                if not tts_ok:
+                    self.tts = None
+                else:
+                    def _on_tts_play(wav: str, text: str, dur_s: float) -> None:
+                        if not self.face.load_speech_curve(wav):
+                            self.face.start_speaking(dur_s)
+                        if self.sub and text:
+                            chars = max(1, len(text))
+                            self.sub.push("text", text, speed_ms=dur_s * 1000 / chars)
+
+                    self.tts.set_on_play_callback(_on_tts_play)
+                    if self.sub:
+                        self.tts.set_subtitle_callback(lambda t: self.sub.push("text", t))
+
+            # 内容过滤（弹幕回复 / 主动对话 / 用户对话共用，需在引擎创建前就绪）
+            self.pf = ProfanityFilter() if self.cfg.PROFANITY_FILTER_ENABLED else None
+            if self.pf is not None:
+                console.dim(f"内容过滤已启用：检测到骂人用语时 "
+                            f"{self.cfg.PROFANITY_FILTER_RATE:.0%} 概率触发（替换为 Filter）")
+
+            # 初始化记忆系统
+            self.mm = memory.get_manager()
+            self.mm.load()
+            self.mm.new_session()
+            if self.cfg.MEMORY_ENABLED:
+                asyncio.create_task(memory.warmup())
+
+            self.brain = LLMBrain(mcp=self.mcp)
+
+            if self.cfg.MEMORY_ENABLED:
+                console.dim(f"记忆系统：已启用（{memory.count()} 个记忆文件）")
+
+            # 主动对话引擎
+            self.proactive = None
+            if self.cfg.PROACTIVE_ENABLED:
+                self.proactive = ProactiveEngine(
+                    brain=self.brain, tts=self.tts, face=self.face, sub=self.sub, cfg=self.cfg,
+                    butler=self.butler if self.cfg.MEMORY_ENABLED else None,
+                    memory_manager=self.mm if self.cfg.MEMORY_ENABLED else None,
+                    profanity_filter=self.pf,
+                    profanity_filter_rate=self.cfg.PROFANITY_FILTER_RATE,
+                )
+                console.dim(
+                    f"主动对话已启用：安静 {self.cfg.PROACTIVE_MIN_IDLE_SECONDS:.0f}s 后"
+                    f"可能主动开口（每 {self.cfg.PROACTIVE_TICK_SECONDS:.0f}s 心跳检查，"
+                    f"发言冷却 {self.cfg.PROACTIVE_COOLDOWN_SECONDS / 60:.0f}min）")
+            else:
+                console.dim("主动对话未启用（.env 设置 PROACTIVE_ENABLED=true 开启）")
+
+            # 语音识别
+            if self.cfg.STT_ENABLED:
+                try:
+                    from src.asr.stt import STTEngine
+                    self.stt_engine = STTEngine(self.cfg)
+                    self.stt_engine.start()
+                    console.dim(
+                        f"语音识别已启用：对着麦克风说话即可输入"
+                        f"（{self.cfg.STT_MODEL}，静音 {self.cfg.STT_SILENCE_SECONDS:.0f}s 自动切段）")
+                except Exception as e:
+                    self.stt_engine = None
+                    console.warn(f"语音识别启动失败（可忽略）：{e}")
+            else:
+                console.dim("语音识别未启用（.env 设置 STT_ENABLED=true 开启）")
+
+            # B 站弹幕服务启动
+            self.danmaku_picker, self.bili_svc, self.danmaku_reply_task = await self._start_bili()
+
+            # VTS 模型切换事件订阅
+            if vts_ok:
+                _scanning = False
+
+                async def _rescan_on_model_switch(msg: dict) -> None:
+                    nonlocal _scanning
+                    if not msg.get("data", {}).get("modelLoaded") or _scanning:
+                        return
+                    console.info("检测到模型切换，暂停伪面捕并重新扫描适配...")
+                    _scanning = True
+                    try:
+                        await self.face.stop()
+                        new_profile = await scan_model(self.vts, self.cfg)
+                        if not new_profile.model_name:
+                            console.warn("新模型未加载，跳过适配（保留当前状态）")
+                            return
+                        if self.cfg.MOUTH_PARAMETER and new_profile.mouth_param:
+                            new_profile.mouth_param = self.cfg.MOUTH_PARAMETER
+                        if new_profile.mouth_param:
+                            self.cfg.MOUTH_PARAMETER = new_profile.mouth_param
+                            self.cfg.MOUTH_GAIN = new_profile.mouth_gain
+                        self.face.apply_profile(new_profile)
+                        console.ok(f"已适配新模型「{new_profile.model_name}」")
+                        if self.cfg.MOTION_PATH:
+                            self.face.set_motion(self.cfg.MOTION_PATH)
+                    finally:
+                        _scanning = False
+                        self.face.start()
+
+                self.vts.on_event("ModelLoadedEvent", _rescan_on_model_switch)
+                if await self.vts.subscribe_event("ModelLoadedEvent"):
+                    console.dim("已订阅模型切换事件：运行中切换模型将自动重新适配")
+
+            # ===== 主循环：等待输入 → 命令或对话 =====
+            quitting = False
+            show_prompt = True
+            while not quitting:
+                try:
+                    user_text = await self._wait_input(show_prompt=show_prompt)
+                except (EOFError, KeyboardInterrupt):
+                    print()
+                    break
+                self._pending_stdin_fut = None
+                show_prompt = True
+                while user_text:
+                    user_text = user_text.strip()
+                    if not user_text:
+                        break
+                    if user_text in ("/quit", "/exit", "/q"):
+                        quitting = True
+                        break
+                    if await self._dispatch(user_text):
+                        show_prompt = False
+                        break
+                    # 用户发言：重置主动引擎状态
+                    if self.proactive is not None:
+                        self.proactive.on_user_message()
+
+                    # 桌宠：用户消息分类情绪 → 后台播放表情/动作
+                    if self.emotion_actor is not None:
+                        asyncio.create_task(self.emotion_actor.handle(user_text))
+
+                    # 每轮对话性能埋点
+                    turn_tracker = PerfTracker("本轮对话")
+                    turn_tracker.begin("端到端")
+
+                    # 用户输入推送到字幕网页
+                    self.sub.push("user", user_text)
+
+                    # 注意：这里**不过滤用户输入**（按用户要求）。
+                    # 内容过滤只在三处生效：AI 回复句子、观众弹幕原文、主动对话播报。
+                    # 记忆也存原文（Butler 可以看到真实的骂人话帮 AI 决定应对策略）。
+
+                    _turn_user = user_text
+                    try:
+                        async def _on_llm_done(reply_text: str) -> None:
+                            if not (self.cfg.MEMORY_ENABLED and self.butler):
+                                return
+                            try:
+                                self.mm.add_turn("user", _turn_user)
+                                self.mm.add_turn("muika", reply_text)
+                                await self.butler.submit_extract_and_store(
+                                    [{"role": "user", "content": _turn_user},
+                                     {"role": "assistant", "content": reply_text}],
+                                    self.mm.recent_turns[:-2],
+                                )
+                            except Exception as e:
+                                console.dim(f"[ButlerAgent] 记忆提取出错（不影响对话）：{e}")
+
+                        interrupted, buzz, pending = await self._interruptible_converse(
+                            user_text,
+                            on_llm_done=_on_llm_done if self.cfg.MEMORY_ENABLED else None,
+                            profanity_filter=self.pf,
+                            profanity_filter_rate=self.cfg.PROFANITY_FILTER_RATE,
+                        )
+                        self._pending_stdin_fut = pending
+                    except Exception as e:
+                        console.error(f"对话流程出错：{e}")
+                        interrupted, buzz, self._pending_stdin_fut = False, "", None
+
+                    turn_tracker.end("端到端")
+                    turn_tracker.print_report()
+
+                    if interrupted:
+                        user_text = buzz
+                    else:
+                        break
+
+            console.dim("再见～")
+        finally:
+            # 会话结束归档 + 蒸馏
+            if self.cfg.MEMORY_ENABLED and self.butler is not None and self.mm is not None:
+                try:
+                    turns = self.mm.recent_turns
+                    summary = await self.butler.summarize_session(turns[-30:])
+                    if summary:
+                        await self.mm.update_archive_async(
+                            summary=summary,
+                            period_start=self.mm.started_at or turns[0].get("timestamp", ""),
+                            period_end=datetime.now().isoformat(),
+                        )
+                    await self.butler.distill_session(turns[-30:])
+                except Exception as e:
+                    console.warn(f"会话摘要/蒸馏失败（不影响退出）：{e}")
+
+            # 清理：停弹幕 → 停字幕 → 排空 TTS → 关 TTS → 停面捕 → 关 VTS
+            cancel = self._stop_bili()
+            self.danmaku_picker, self.bili_svc, self.danmaku_reply_task = None, None, None
+            if cancel is not None:
+                try:
+                    await cancel
+                except (asyncio.CancelledError, Exception):
+                    pass
+            self.sub.stop()
+            if self.stt_engine is not None:
+                self.stt_engine.stop()
+            if self.mcp is not None:
+                try:
+                    await asyncio.wait_for(self.mcp.stop(), timeout=15)
+                except Exception:
+                    pass
+            if self.tts is not None:
+                try:
+                    await asyncio.wait_for(self.tts.drain(), timeout=15)
+                    await asyncio.wait_for(self.tts.stop(), timeout=15)
+                except Exception:
+                    pass
+            if self.face is not None:
+                try:
+                    await asyncio.wait_for(self.face.stop(), timeout=10)
+                except Exception:
+                    pass
+            if self.vts is not None:
+                try:
+                    await asyncio.wait_for(self.vts.close(), timeout=10)
+                except Exception:
+                    pass
+
+
+async def run_with_cleanup() -> None:
+    """运行 Application.run()；退出（含被取消）时关记忆连接 + 清理临时文件。"""
+    try:
+        await Application().run()
+    finally:
+        try:
+            await memory.aclose()
+        except Exception:
+            pass
+        try:
+            from src.utils import cleaner
+            cleaner.cleanup_temp_files(verbose=False)
+        except Exception:
+            pass
