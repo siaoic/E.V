@@ -165,8 +165,8 @@ async def startup_event():
         tts.init_language_module("zh", "en", "ja")
         # 默认使用 Neuro 模型（与主程序参考音频配套）；如需其他模型改这两行即可
         neuro_dir = Path(__file__).resolve().parents[1] / "API" / "models"
-        tts.load_gpt_model(str(neuro_dir / "Neuro-e15.ckpt"))
-        tts.load_sovits_model(str(neuro_dir / "Neuro_e8_s1712.pth"))
+        tts.load_gpt_model(str(neuro_dir / "恩骨v2-e15.ckpt"))
+        tts.load_sovits_model(str(neuro_dir / "恩骨v2_e8_s584.pth"))
         print("✅ TTS 模型与语言模块已预加载")
     except Exception as e:
         print(f"⚠️ TTS 预加载失败（不影响使用）：{e}")

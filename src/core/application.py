@@ -20,7 +20,7 @@ logging.getLogger("openai").setLevel(logging.WARNING)
 from src.memory import memory
 from src.llm import stream
 from src.utils.content_filter import ProfanityFilter
-from src.llm.butler_agent import ButlerAgent
+from src.llm.agent import ButlerAgent
 from src.mcp.manager import MCPManager
 from src.llm.proactive import ProactiveEngine
 from src.vts.face_driver import FaceDriver
@@ -38,10 +38,10 @@ from src.core.output_lock import (
 class Application:
     """封装整份运行时状态：原 main() 内的局部变量全部变为 self 属性。"""
 
-    # ---------- 输入等待：轮询 + 心跳主动引擎 ----------
+    # ---------- 输入等待：事件驱动心跳 + 输入监听 ----------
 
     async def _wait_input(self, show_prompt: bool = True) -> str:
-        """轮询式输入：等待用户输入，空闲心跳期间由主动引擎决定是否开口。
+        """事件驱动输入等待：等待用户输入，互动/弹幕回复结束时做一次心跳检查。
 
         主动对话 / 弹幕回复在播报期间，本方法收到的任何键盘 / 语音识别输入
         会被**直接丢弃**（不返回给主循环、也不缓存）——确保「说话期间
@@ -58,15 +58,37 @@ class Application:
             # 未启用主动对话/语音识别：纯阻塞等待（与原行为一致）
             return await input_fut
         stt_fut = self.stt_engine.result_future() if self.stt_engine is not None else None
+        wake_task = None
         while True:
             pending = {input_fut}
             if stt_fut is not None:
                 pending.add(stt_fut)
-            timeout = (self.proactive.tick_seconds
-                       if self.proactive is not None else 0.2)
+            if self.proactive is not None:
+                # 事件驱动心跳 + 单次精确唤醒（无周期轮询）：平时等「互动结束
+                # 事件」或「下一个有意义时刻」（无聊/孤独到阈值、话题超时）的
+                # 精确超时，到点只醒一次做心跳，而不是固定间隔轮询。
+                if wake_task is None or wake_task.done():
+                    wake_task = asyncio.create_task(self.proactive._wakeup.wait())
+                pending.add(wake_task)
+            timeout = (self.proactive.next_wake_in()
+                       if self.proactive is not None else None)
             done, _ = await asyncio.wait(
                 pending, timeout=timeout,
                 return_when=asyncio.FIRST_COMPLETED)
+
+            if wake_task is not None and wake_task in done:
+                # 事件触发（互动结束）：重置事件并立即心跳
+                self.proactive._wakeup.clear()
+                print()
+                try:
+                    await self.proactive.heartbeat()
+                except Exception as e:
+                    import traceback as _tb
+                    console.error(
+                        f"主动对话心跳出错：{e}\n"
+                        f"{''.join(_tb.format_exception(type(e), e, e.__traceback__))}")
+                print("你 > ", end="", flush=True)
+                continue
 
             if input_fut in done:
                 text = input_fut.result()
@@ -91,9 +113,9 @@ class Application:
 
             if self.proactive is None:
                 continue
-            # 换行：让心跳日志 / 主动发言独占一行，不与「你 > 」粘连
+            # 单次精确唤醒到点：做一次心跳（可能触发主动发言），随后重新计算
+            # 下一次唤醒时刻
             print()
-            # 空闲心跳：可能触发主动发言（内部等待其播完，随后继续等输入）
             try:
                 await self.proactive.heartbeat()
             except Exception as e:
@@ -101,7 +123,6 @@ class Application:
                 console.error(
                     f"主动对话心跳出错：{e}\n"
                     f"{''.join(_tb.format_exception(type(e), e, e.__traceback__))}")
-            # 心跳日志已换行打印，重印提示符等待输入
             print("你 > ", end="", flush=True)
 
     # ---------- 弹幕回复：_chat_danmaku + 队列循环 + 启停辅助 ----------
@@ -365,11 +386,68 @@ class Application:
 
     # ---------- 控制中心命令热更新：_dispatch ----------
 
+    async def _speak_memory_reply(self, text: str) -> None:
+        """记忆指令确认播报：控制台 + 字幕 + TTS（走全局输出锁，互斥不打断）。"""
+        if self.sub is not None:
+            self.sub.push("text", text)
+        if self.tts is None:
+            console.ok(text)
+            return
+        output_lock = get_output_lock()
+        async with output_lock:
+            set_output_owner("command")
+            try:
+                self.tts.clear_interrupt()
+                await self.tts.speak(text)
+                await self.tts.drain()
+            finally:
+                set_output_owner(None)
+
+    async def _handle_memory_command(self, cmd: str) -> bool:
+        """/memory 子命令：list 列出｜del <id>... 删除｜clear 清空｜decay 衰减。"""
+        parts = cmd.split()
+        sub = parts[1] if len(parts) > 1 else ""
+        mm = self.mm
+        if mm is None:
+            console.dim("记忆系统不可用")
+            return True
+        if sub == "list":
+            files = mm.list_files(limit=200)
+            console.header("记忆列表")
+            if not files:
+                console.dim("暂无记忆（多和 E.V 聊聊天，会话结束会自动蒸馏）")
+            for f in files:
+                console.kv(str(f.get("id") or "-")[:16],
+                           f"{f.get('name') or ''}｜{(f.get('content') or '')[:60]}")
+            return True
+        if sub == "del" and len(parts) >= 3:
+            ids = [p for p in parts[2:] if p]
+            deleted = await mm.delete_memories_async(ids)
+            console.ok(f"已删除 {deleted} 条记忆")
+            await self._speak_memory_reply(f"已经删除 {deleted} 条记忆")
+            return True
+        if sub == "clear":
+            mm.clear_all()
+            console.ok("已清空全部记忆")
+            await self._speak_memory_reply("已经清空全部记忆")
+            return True
+        if sub == "decay":
+            n = await asyncio.to_thread(memory.decay_stale_memories)
+            console.ok(f"记忆衰减完成，清理 {n} 条")
+            return True
+        console.dim("用法：/memory list ｜ /memory del <id>... ｜ "
+                    "/memory clear ｜ /memory decay")
+        return True
+
     async def _dispatch(self, cmd: str) -> bool:
-        """命令分发（!model / !config / !stt / !tools / /expr 等）。
+        """命令分发（!model / !config / !stt / !tools / /expr / /memory 等）。
 
         消费返回 True（不进入 LLM）。所有热修改直接写 self.* 属性。
         """
+        # 记忆管理命令（/memory list｜del｜clear｜decay）
+        if cmd.startswith("/memory"):
+            return await self._handle_memory_command(cmd)
+
         # 桌宠模式热切换模型
         if cmd.startswith("!model "):
             new_path = cmd[len("!model "):].strip()
@@ -707,6 +785,8 @@ class Application:
             self.mm.new_session()
             if self.cfg.MEMORY_ENABLED:
                 asyncio.create_task(memory.warmup())
+                # 记忆时间衰减：后台定时清理长期未更新的非固定记忆
+                asyncio.create_task(memory.decay_loop())
 
             self.brain = LLMBrain(mcp=self.mcp)
 
@@ -724,8 +804,8 @@ class Application:
                     profanity_filter_rate=self.cfg.PROFANITY_FILTER_RATE,
                 )
                 console.dim(
-                    f"主动对话已启用：安静 {self.cfg.PROACTIVE_MIN_IDLE_SECONDS:.0f}s 后"
-                    f"可能主动开口（每 {self.cfg.PROACTIVE_TICK_SECONDS:.0f}s 心跳检查，"
+                    f"主动对话已启用：随机+事件混合触发（互动/弹幕结束即检查，"
+                    f"静默期随机开口，安静 {self.cfg.PROACTIVE_MIN_IDLE_SECONDS:.0f}s 内不开口，"
                     f"发言冷却 {self.cfg.PROACTIVE_COOLDOWN_SECONDS / 60:.0f}min）")
             else:
                 console.dim("主动对话未启用（.env 设置 PROACTIVE_ENABLED=true 开启）")

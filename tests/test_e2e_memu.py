@@ -1,7 +1,10 @@
 """vtuber MemoryManager 端到端集成测试（memU 后端）。"""
 import asyncio
+import os
 import sys
-sys.path.insert(0, r'e:\AI\vtuber\src')
+
+# 从项目根导入（src 包在根目录下）
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from src.memory.memory import get_manager, retrieve, _USER_SELF, _USER_DEFAULT
 
@@ -19,7 +22,8 @@ async def test_e2e():
          "content": "今天心情不错，聊了很多有趣的话题", "user": "chao"},
     ]
     results = await mm.commit_recall_files(files)
-    print(f"commit: {len(results)} results, events: {[r.get('event') for r in results]}")
+    committed = results.get("recall_files") or []
+    print(f"commit: {len(committed)} committed")
 
     # 2. list_files
     listed = mm.list_files(limit=100)
@@ -43,7 +47,7 @@ async def test_e2e():
          "content": "喜欢茶和清晨散步", "user": "chao"},
     ]
     results2 = await mm.commit_recall_files(updated)
-    print(f"re-commit: {len(results2)} results, events: {[r.get('event') for r in results2]}")
+    print(f"re-commit: {len(results2.get('recall_files') or [])} committed")
 
     # 6. verify old content gone
     prompt2 = await retrieve("咖啡", top_k=5, user="chao")

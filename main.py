@@ -3,6 +3,16 @@
 业务逻辑、主循环、资源初始化全部在 src/core/application.py。
 """
 
+# PySide6 6.11 的 shibokensupport 钩子会在每个模块导入后调用 inspect.getsource
+# 检查是否使用 PySide6（PYSIDE-2029）。six 的动态伪模块 six.moves 没有真实源码，
+# Python 3.12 在 repr 它时会访问 loader._path，而 six 的 _SixMetaPathImporter
+# 缺少该属性导致 AttributeError（dateutil 等库导入 six.moves 时触发）。
+# 提前补上 _path 属性可绕开此兼容性问题。必须在任何可能触发该钩子的
+# import（PySide6 / gsv_tts / transformers 链）之前执行，否则启动即崩。
+import six
+if not hasattr(six._SixMetaPathImporter, "_path"):
+    six._SixMetaPathImporter._path = []
+
 import asyncio
 import os
 import sys

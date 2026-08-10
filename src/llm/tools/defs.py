@@ -82,4 +82,42 @@ _LOCAL_TOOL_DEFS: List[dict] = [
             },
         },
     },
+    {
+        "type": "function",
+        "function": {
+            "name": "remember_fact",
+            "description": "把用户明确要求记住的信息保存为长期记忆（固定记忆，不受时间衰减影响）。"
+                           "仅当用户给出明确的记忆指令（如「记住xxx」「帮我记住xxx」「一定要记住xxx」）"
+                           "时调用；不要把普通聊天内容当成记忆写入。",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "fact": {
+                        "type": "string",
+                        "description": "要记住的事实内容（用户原话或提炼后的完整事实）",
+                    },
+                },
+                "required": ["fact"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "forget_memory",
+            "description": "删除与关键词相关的长期记忆。当用户明确要求遗忘某事"
+                           "（如「忘掉xxx」「把xxx忘了」「别再记得xxx」）时调用；"
+                           "若没有匹配到任何记忆，直接告诉用户没找到即可。",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "keyword": {
+                        "type": "string",
+                        "description": "要遗忘的记忆关键词（记忆内容或名称包含它才会被删）",
+                    },
+                },
+                "required": ["keyword"],
+            },
+        },
+    },
 ]

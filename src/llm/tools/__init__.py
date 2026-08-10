@@ -12,6 +12,7 @@
   - load_skill(name)     按名加载技能完整指令（严格参照 Muika _skill.py）
   - read_skill_resource(name, path)  按相对路径读取技能捆绑资源（渐进式披露）
   - skills.py           技能管理器（技能注册表 + watchdog 热重载，技能工具的数据源）
+  - memory_tools.py     记忆管理：remember_fact / forget_memory（LLM 自行判断写入/遗忘）
 """
 
 from __future__ import annotations
@@ -26,6 +27,7 @@ from src.llm.tools.web_search import _web_search
 from src.llm.tools.time import _get_current_time
 from src.llm.tools.weather import _get_weather
 from src.llm.tools.skill_loader import _load_skill, _read_skill_resource
+from src.llm.tools.memory_tools import _remember_fact, _forget_memory
 
 __all__ = [
     "get_merged_tools",
@@ -46,6 +48,8 @@ _LOCAL_REGISTRY = {
     "get_weather": _get_weather,
     "load_skill": _load_skill,
     "read_skill_resource": _read_skill_resource,
+    "remember_fact": _remember_fact,
+    "forget_memory": _forget_memory,
 }
 
 
@@ -85,6 +89,10 @@ def get_merged_tools(mcp=None) -> List[dict]:
     if config.cfg.TOOL_LOAD_SKILL_ENABLED:
         available_names.add("load_skill")
         available_names.add("read_skill_resource")
+    # 记忆工具跟随记忆系统开关（LLM 自行判断何时「记住/忘掉」）
+    if config.cfg.MEMORY_ENABLED:
+        available_names.add("remember_fact")
+        available_names.add("forget_memory")
 
     # MCP 已提供 Tavily 官方搜索（tavily-search/tavily-extract）时，
     # 隐藏本地 web_search，避免两个搜索工具让 LLM 选择混乱（对标 Tavily MCP 文档）
@@ -138,4 +146,7 @@ def get_local_tool_names() -> List[str]:
     if config.cfg.TOOL_LOAD_SKILL_ENABLED:
         names.add("load_skill")
         names.add("read_skill_resource")
+    if config.cfg.MEMORY_ENABLED:
+        names.add("remember_fact")
+        names.add("forget_memory")
     return sorted(names)

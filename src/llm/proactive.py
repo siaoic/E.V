@@ -1,7 +1,7 @@
 """主动对话引擎 —— 严格参照 Muika-After-Story 1.4.1 的主动机制。
 
 机制映射（Muika → 本项目）：
-  loop.collect_events 的 5s 心跳 tick   → heartbeat() 空闲轮询 tick
+  loop.collect_events 的 5s 心跳 tick   → heartbeat() 事件驱动检查（互动结束时触发）
   state.MuikaState 状态累积              → loneliness / boredom / curiosity / mood
   loop.get_think_mode 触发判定           → _should_trigger()（emotional / topic / None）
   loop._run_topic_pipeline               → 话题管线（TopicManager 选择 + expand_topic 扩写）
@@ -18,7 +18,8 @@ agent 分工（用户确认的架构：主动发言交给 agent，agent 催促�
   - 关闭记忆（无 agent）时回退内置简化 prompt
 
 与 Muika 的差异（适配本项目的控制台 REPL 场景）：
-  - 不引入完整事件系统，用最简轮询心跳（主循环 asyncio.wait 超时即 tick）
+  - 不引入完整事件系统，用事件驱动心跳 + 单次精确唤醒（互动结束事件
+    立即检查；静默期算好「下一个有意义时刻」到点只醒一次，无周期轮询）
   - 话题冷却 / 互动率用内存记录（Muika 用 SQLite TopicHistory）
   - 话题发言后进入 active_topic：期间心跳不再触发任何发言（防打断），
     用户回应则话题结束并记录互动（engaged），10 分钟无回应自动结束
@@ -26,6 +27,7 @@ agent 分工（用户确认的架构：主动发言交给 agent，agent 催促�
     PROACTIVE_COOLDOWN 是「两次主动情绪发言的最小间隔」），话题发言不受限
 """
 
+import asyncio
 import os
 import random
 import sys
@@ -128,10 +130,11 @@ def _load_topic_seeds() -> List[dict]:
 
 
 class ProactiveEngine:
-    """主动对话引擎：空闲心跳 → 状态累积 → 触发判定 → agent 准备发言 → 主模型开口。
+    """主动对话引擎：事件驱动心跳 → 状态累积 → 触发判定 → agent 准备发言 → 主模型开口。
 
-    主循环用 `_wait_input` 轮询等待用户输入，每次超时（tick）调用
-    `heartbeat()`；触发后由 ButlerAgent（若启用）组装发言请求，主模型
+    主循环 `_wait_input` 等待用户输入，互动/弹幕回复结束的唤醒事件到达时
+    调用 `heartbeat()`；静默期靠 next_wake_in() 单次精确唤醒（到点才醒一次，
+    无周期轮询）。触发后由 ButlerAgent（若启用）组装发言请求，主模型
     （stream.converse）生成并播报，走与用户对话相同的 TTS/字幕/口型管线。
     """
 
@@ -150,7 +153,6 @@ class ProactiveEngine:
         # 全局输出互斥锁（模块单例，三方共用） + 说话者身份标记
         self._output_lock = get_output_lock()
 
-        self.tick_seconds = max(1.0, cfg.PROACTIVE_TICK_SECONDS)
         # 状态（对标 MuikaState）：随空闲时间线性累积，用户发言清孤独
         self.loneliness = 0.0
         self.boredom = 0.0
@@ -161,6 +163,18 @@ class ProactiveEngine:
         self.last_proactive_at: Optional[datetime] = None  # 仅情绪发言记录（冷却）
         self.active_topic: Optional[dict] = None  # 活跃话题（对标 ActiveTopicState）
         self._last_tick = time.time()
+        # 事件驱动心跳（对标 NagaAgent Heartbeat v3）：on_user_message
+        # （互动/弹幕回复结束）时 set，主循环立即醒来做一次心跳检查；
+        # 静默期由 next_wake_in() 单次精确唤醒兜底（无周期轮询）。
+        self._wakeup = asyncio.Event()
+        # 随机唤醒点（随机+事件混合触发，不用「定时回复」）：静默期下一个
+        # 「可能随机开口」的时刻，到点掷骰子决定是否开口；未命中则重采样
+        # 下一个随机点——说话时机不可预测，不依赖孤独/无聊定时累积到阈值。
+        self._random_enabled = bool(cfg.PROACTIVE_RANDOM_ENABLED)
+        self._random_chance = max(
+            0.0, min(1.0, float(cfg.PROACTIVE_RANDOM_CHANCE or 0.25)))
+        self._random_max_wait = max(1e-6, float(cfg.PROACTIVE_RANDOM_MAX_WAIT or 180))
+        self._next_random_at = time.time() + random.uniform(0, self._random_max_wait)
         self.speaking = False
         self._recent_categories: deque = deque(maxlen=_RECENT_TYPE_WINDOW)
         # 话题种子与使用记录（对标 TopicStore + TopicHistory：内存版无 DB）
@@ -184,9 +198,13 @@ class ProactiveEngine:
                 self.active_topic["topic_id"], {"use": 0, "engaged": 0})
             stats["engaged"] += 1
             self.active_topic = None
+        # 事件驱动心跳：互动结束立即唤醒主循环做一次心跳检查
+        self._wakeup.set()
+        # 随机唤醒点重新计时：互动后进入新的随机窗口（随机+事件混合）
+        self._resample_random_at()
 
     async def heartbeat(self) -> bool:
-        """心跳 tick：更新状态，若判定触发则生成并播报一次主动发言。
+        """事件驱动心跳检查：更新状态，若判定触发则生成并播报一次主动发言。
 
         返回是否真的开口说了话。
         """
@@ -208,8 +226,14 @@ class ProactiveEngine:
         # —— agent 准备发言请求（agent 催促主模型开口）——
         prompt = await self._build_prompt(kind, topic)
         if not prompt:
+            # 构造失败：回退触发状态（防单次精确唤醒空转——若阈值已满又
+            # 不重置，next_wake_in 会一直返回 0 造成忙循环），等下次累积
+            # 到阈值再重试。
             if topic is not None:
-                self.active_topic = None  # 请求构造失败：回收活跃话题
+                self.active_topic = None
+                self.boredom = 0.0
+            else:
+                self.loneliness = 0.0
             console.dim("[主动] 构造发言 prompt 失败（空），本次跳过")
             return False
 
@@ -346,6 +370,50 @@ class ProactiveEngine:
             if now - self.active_topic["started_at"].timestamp() > _ACTIVE_TOPIC_TIMEOUT:
                 self.active_topic = None
 
+    def _resample_random_at(self) -> None:
+        """重置下一个随机唤醒点（当前时刻 + 0~MAX_WAIT 均匀随机延迟）。"""
+        self._next_random_at = time.time() + random.uniform(0, self._random_max_wait)
+
+    def _random_probe_wait(self, now: float) -> float:
+        """随机唤醒点距现在的秒数（随机+事件混合）。
+
+        随机点已到但静默期未过 → 重采样下一个随机点，避免 0 超时造成心跳忙循环。
+        """
+        idle_ok = (now - self.last_interaction) >= self.cfg.PROACTIVE_MIN_IDLE_SECONDS
+        if now >= self._next_random_at and not idle_ok:
+            self._resample_random_at()
+        return max(0.0, self._next_random_at - now)
+
+    def next_wake_in(self) -> float:
+        """距下一次有意义心跳的秒数（单次精确唤醒，无周期轮询）。
+
+        主循环 sleep 到这个时刻才醒一次做心跳，而非固定间隔轮询：
+        - 活跃话题期间：只等话题超时那一刻（此后可再次开口）
+        - 平时：等无聊/孤独到阈值、随机唤醒点、或探索冲动到阈值（最近的一次）
+        - 已全部就绪（等待列表为空）→ 返回 0 立即检查
+        """
+        now = time.time()
+        if self.active_topic is not None:
+            remain = _ACTIVE_TOPIC_TIMEOUT - (
+                now - self.active_topic["started_at"].timestamp())
+            return max(0.0, remain)
+        lon_rate, bor_rate = self._rates()
+        waits = []
+        if self.loneliness < _LONELINESS_THRESHOLD:
+            waits.append((_LONELINESS_THRESHOLD - self.loneliness) / lon_rate)
+        if self.boredom < _BOREDOM_THRESHOLD:
+            waits.append((_BOREDOM_THRESHOLD - self.boredom) / bor_rate)
+        if self.curiosity_drive < _CURIOSITY_DRIVE_THRESHOLD:
+            waits.append(
+                (_CURIOSITY_DRIVE_THRESHOLD - self.curiosity_drive)
+                * _CURIOSITY_DRIVE_HOURS * 3600)
+        # 随机唤醒点：静默期到点掷骰子决定是否随机开口（随机+事件混合）
+        if self._random_enabled:
+            waits.append(self._random_probe_wait(now))
+        if not waits:
+            return 0.0
+        return max(0.0, min(waits))
+
     def _should_trigger(self) -> Optional[str]:
         """判定本心跳是否触发主动发言，返回 "emotional" / "topic" / None。
 
@@ -353,6 +421,8 @@ class ProactiveEngine:
           - 正在发言 → 不触发（防嵌套）
           - 用户最近才发言（安静期不足）→ 不触发
           - 话题活跃期 → 不触发（防情绪管线打断正在进行的话题）
+          - 随机唤醒点（随机+事件混合）：到点按概率随机开口（情绪/话题），
+            未命中则重采样下一个随机点——不依赖定时累积
           - 孤独 > 0.8 且情绪冷却已过 → emotional（冷却仅情绪发言）
           - 无聊 > 0.6 → topic
           - 探索冲动 > 0.6 且 30% 概率 → topic（触发后清零）
@@ -363,6 +433,19 @@ class ProactiveEngine:
         if now - self.last_interaction < self.cfg.PROACTIVE_MIN_IDLE_SECONDS:
             return None
         if self.active_topic is not None:
+            return None
+        # —— 随机通道（随机+事件混合，不用「定时回复」）——
+        # 到随机唤醒点掷骰子：命中则随机开口（情绪/话题），未命中重采样继续等。
+        # 情绪发言受冷却限制（话题发言不受限，对齐 PROACTIVE_COOLDOWN 语义）。
+        if self._random_enabled and now >= self._next_random_at:
+            self._resample_random_at()
+            if random.random() < self._random_chance:
+                if self.last_proactive_at is not None:
+                    since_last = (datetime.now() - self.last_proactive_at).total_seconds()
+                    if since_last < self.cfg.PROACTIVE_COOLDOWN_SECONDS:
+                        return None
+                console.dim("[主动] 随机通道触发，主动开口...")
+                return "emotional" if random.random() < 0.4 else "topic"
             return None
         if self.loneliness >= _LONELINESS_THRESHOLD:
             if self.last_proactive_at is not None:

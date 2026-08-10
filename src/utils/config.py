@@ -117,7 +117,10 @@ def _load_system_prompt() -> str:
     # SYSTEM_PROMPT_FILE 未配置 → 自动使用控制中心 UI 人设
     try:
         if os.path.isfile(_UI_SYSTEM_PROMPT_FILE):
-            text = _read_text_file(_UI_SYSTEM_PROMPT_FILE).strip()
+            # 与 skill 文件一致：剥离 YAML frontmatter（--- name/description ---
+            # 是 skill 元数据，不是人设正文，直接发给 LLM 会污染 system prompt）
+            text = _strip_frontmatter(
+                _read_text_file(_UI_SYSTEM_PROMPT_FILE)).strip()
             if text:
                 return text
     except OSError:
@@ -251,11 +254,10 @@ class Config:
     HISTORY_ROUNDS: int = int(os.getenv("HISTORY_ROUNDS", "10"))
 
     # ===== 主动对话（参照 Muika-After-Story 的 Scheduler/loop 主动机制） =====
-    # 空闲心跳 tick → 孤独/无聊状态随时间累积 → 突破阈值时 AI 主动开口。
+    # 事件驱动心跳：互动/弹幕回复结束时检查；孤独/无聊状态随空闲时间累积，
+    # 突破阈值时 AI 主动开口。
     # 注意：.env 中字段被清空时 os.getenv 返回空串而非默认值，一律用 `or` 兜底。
     PROACTIVE_ENABLED: bool = _get_bool("PROACTIVE_ENABLED", True)
-    # 心跳间隔（秒）：主循环等待用户输入的超时时长，超时即检查是否该开口
-    PROACTIVE_TICK_SECONDS: float = float(os.getenv("PROACTIVE_TICK_SECONDS") or "10")
     # 用户发言后至少安静多久才考虑主动开口（秒）
     PROACTIVE_MIN_IDLE_SECONDS: float = float(os.getenv("PROACTIVE_MIN_IDLE_SECONDS") or "60")
     # 两次主动发言之间的最小间隔（秒，对标 PROACTIVE_COOLDOWN）
@@ -264,6 +266,14 @@ class Config:
     # （孤独阈值 0.8 / 无聊阈值 0.6 固定，对标 Muika constants）
     PROACTIVE_LONELINESS_HOURS: float = float(os.getenv("PROACTIVE_LONELINESS_HOURS") or "2")
     PROACTIVE_BOREDOM_HOURS: float = float(os.getenv("PROACTIVE_BOREDOM_HOURS") or "1")
+    # ===== 主动对话：随机+事件混合触发（不用「定时回复」） =====
+    # 事件驱动（互动结束立即心跳）+ 随机唤醒点：静默期按概率随机开口，
+    # 说话时机不可预测；孤独/无聊阈值仍作为长时间不开口的兜底。
+    # PROACTIVE_RANDOM_CHANCE：每个随机唤醒点开口的概率（0~1）
+    # PROACTIVE_RANDOM_MAX_WAIT：随机唤醒点距现在的最大秒数（实际为 0~MAX 均匀随机）
+    PROACTIVE_RANDOM_ENABLED: bool = _get_bool("PROACTIVE_RANDOM_ENABLED", True)
+    PROACTIVE_RANDOM_CHANCE: float = float(os.getenv("PROACTIVE_RANDOM_CHANCE") or "0.25")
+    PROACTIVE_RANDOM_MAX_WAIT: float = float(os.getenv("PROACTIVE_RANDOM_MAX_WAIT") or "180")
 
     # ===== 技能系统（严格参照 Muika plugin/skills.py） =====
     # 技能根目录（相对项目根，逗号分隔可配多个）。每个目录下按
@@ -412,8 +422,6 @@ def reload_config() -> None:
     cfg.SYSTEM_PROMPT = _load_system_prompt()
     # 主动对话
     cfg.PROACTIVE_ENABLED = _get_bool("PROACTIVE_ENABLED", True)
-    cfg.PROACTIVE_TICK_SECONDS = float(
-        os.getenv("PROACTIVE_TICK_SECONDS") or "10")
     cfg.PROACTIVE_MIN_IDLE_SECONDS = float(
         os.getenv("PROACTIVE_MIN_IDLE_SECONDS") or "60")
     cfg.PROACTIVE_COOLDOWN_SECONDS = float(
@@ -422,6 +430,12 @@ def reload_config() -> None:
         os.getenv("PROACTIVE_LONELINESS_HOURS") or "2")
     cfg.PROACTIVE_BOREDOM_HOURS = float(
         os.getenv("PROACTIVE_BOREDOM_HOURS") or "1")
+    # 主动对话：随机+事件混合触发（随机唤醒点，随 !config 热更新生效）
+    cfg.PROACTIVE_RANDOM_ENABLED = _get_bool("PROACTIVE_RANDOM_ENABLED", True)
+    cfg.PROACTIVE_RANDOM_CHANCE = float(
+        os.getenv("PROACTIVE_RANDOM_CHANCE") or "0.25")
+    cfg.PROACTIVE_RANDOM_MAX_WAIT = float(
+        os.getenv("PROACTIVE_RANDOM_MAX_WAIT") or "180")
     # 内容过滤
     cfg.PROFANITY_FILTER_ENABLED = _get_bool(
         "PROFANITY_FILTER_ENABLED", True)

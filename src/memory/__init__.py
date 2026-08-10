@@ -1,2 +1,9 @@
-"""记忆系统：memory / memu_prompts / sqlite_store / memu（memU 记忆引擎）。
-（ButlerAgent 管家模型已移至 src/llm/butler_agent.py）"""
+"""记忆系统包：基于 memU 引擎（memU-main/src）的 vtuber 记忆层。
+
+对外暴露 memory 子模块（MemoryManager + 模块级 API），
+底层由 memU 的 MemoryService 提供存储与向量检索。
+"""
+
+from src.memory import memory
+
+__all__ = ["memory"]

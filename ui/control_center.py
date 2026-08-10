@@ -31,6 +31,15 @@ if not getattr(sys, "frozen", False):
     if os.path.isdir(_vendor) and _vendor not in sys.path:
         sys.path.insert(0, _vendor)
 
+# PySide6 6.11 的 shibokensupport 钩子会在每个模块导入后调用 inspect.getsource
+# 检查是否使用 PySide6（PYSIDE-2029）。six 的动态伪模块 six.moves 没有真实源码，
+# Python 3.12 在 repr 它时会访问 loader._path，而 six 的 _SixMetaPathImporter
+# 缺少该属性导致 AttributeError（dateutil 等库导入 six.moves 时触发）。
+# 提前补上 _path 属性可绕开此兼容性问题。
+import six
+if not hasattr(six._SixMetaPathImporter, "_path"):
+    six._SixMetaPathImporter._path = []
+
 from PySide6.QtCore import (
     QEasingCurve, QEvent, QMimeData, QObject,
     QPoint, QProcess, QProcessEnvironment, QPropertyAnimation, Qt,
@@ -77,12 +86,25 @@ def _save_ui_system_prompt(text: str) -> None:
 
     SYSTEM_PROMPT_FILE 未配置时，src/utils/config.py 会自动读取该文件作为人设
     （路径与 config._UI_SYSTEM_PROMPT_FILE 保持一致，含 PyInstaller frozen 模式）。
+    编辑框只显示正文（config 加载时剥离 frontmatter）；若原文件带 YAML
+    frontmatter（--- name/description ---），保存时原样保留，避免覆盖保存
+    把 skill 元数据静默清掉。
     """
     path = config._UI_SYSTEM_PROMPT_FILE
+    frontmatter = ""
+    try:
+        with open(path, "r", encoding="utf-8") as f:
+            raw = f.read()
+        if raw.startswith("---"):
+            end = raw.find("\n---", 3)
+            if end != -1:
+                frontmatter = raw[: end + 4] + "\n"
+    except OSError:
+        pass
     try:
         os.makedirs(os.path.dirname(path), exist_ok=True)
         with open(path, "w", encoding="utf-8") as f:
-            f.write(text)
+            f.write(frontmatter + text)
     except OSError as e:
         console.error(f"保存 UI 人设失败：{e}")
 
@@ -167,7 +189,7 @@ def _load_graph_export():
         if files is None:
             return None
         return files
-    except (OSError, ValueError, TypeError):
+    except (OSError, ValueError, TypeError, AttributeError):
         return None
 
 
@@ -1110,8 +1132,6 @@ class ControlCenter:
         self.combo_models.currentIndexChanged.connect(self._on_model_selected)
         # 工具屋：刷新状态（先重读 .env，再重建表格）
         self.btn_refresh_tools.clicked.connect(self._refresh_tools)
-        # 设置页：B站直播弹幕总开关 → 置灰/恢复下方字段
-        self.cb_bili_enabled.toggled.connect(self._sync_bili_enabled_state)
 
     def _refresh_tools(self) -> None:
         """工具屋「刷新状态」：重读 .env / mcp_config.json 后重建表格。"""
@@ -1168,7 +1188,6 @@ class ControlCenter:
             str(self.cfg.BILI_ROOM_ID) if self.cfg.BILI_ROOM_ID else "")
         self.ed_bili_sessdata.setText(self.cfg.BILI_SESSDATA or "")
         self.ed_bili_port.setText(str(self.cfg.BILI_SERVER_PORT))
-        self._sync_bili_enabled_state()
         # 表情与动作页
         self._init_face_page()
         self._apply_face_mode_state()
@@ -1210,12 +1229,6 @@ class ControlCenter:
 
     def _on_mode_changed(self, pet_selected: bool) -> None:
         self.combo_models.setEnabled(pet_selected)
-
-    def _sync_bili_enabled_state(self) -> None:
-        """B站直播弹幕总开关：关闭时禁用下方字段（置灰）。"""
-        enabled = self.cb_bili_enabled.isChecked()
-        for w in (self.ed_bili_room, self.ed_bili_sessdata, self.ed_bili_port):
-            w.setEnabled(enabled)
 
     # ---------- 启动页：模型切换（选择即生效，含表情动作刷新） ----------
 
@@ -1406,24 +1419,20 @@ class ControlCenter:
                 "⭕ 已关闭", "按需加载技能 SKILL.md")
 
         # ---- MCP（外部工具服务器） ----
-        # MCP 子开关（.env MCP_ENABLED）与工具总开关（设置页「启动工具」）
-        # 都开启时服务器才可启用；总开关关闭时全部显示「总开关已关」。
-        mcp_on = master_on and bool(cfg.MCP_ENABLED)
-        for key in self._all_mcp_servers():
-            display = key[:-len("_disabled")] if key.endswith("_disabled") else key
-            enabled = not key.endswith("_disabled")
-            if not master_on:
-                add(f"mcp_server:{key}", f"MCP：{display}", "MCP", False, False,
-                    "⭕ 总开关已关", "设置页「启动工具」已关闭，开启后可启用")
-            elif not mcp_on:
-                add(f"mcp_server:{key}", f"MCP：{display}", "MCP", False, False,
-                    "⭕ MCP 未启用", "需在 .env 开启 MCP_ENABLED")
-            elif enabled:
-                add(f"mcp_server:{key}", f"MCP：{display}", "MCP", True, True,
-                    "✅ 已配置", "mcp_config.json 外部工具服务器")
-            else:
-                add(f"mcp_server:{key}", f"MCP：{display}", "MCP", False, True,
-                    "⭕ 已禁用", "mcp_config.json 外部工具服务器（点击恢复）")
+        # MCP 未启用（MCP_ENABLED 为空）时，运行时不会加载 MCP 工具
+        # （application.py 中 MCPManager 仅在 MCP_ENABLED && TOOLS_ENABLED
+        # 时才创建），因此这里也不显示服务器行，避免与本地工具混排。
+        # 在 .env 开启 MCP_ENABLED 后，服务器行自动恢复显示与启停管理。
+        if master_on and cfg.MCP_ENABLED:
+            for key in self._all_mcp_servers():
+                display = key[:-len("_disabled")] if key.endswith("_disabled") else key
+                enabled = not key.endswith("_disabled")
+                if enabled:
+                    add(f"mcp_server:{key}", f"MCP：{display}", "MCP", True, True,
+                        "✅ 已配置", "mcp_config.json 外部工具服务器")
+                else:
+                    add(f"mcp_server:{key}", f"MCP：{display}", "MCP", False, True,
+                        "⭕ 已禁用", "mcp_config.json 外部工具服务器（点击恢复）")
         return rows
 
     def _on_tool_cell_clicked(self, row: int, col: int) -> None:

@@ -38,7 +38,7 @@ import asyncio
 import json
 import re
 import time
-from typing import AsyncGenerator, List, Optional
+from typing import Any, AsyncGenerator, List, Optional
 
 from src.utils import config, console
 from src.memory import memory
@@ -60,6 +60,55 @@ _MAX_TOOL_ITERATIONS = 30
 # 高峰期常触发 429——按服务端头信息等待限流窗口结束后自动重试，
 # 而不是直接中断对话；封顶后仍 429 才放弃。
 _MAX_429_WAIT = 60.0
+
+# 长对话摘要压缩：被裁剪的早期对话至少这么多条消息才值得压缩成摘要
+_SUMMARIZE_MIN_TURNS = 4
+
+# 工具执行结果日志截断长度（防刷屏；完整结果仍保留在工具上下文供模型使用）
+_MAX_TOOL_RESULT_LOG = 300
+
+# 跨轮历史中工具结果保留的最大长度（防 token 污染；本轮内仍用完整结果）
+_MAX_TOOL_HISTORY_LOG = 500
+
+
+def _summarize_tool_content(content) -> str:
+    """工具结果历史摘要化：跨轮次历史中的工具消息只保留结果摘要。
+
+    dict/list → JSON 单行；超长截断并加提示。发送给模型时仍走
+    _clean_messages_for_api 的既有长度上限，不影响工具链配对。
+    """
+    if isinstance(content, (dict, list)):
+        try:
+            text = json.dumps(content, ensure_ascii=False, separators=(",", ":"))
+        except (TypeError, ValueError):
+            text = str(content)
+    else:
+        text = str(content or "")
+    if len(text) <= _MAX_TOOL_HISTORY_LOG:
+        return text
+    return text[:_MAX_TOOL_HISTORY_LOG] + f"…（结果过长，已存 {_MAX_TOOL_HISTORY_LOG} 字摘要）"
+
+
+def _format_tool_result(name: str, result) -> str:
+    """工具执行结果的结构化日志：JSON 压缩为一行 + 超长截断。
+
+    控制中心日志区据此展示「工具名 + 结果摘要」的紧凑块，便于调试；
+    截断仅影响日志展示，不裁剪进入工具上下文的结果。
+    """
+    if result is None:
+        return f"  ↳ 「{name}」结果：（无返回）"
+    if isinstance(result, (dict, list)):
+        try:
+            text = json.dumps(result, ensure_ascii=False, separators=(",", ":"))
+        except (TypeError, ValueError):
+            text = str(result)
+    else:
+        text = str(result)
+    text = text.strip()
+    if len(text) > _MAX_TOOL_RESULT_LOG:
+        text = (text[:_MAX_TOOL_RESULT_LOG]
+                + f"…（超长已截断至 {_MAX_TOOL_RESULT_LOG} 字符，完整结果保留在工具上下文）")
+    return f"  ↳ 「{name}」结果：{text}"
 
 
 def _parse_retry_after(e) -> float:
@@ -313,6 +362,12 @@ class LLMBrain:
             max_retries=2,
         )
         self.history: list = []
+        # 长对话摘要压缩（对标 NagaAgent 上下文压缩）：
+        # 历史超长被裁剪时，后台把丢弃的早期轮次压缩成摘要，
+        # 下一轮以 system 段注入，避免长聊后早期信息永久丢失；
+        # 摘要同时写入记忆实现跨会话继承。
+        self._session_summary: Optional[str] = None
+        self._summary_task: Optional[asyncio.Task] = None
         # MCP 管理器（外部工具服务器）；None 表示禁用
         self.mcp = mcp
 
@@ -383,24 +438,40 @@ class LLMBrain:
         return sanitize_tool_message_sequence(normalized)
 
     async def _execute_tool_calls(self, tool_calls: list) -> List[dict]:
-        """执行工具并返回结果消息（对标 live-2d(2) tool-executor.js：MCP 优先本地兜底）。"""
+        """并行执行工具并返回结果消息（对标 NagaAgent agentic_tool_loop：
+        一轮多个工具 asyncio.gather 并行执行，显著缩短多工具轮次延迟）。
+
+        gather 保持返回顺序与 tool_calls 一致，tool_call_id 配对不乱；
+        单个工具失败只影响该工具，不拖垮整轮。
+        """
         from src.llm.tools import call_tool
-        results = []
-        for tc in tool_calls:
+
+        async def _run(tc: dict) -> dict:
             name = tc["function"]["name"]
             try:
                 args = json.loads(tc["function"]["arguments"] or "{}")
             except (json.JSONDecodeError, TypeError):
                 args = {}
             console.dim(f"  ↳ 执行「{name}」...")
-            result = await call_tool(name, args, self.mcp)
-            results.append({
+            result = await _call_tool_with_retry(name, args, self.mcp)
+            console.dim(_format_tool_result(name, result))
+            return {
                 "role": "tool",
                 "name": name,
                 "tool_call_id": tc.get("id") or f"call_{name}",
                 "content": result,
-            })
-        return results
+            }
+
+        async def _call_tool_with_retry(name: str, args: dict, mcp) -> Any:
+            """单工具执行失败自动重试 1 次（指数退避 1s），减少偶发失败。"""
+            try:
+                return await call_tool(name, args, mcp)
+            except Exception as e:
+                console.warn(f"  ↳ 「{name}」执行失败（{e}），1s 后自动重试...")
+                await asyncio.sleep(1.0)
+                return await call_tool(name, args, mcp)
+
+        return await asyncio.gather(*(_run(tc) for tc in tool_calls))
 
     async def _request_final_reply(self, messages: List[dict]) -> str:
         """轮数超限后的非流式兜底（对标 llm-handler.js L684-696）。
@@ -440,6 +511,56 @@ class LLMBrain:
 
     # ---------- 流式对话 ----------
 
+    def _consume_summary(self) -> Optional[str]:
+        """取后台摘要任务的结果（完成即用，未完成则等下一轮），返回当前生效摘要。
+
+        非阻塞：不等待任务，避免拖慢本轮对话首字延迟。
+        """
+        if self._summary_task is not None:
+            if self._summary_task.done():
+                try:
+                    result = self._summary_task.result()
+                    if isinstance(result, str) and result.strip():
+                        self._session_summary = result.strip()
+                except Exception as e:
+                    console.dim(f"[摘要] 后台压缩失败：{e}")
+                self._summary_task = None
+        return self._session_summary
+
+    async def _summarize_dropped(self, turns: list[dict]) -> str:
+        """后台任务：把被裁剪的早期对话压缩成中文摘要，并写入记忆跨会话继承。"""
+        try:
+            from src.llm.agent import ButlerAgent, _pick_owner
+            butler = ButlerAgent()
+            text = await asyncio.wait_for(
+                butler.summarize_session(turns), timeout=30.0
+            )
+            text = (text or "").strip()
+            if not text:
+                return ""
+            # 摘要写入记忆（归属从被裁剪轮次推断），重启后检索可带出
+            try:
+                owner = _pick_owner(turns, None)
+                await butler.commit_recall_files([{
+                    "name": "session-summary",
+                    "description": "archive/对话摘要：早期对话压缩",
+                    "content": text,
+                    "user": owner,
+                }])
+            except Exception:
+                pass
+            return text
+        except Exception as e:
+            console.dim(f"[摘要] 后台压缩失败：{e}")
+            return ""
+
+    def _max_tool_iterations(self) -> int:
+        """工具调用轮数上限（对标 NagaAgent max_loop_stream：.env TOOL_MAX_ITERATIONS 可配，默认 30）。"""
+        try:
+            return max(1, int(config.cfg.TOOL_MAX_ITERATIONS or _MAX_TOOL_ITERATIONS))
+        except (TypeError, ValueError, AttributeError):
+            return _MAX_TOOL_ITERATIONS
+
     async def chat_stream(self, user_text: str, *, proactive: bool = False) -> AsyncGenerator[str, None]:
         """流式对话生成器：多轮工具调用，实时打印思考过程，按句 yield 纯对话文本。
 
@@ -473,6 +594,13 @@ class LLMBrain:
         if skills_section:
             sys_content += "\n\n" + skills_section
         messages: List[dict] = [{"role": "system", "content": sys_content}]
+        # 注入早期对话摘要（历史裁剪时后台压缩生成，跨会话继承）
+        summary = self._consume_summary()
+        if summary:
+            messages.append({
+                "role": "system",
+                "content": f"【早期对话摘要（以下为被压缩掉的更早对话内容）】{summary}",
+            })
         messages.extend(self.history)
         messages.append({"role": "user", "content": user_text})
 
@@ -487,7 +615,8 @@ class LLMBrain:
         final_reply: Optional[str] = None
 
         # ===== 多轮工具调用循环（对标 llm-handler.js 的 while (iteration < maxIterations)） =====
-        while iteration < _MAX_TOOL_ITERATIONS:
+        max_tool_iterations = self._max_tool_iterations()
+        while iteration < max_tool_iterations:
             q: asyncio.Queue = asyncio.Queue()
             tool_calls_acc: List[Optional[dict]] = []
             full_raw: List[str] = []
@@ -735,8 +864,8 @@ class LLMBrain:
             break
 
         # ===== 达到最大工具轮数：非流式强制获取最终回复（对标 llm-handler.js L684-696）=====
-        if final_reply is None and iteration >= _MAX_TOOL_ITERATIONS:
-            console.warn(f"⚠️ 已达到最大工具调用次数限制（{_MAX_TOOL_ITERATIONS} 轮），"
+        if final_reply is None and iteration >= max_tool_iterations:
+            console.warn(f"⚠️ 已达到最大工具调用次数限制（{max_tool_iterations} 轮），"
                          "非流式获取最终回复")
             final_reply = await self._request_final_reply(messages)
             for seg in _split_sentences(final_reply):
@@ -759,6 +888,14 @@ class LLMBrain:
             messages.append({"role": "assistant", "content": final_reply})
         # 丢弃 system（每轮按最新记忆重建），其余完整保留
         self.history = messages[1:]
+        # 工具结果历史摘要化（对标 NagaAgent「消除历史污染」）：
+        # 跨轮次历史中的 tool 消息只保留结果摘要（截断超长 JSON），
+        # 防 token 污染；本轮内 messages 保持完整，不影响多轮工具调用链。
+        self.history = [
+            {**m, "content": _summarize_tool_content(m["content"])}
+            if m.get("role") == "tool" else m
+            for m in self.history
+        ]
         if proactive:
             # 主动发言：剔除注入的内部指令 user 消息（不冒充用户发言），
             # 保留 assistant 回复以维持上下文连贯
@@ -767,10 +904,17 @@ class LLMBrain:
                                     and m.get("content") == user_text)]
         max_messages = self.cfg.HISTORY_ROUNDS * 2
         if len(self.history) > max_messages:
+            dropped = self.history[: len(self.history) - max_messages]
             # 以「单元」为粒度从后向前裁剪，不切断工具调用链
             self.history = trim_messages_preserving_tool_rounds(
                 self.history, max_messages
             )
+            # 被裁剪的早期轮次足够多时，后台压缩成摘要（不阻塞本轮，
+            # 下一轮对话开始时若已生成则注入）
+            if self._summary_task is None and len(dropped) >= _SUMMARIZE_MIN_TURNS:
+                self._summary_task = asyncio.create_task(
+                    self._summarize_dropped(dropped)
+                )
 
         # 打印 LLM 性能报告
         tracker.print_report()

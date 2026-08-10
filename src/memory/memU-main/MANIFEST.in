@@ -1,0 +1,21 @@
+include README.md
+recursive-include memu *.py
+prune example
+include setup_postgres_env.sh
+exclude .env
+exclude .env.example
+exclude setup.py.backup
+exclude */__pycache__/*
+exclude *.pyc
+exclude *.pyo
+exclude .git/*
+exclude .github/*
+exclude server/*
+exclude docs/*
+exclude scripts/*
+exclude docker-compose.yml
+exclude Dockerfile
+exclude .dockerignore
+exclude PROJECT_RELEASE_SUMMARY.md
+exclude Makefile
+exclude .pre-commit-config.yaml

@@ -3,6 +3,18 @@
 data/vts_token.json
 data/emotion_embedding_cache.npz
 
+# 运行时记忆库 / 日志 / 本地 venv（runtime 为 python 虚拟环境，6万+文件不入库）
+data/
+1.txt
+runtime/
+
+# IDE
+.idea/
+
+# 大文件与安装包（torch whl、memU 源码压缩包，均不入库）
+*.whl
+src/memory/memU-main.zip
+
 # TTS 本地模型（体积巨大，不入库，需自行下载/拷贝）
 gsv_tts/API/models/
 
