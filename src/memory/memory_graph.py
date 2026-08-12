@@ -105,6 +105,9 @@ class MemoryGraphWidget(QWidget):
     def __init__(self, parent=None) -> None:
         super().__init__(parent)
         self._memories: list[dict] = []
+        # 是否显示记忆节点：False 时图谱只显示用户簇心（人名），
+        # 点击人名由控制中心打开该用户记忆列表管理
+        self.show_memory_nodes = True
         # 布局缓存：世界坐标（布局结果），绘制/命中经 _to_screen 转换
         self._clusters: list[tuple[QPointF, str, list[tuple[QPointF, dict]]]] = []
         # 视图变换（平移/缩放）
@@ -172,7 +175,10 @@ class MemoryGraphWidget(QWidget):
     # ---------- 布局 ----------
 
     def _cluster_radius(self, count: int) -> float:
-        """簇的包围圆半径：最外圈节点到簇心的距离 + 节点半径。"""
+        """簇的包围圆半径：最外圈节点到簇心的距离 + 节点半径；
+        不显示记忆节点时退化为簇心半径。"""
+        if not self.show_memory_nodes:
+            return _USER_RADIUS
         per_ring = max(4, int(2 * math.pi * _RING_BASE / _NODE_SPACING))
         rings = max(0, (count - 1) // per_ring)
         return _RING_BASE + rings * _RING_STEP + _NODE_RADIUS
@@ -250,19 +256,21 @@ class MemoryGraphWidget(QWidget):
             placed.append((cx, cy, self._cluster_radius(len(items))))
             user_pos = QPointF(cx, cy)
 
-            # 簇内节点：以簇心为中心的同心圆环形排布（多圈扩展 + 轻微抖动）
-            per_ring = max(4, int(2 * math.pi * _RING_BASE / _NODE_SPACING))
+            # 簇内节点：以簇心为中心的同心圆环形排布（多圈扩展 + 轻微抖动）；
+            # 不显示节点时簇内为空，只保留簇心
             node_positions: list[tuple[QPointF, dict]] = []
-            for index, item in enumerate(items):
-                ring = index // per_ring
-                angle = (2 * math.pi * (index % per_ring) / per_ring
-                         + rng.uniform(-0.15, 0.15))
-                radius = _RING_BASE + ring * _RING_STEP + rng.uniform(-6.0, 6.0)
-                node_positions.append((
-                    QPointF(cx + math.cos(angle) * radius,
-                            cy + math.sin(angle) * radius),
-                    item,
-                ))
+            if self.show_memory_nodes:
+                per_ring = max(4, int(2 * math.pi * _RING_BASE / _NODE_SPACING))
+                for index, item in enumerate(items):
+                    ring = index // per_ring
+                    angle = (2 * math.pi * (index % per_ring) / per_ring
+                             + rng.uniform(-0.15, 0.15))
+                    radius = _RING_BASE + ring * _RING_STEP + rng.uniform(-6.0, 6.0)
+                    node_positions.append((
+                        QPointF(cx + math.cos(angle) * radius,
+                                cy + math.sin(angle) * radius),
+                        item,
+                    ))
             clusters.append((user_pos, owner, node_positions))
         self._clusters = clusters
         return clusters
@@ -270,7 +278,10 @@ class MemoryGraphWidget(QWidget):
     # ---------- 命中检测 ----------
 
     def _hit_node(self, screen: QPointF) -> tuple[int, int]:
-        """屏幕坐标命中检测：返回 (簇索引, 节点索引)；未命中返回 (-1, -1)。"""
+        """屏幕坐标命中检测：返回 (簇索引, 节点索引)；未命中返回 (-1, -1)。
+        不显示记忆节点时恒不命中。"""
+        if not self.show_memory_nodes:
+            return -1, -1
         for ci, (user_pos, owner, nodes) in enumerate(self._clusters):
             for ni, (node_pos, item) in enumerate(nodes):
                 c = self._to_screen(node_pos)
@@ -306,14 +317,15 @@ class MemoryGraphWidget(QWidget):
 
         clusters = self._clusters
 
-        # 用户连边：簇心 → 该 user 每个记忆（灰色实线）
-        edge = QColor(_EDGE_COLOR)
-        edge.setAlpha(100)
-        painter.setPen(QPen(edge, 1.6))
-        for user_pos, owner, nodes in clusters:
-            for node_pos, item in nodes:
-                painter.drawLine(self._to_screen(user_pos),
-                                 self._to_screen(node_pos))
+        # 用户连边：簇心 → 该 user 每个记忆（灰色实线）；不显示节点时跳过
+        if self.show_memory_nodes:
+            edge = QColor(_EDGE_COLOR)
+            edge.setAlpha(100)
+            painter.setPen(QPen(edge, 1.6))
+            for user_pos, owner, nodes in clusters:
+                for node_pos, item in nodes:
+                    painter.drawLine(self._to_screen(user_pos),
+                                     self._to_screen(node_pos))
 
         for user_pos, owner, nodes in clusters:
             # 用户簇心：暖青色半透明圆 + 同色描边，白字显示归属名
@@ -341,7 +353,10 @@ class MemoryGraphWidget(QWidget):
                 Qt.AlignCenter, label,
             )
             painter.restore()
-            # 记忆节点：分层色半透明圆 + 同色描边，白字显示内容摘要（截断）
+            # 记忆节点：分层色半透明圆 + 同色描边，白字显示内容摘要（截断）；
+            # 不显示节点时跳过
+            if not self.show_memory_nodes:
+                continue
             fm = QFontMetricsF(painter.font())
             for node_pos, item in nodes:
                 nc = self._to_screen(node_pos)

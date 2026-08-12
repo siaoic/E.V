@@ -17,6 +17,49 @@ from src.tts.engine import TTSEngine
 from src.vts.face_driver import FaceDriver
 
 
+async def speak_text(text: str,
+                     tts: Optional[TTSEngine] = None,
+                     face: Optional[FaceDriver] = None,
+                     sub: Optional[SubtitleServer] = None,
+                     proactive: bool = False,
+                     profanity_filter=None,
+                     profanity_filter_rate: float = 0.7) -> None:
+    """直接播报已有文本（无需 LLM 生成）：打印 + 网页字幕 + 口型 + TTS。
+
+    供主动发言「LLM 自主决定想说就说」路径使用：发言内容已由主模型生成完毕，
+    这里只做输出流水线（过滤 / 打印 / 字幕 / 口型 / TTS 排队播放），
+    行为与 converse 的产句播报保持一致（脏话过滤、字幕时机、TTS 排空）。
+    """
+    spoken = text
+    if profanity_filter is not None:
+        masked, hit = profanity_filter.censor(spoken)
+        if hit and random.random() < profanity_filter_rate:
+            console.warn(f"[内容过滤] AI 回复命中敏感词，已替换")
+            spoken = masked
+    if proactive:
+        console.chat("主动对话：", end="", flush=True)
+    console.chat(spoken, end="", flush=True)
+    if tts:
+        # 有 TTS：口型由音频播放回调同步触发，字幕随播放推送
+        await tts.speak(spoken)
+    else:
+        # 无 TTS：直接推送字幕，用节拍口型
+        if sub:
+            sub.push("text", spoken)
+        if face:
+            face.start_speaking(max(0.6, len(spoken) * 0.15))
+    if tts:
+        await tts.drain()
+        # 播放完清理：服务端 TTS 合成输出（项目根 temp/tts_*.wav）不再需要
+        try:
+            from src.utils import cleaner
+            cleaner.cleanup_tts_output(verbose=False)
+        except Exception:
+            pass
+    if sub:
+        sub.push("clear", "")
+
+
 async def converse(brain: LLMBrain,
                    text: str,
                    tts: Optional[TTSEngine] = None,
@@ -25,6 +68,7 @@ async def converse(brain: LLMBrain,
                    proactive: bool = False,
                    profanity_filter=None,
                    profanity_filter_rate: float = 0.7,
+                   history: Optional[list] = None,
                    on_llm_done: Optional[Callable[[str], Awaitable[None]]] = None) -> None:
     """对话：LLM 流式产句 + 文本实时打印 + 网页字幕推送。
 
@@ -33,6 +77,9 @@ async def converse(brain: LLMBrain,
 
     proactive=True 时以「内部自主行动指令」身份调用大脑：该 prompt
     不会写入历史（不冒充用户发言），只保留模型回复保持上下文连贯。
+
+    history：可选历史快照（agent 主动发言只给最近 N 条精简上下文，
+    降低 token）；None 时用完整历史（与原有行为一致）。
 
     profanity_filter：可选脏话过滤器（ProfanityFilter 实例），仅过滤
     AI 回复句子（TTS/字幕播出前），不过滤用户/弹幕输入。命中时按
@@ -45,7 +92,10 @@ async def converse(brain: LLMBrain,
     """
     try:
         full_reply_parts = []
-        async for sentence in brain.chat_stream(text, proactive=proactive):
+        # 主动对话：回复流首个句子前加「主动对话：」前缀（只加一次，
+        # 句子是连续流，后续句子不再重复前缀）
+        turn_prefixed = False
+        async for sentence in brain.chat_stream(text, proactive=proactive, history=history):
             # AI 回复脏话过滤：仅过滤要播给用户听 / 字幕展示的句子，
             # 不过滤 LLM 原文存记忆（记忆存原文，on_llm_done 存的是 LLM 历史）。
             spoken = sentence
@@ -54,7 +104,11 @@ async def converse(brain: LLMBrain,
                 if hit and random.random() < profanity_filter_rate:
                     console.warn(f"[内容过滤] AI 回复命中敏感词，已替换")
                     spoken = masked
-            print(spoken, end="", flush=True)
+            if proactive and not turn_prefixed:
+                console.chat("主动对话：", end="", flush=True)
+                turn_prefixed = True
+            # AI 说的话走「对话」通道：控制中心左栏显示（读哪句显示哪句）
+            console.chat(spoken, end="", flush=True)
             full_reply_parts.append(spoken)
             # 网页字幕：打字机效果（与语音播放基本同步）
             if tts:

@@ -12,6 +12,7 @@
 """
 
 import json
+import os
 import time
 from typing import Dict, List, Optional, Set, Tuple
 
@@ -38,11 +39,100 @@ _PARAM_EXPAND: Dict[str, List[str]] = {
     "ParamEyeBallY": ["EyeLeftY", "EyeRightY"],
 }
 
-# 循环播放时尾帧→首帧的平滑过渡时长（秒）。
+# 循环播放时尾帧→首帧的平滑过渡时长（秒），可用 .env MOTION_LOOP_BLEND_SECONDS 调整。
 # .motion3.json 首尾帧参数值通常不同（动画并未为无缝循环设计），
-# 直接取模会在结尾瞬间突跳到首帧值。在最后这段窗口内线性混合到首帧值，
-# 让动作自然"回到原点"。
-_LOOP_BLEND_WINDOW = 0.5
+# 直接取模会在结尾瞬间突跳到首帧值。在最后这段窗口内把尾帧值平滑混合到首帧值，
+# 让动作自然"回到原点"。默认 0.5s；跳变幅度大的动画可调大（上限 2s）。
+_LOOP_BLEND_WINDOW = min(2.0, max(0.1,
+                                  float(os.getenv("MOTION_LOOP_BLEND_SECONDS", "0.5"))))
+# 首尾帧判定为"无缝循环"的允许误差：误差内不混合（混合会扭曲本就连续的循环）
+_LOOP_SEAMLESS_EPS = 1e-3
+
+# 无缝化备份后缀：原文件改前备份为 <file>.bak（仅首次）
+_SEAMLESS_BACKUP_SUFFIX = ".bak"
+
+
+def make_seamless(path: str, blend: Optional[float] = None) -> bool:
+    """将待机动画 .motion3.json 改造为无缝循环（改前自动备份 <file>.bak）。
+
+    Live2D 动画默认首尾帧不衔接：VTS 原生循环到尾帧后硬跳回首帧，
+    待机动作每循环一次就「弹回」一次。本函数在每条首尾值不一致的曲线
+    末尾追加一段 smoothstep 过渡（尾帧值 → 首帧值），并延长 Meta.Duration，
+    使动画自身首尾连续——VTS 原生播放即为无缝循环（覆盖全部参数，含
+    插件无法注入的 Live2D 自定义参数，如 Param156、Xbox_* 等）。
+
+    - 仅追加到首尾不一致的曲线；首尾一致的曲线保持原样（循环点本就连续）
+    - 首次修改前把原文件备份为 <path>.bak；文件已无缝时幂等跳过
+    - 任一步失败返回 False（调用方继续按原文件播放，不影响流程）
+    """
+    blend = _LOOP_BLEND_WINDOW if blend is None else blend
+    try:
+        with open(path, "r", encoding="utf-8") as f:
+            data = json.load(f)
+    except Exception as e:
+        console.dim(f"无缝化：读取 {os.path.basename(path)} 失败（{e}）")
+        return False
+
+    meta = data.get("Meta", {})
+    duration = float(meta.get("Duration", 0.0) or 0.0)
+    fps = float(meta.get("Fps", 60.0) or 60.0)
+    if duration <= 0.0 or fps <= 0.0:
+        return False
+
+    # 过渡段采样点数：按动画自身帧率采样 smoothstep，保证视觉连续；
+    # 取 3 的倍数，与 .motion3.json 的 type-1 线性段「3 点/段」格式对齐
+    point_count = 3 * max(1, int(round(blend * fps / 3.0)))
+
+    modified = 0
+    for curve in data.get("Curves", []):
+        segments = curve.get("Segments", [])
+        keyframes = _parse_segments(segments)
+        if len(keyframes) < 2:
+            continue  # 常量曲线，循环点本就连续
+        first_val = keyframes[0][1]
+        last_val = keyframes[-1][1]
+        if abs(last_val - first_val) <= _LOOP_SEAMLESS_EPS:
+            continue  # 首尾一致，无需过渡
+        # 追加 smoothstep 过渡：u 从 1→0，值从尾帧 last_val 平滑滑到首帧
+        # first_val，循环点前后连续。按文件格式每 3 个采样点组成一个 type-1
+        # 线性段（[1, t, v, t, v, t, v]），段首自动衔接上一条曲线末尾的
+        # (Duration, last_val)
+        transition: List[float] = []
+        for g in range(point_count // 3):
+            transition.append(1)  # type-1 线性段起始标记
+            for k in range(3):
+                i = g * 3 + k + 1
+                u = (point_count - i) / point_count  # 1 → 0
+                w = u * u * (3.0 - 2.0 * u)          # smoothstep：两端速度连续
+                t = duration + blend * i / point_count
+                v = last_val + (first_val - last_val) * (1.0 - w)
+                transition.extend([t, v])
+        curve["Segments"] = segments + transition
+        modified += 1
+
+    if modified == 0:
+        return True  # 所有曲线首尾本就一致，无需处理
+
+    # 元数据计数随追加段同步增加（1 段 = 3 点，与文件原有计数口径一致）
+    added_segments = modified * (point_count // 3)
+    meta["Duration"] = duration + blend
+    if "TotalSegmentCount" in meta:
+        meta["TotalSegmentCount"] = int(meta["TotalSegmentCount"]) + added_segments
+    if "TotalPointCount" in meta:
+        meta["TotalPointCount"] = int(meta["TotalPointCount"]) + added_segments * 3
+
+    # 首次修改前备份原文件，保证可还原
+    backup = path + _SEAMLESS_BACKUP_SUFFIX
+    try:
+        if not os.path.exists(backup):
+            import shutil
+            shutil.copy2(path, backup)
+        with open(path, "w", encoding="utf-8") as f:
+            json.dump(data, f, ensure_ascii=False, indent=4)
+    except Exception as e:
+        console.dim(f"无缝化：写回 {os.path.basename(path)} 失败（{e}）")
+        return False
+    return True
 
 
 def _parse_segments(segments: list) -> List[Tuple[float, float]]:
@@ -134,12 +224,21 @@ class MotionPlayer:
         self._frame_count = frame_count
         self._first_frame: Dict[str, float] = {}   # 首帧原始值（循环混合锚点）
 
+        # 无缝循环判定：所有曲线首尾关键帧值一致（误差内）则无需混合。
+        # 作者在 Live2D Animator 里按无缝循环导出的动画（首尾帧相同），
+        # 循环点本身不会跳变，混合反而会扭曲动作路径，应原样播放。
+        # 注意按「关键帧」而非「预计算帧网格」比对：帧网格采样不到动画
+        # 末尾（最后一帧距 Duration 差 ~1 帧），无缝文件会被误判为不连续。
+        # 该口径与 make_seamless 的无缝化判定一致（关键帧首尾值比对）。
+        self._seamless = True
         for curve in data.get("Curves", []):
             param_id = curve.get("Id", "")
             if not param_id:
                 continue
             segments = curve.get("Segments", [])
             keyframes = _parse_segments(segments)
+            if len(keyframes) >= 2 and abs(keyframes[-1][1] - keyframes[0][1]) > _LOOP_SEAMLESS_EPS:
+                self._seamless = False
 
             if len(keyframes) < 2:
                 val = keyframes[0][1] if keyframes else 0.0
@@ -190,8 +289,13 @@ class MotionPlayer:
         """按播放时间解析当前帧原始值；循环模式下尾帧自动混合回首帧。
 
         .motion3.json 首尾帧通常不衔接，直接取模会在循环点突跳。
-        在最后 _LOOP_BLEND_WINDOW 秒内，把当前值线性混合到首帧值，
+        在最后 _LOOP_BLEND_WINDOW 秒内，把当前值平滑混合到首帧值，
         使循环点前后连续，动作自然"回到原点"。
+
+        用 smoothstep 缓动替代线性插值：线性混合在窗口起点（刚接上动画
+        原始速度）和循环点（落到首帧后立即以新速度起步）两端都有速度突变，
+        看起来像「卡一下再弹回」；smoothstep 两端导数为 0，先平滑减速到 0、
+        再平滑起步，过渡更自然。
         """
         if not self._frames:
             return {}
@@ -203,16 +307,22 @@ class MotionPlayer:
         idx = min(int(t * self._fps), self._frame_count - 1)
         raw = self._frames[idx]
 
-        # 尾帧→首帧平滑混合
-        if self._loop and self._duration > 0 and self._first_frame:
+        # 尾帧→首帧平滑混合（原生无缝循环跳过，避免扭曲动作路径）
+        if (self._loop and not self._seamless
+                and self._duration > 0 and self._first_frame):
             remain = self._duration - t
             if remain <= _LOOP_BLEND_WINDOW:
-                blend = remain / _LOOP_BLEND_WINDOW  # 1→0
-                if blend < 1.0:
-                    raw = {
-                        pid: v * blend + self._first_frame.get(pid, v) * (1 - blend)
-                        for pid, v in raw.items()
-                    }
+                u = remain / _LOOP_BLEND_WINDOW  # 1 → 0
+                if u < 1.0:
+                    w = u * u * (3.0 - 2.0 * u)  # smoothstep：两端速度连续
+                    # 对「当前帧 ∪ 首帧」的全部参数混合，防止某参数只出现在
+                    # 一侧时循环点缺参跳变
+                    blended: Dict[str, float] = {}
+                    for pid in set(raw) | set(self._first_frame):
+                        cur = raw.get(pid, self._first_frame[pid])
+                        anchor = self._first_frame.get(pid, cur)
+                        blended[pid] = cur * w + anchor * (1.0 - w)
+                    raw = blended
         return raw
 
     def get_frame(self, elapsed: Optional[float] = None) -> Dict[str, float]:

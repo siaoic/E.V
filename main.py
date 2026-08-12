@@ -8,7 +8,7 @@
 # Python 3.12 在 repr 它时会访问 loader._path，而 six 的 _SixMetaPathImporter
 # 缺少该属性导致 AttributeError（dateutil 等库导入 six.moves 时触发）。
 # 提前补上 _path 属性可绕开此兼容性问题。必须在任何可能触发该钩子的
-# import（PySide6 / gsv_tts / transformers 链）之前执行，否则启动即崩。
+# import（PySide6 / transformers 链）之前执行，否则启动即崩。
 import six
 if not hasattr(six._SixMetaPathImporter, "_path"):
     six._SixMetaPathImporter._path = []

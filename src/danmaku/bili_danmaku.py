@@ -13,10 +13,11 @@ import http.cookies
 import json
 import logging
 import os
+import random
+import re
 import threading
 import time
 import urllib.request
-import re
 from collections import OrderedDict
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from typing import Callable, List, Optional, Tuple
@@ -28,7 +29,7 @@ import blivedm.models.web as web_models
 
 from src.utils import config
 from src.utils import console
-from src.utils.keyboard_filter import KeyboardFilter
+from src.utils.profanity_filter import ProfanityFilter
 
 # blivedm 库内部用标准 logging 输出 WARNING/INFO（如 unknown cmd 会打一条超长
 # protobuf 日志）。控制台不显示弹幕信息：只保留 ERROR 级以上诊断。
@@ -43,17 +44,17 @@ _AVATAR_CACHE_MAX = 1000   # 头像缓存条数上限
 _UA = ("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
        "(KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36")
 
-# 键盘敏感词过滤器（data/keyboard.txt，7 万词，惰性加载一次）
-_KEYBOARD_FILTER: "KeyboardFilter | None" = None
+# 脏话过滤器（data/profanity.txt，7 万词，惰性加载一次）
+_PROFANITY_FILTER: "ProfanityFilter | None" = None
 
 
-def _get_keyboard_filter() -> KeyboardFilter:
-    global _KEYBOARD_FILTER
-    if _KEYBOARD_FILTER is None:
-        _KEYBOARD_FILTER = KeyboardFilter()
-        if _KEYBOARD_FILTER.count:
-            console.info(f"[弹幕] 键盘敏感词已加载：{_KEYBOARD_FILTER.count} 条，命中即过滤")
-    return _KEYBOARD_FILTER
+def _get_profanity_filter() -> ProfanityFilter:
+    global _PROFANITY_FILTER
+    if _PROFANITY_FILTER is None:
+        _PROFANITY_FILTER = ProfanityFilter()
+        if _PROFANITY_FILTER.count:
+            console.info(f"[弹幕] 脏话词库已加载：{_PROFANITY_FILTER.count} 条，命中即过滤")
+    return _PROFANITY_FILTER
 
 
 class _Broadcaster:
@@ -262,7 +263,8 @@ class _BiliDanmakuHandler(blivedm.BaseHandler):
         头像为空且 uid 有效时，后台调 card API 补全，完成后推
         avatar 事件由网页就地更新气泡头像。
         """
-        # 后台终端同步显示「用户名：内容」→ 控制台不显示弹幕，仅推 SSE/入挑选器
+        # 弹幕内容仅推 SSE 展示（网页左侧实时流 + 精选回复卡片），不在控制台
+        # 显示——被选中回复的弹幕由主程序 _chat_danmaku 在左栏「对话」显示
         self._b.push({
             "type": "danmaku",
             "username": username,
@@ -296,8 +298,8 @@ class _BiliDanmakuHandler(blivedm.BaseHandler):
         # [xxx] 占位或装饰格式，无实质内容，直接丢弃（不推送也不显示）
         if "[" in text or "]" in text:
             return
-        # 键盘敏感词过滤（data/keyboard.txt，参考 AI-Vtuber badwords）：命中即丢弃
-        if _get_keyboard_filter().has_hit(text):
+        # 脏话过滤（data/profanity.txt，参考 AI-Vtuber badwords）：命中即丢弃
+        if _get_profanity_filter().has_hit(text):
             return
         # 表情包弹幕：内容为占位文本
         if message.dm_type == 1 and message.emoticon_options_dict.get("url"):
@@ -306,8 +308,11 @@ class _BiliDanmakuHandler(blivedm.BaseHandler):
         uname = message.uname or "匿名"
         avatar = message.face or self._avatars.get(uid)
         if avatar:
-            # 弹幕自带 face：后台预取图片字节，避免首次请求等 B 站
+            # 弹幕自带 face：后台预取图片字节 + 推 avatar 事件，
+            # 让精选回复卡片/左侧实时流按 uid 补上头像
             self._schedule_prefetch(avatar)
+            self._b.push({"type": "avatar", "uid": uid,
+                          "avatar": self._proxy_avatar(avatar)})
         self._push(uname, text, avatar, uid)
         # 交给弹幕挑选器：兴趣度评分 → 排队 → 挑"有趣"的让 AI 回复
         picker = _get_danmaku_picker()
@@ -379,8 +384,8 @@ class BiliDanmakuService:
         self._http_thread: Optional[threading.Thread] = None
         self._bili_thread: Optional[threading.Thread] = None
         self._running = False
-        self._html_path = os.path.join(
-            os.path.dirname(os.path.abspath(__file__)), "新建 文本文档.html")
+        # 弹幕气泡网页：统一放在项目 ui/ 目录
+        self._html_path = os.path.join(config.cfg.PROJECT_ROOT, "ui", "弹幕卡片.html")
 
     def start(self) -> None:
         if self._running:
@@ -578,12 +583,18 @@ _BORING_TOKENS = ("666", "233", "hhh", "哈哈哈", "哈哈", "来了", "打卡"
                   "签到", "1", "2", "3", "a", "s", "d", "f", "q", "w",
                   "e", "r", "t", "y", "。。", "..")
 _BORING_RE = re.compile(r"^(哈|啊|哦|嗯|6|2|h|w)+$")
+# 实质内容检测：含中英文/数字/假名才算有内容；纯标点符号（"？？？"、
+# "！！！"、"。。。"）无内容，不值得回
+_HAS_CONTENT_RE = re.compile(r"[A-Za-z0-9\u4e00-\u9fff\u3040-\u30ff\uac00-\ud7af]")
 
 # 回复间隔（与 ProactiveEngine 解耦，独立控制弹幕节奏）
-_DEFAULT_MIN_GAP_S = 25       # 两次弹幕回复最少间隔 25 秒（防止刷屏）
-_DEFAULT_MAX_GAP_S = 70       # 最长 70 秒不回就挑当前最好的（保底防冷场）
-_DEFAULT_WINDOW_S = 15        # 窗口 15 秒：弹幕到齐后比较，挑分最高的回
-_DEFAULT_MIN_SCORE = 15       # 低于此分的弹幕直接丢弃（太水不值得回）
+# 冷却初始值（秒）；每次回复后从共用随机间隔范围
+# （config.RESPONSE_INTERVAL_MIN~MAX，与主动对话同一范围）滚动取值，
+# 避免固定 20s 节奏显得机械。
+_DEFAULT_MIN_GAP_S = 20      # 两次弹幕回复最少间隔（初始/兜底）
+_DEFAULT_MAX_GAP_S = 30       # 最长 70 秒不回就挑当前最好的（保底防冷场）
+_DEFAULT_WINDOW_S = 8       # 窗口 15 秒：弹幕到齐后比较，挑分最高的回
+_DEFAULT_MIN_SCORE = 20       # 低于此分的弹幕直接丢弃（太水不值得回）
 
 
 class DanmakuPicker:
@@ -683,6 +694,11 @@ class DanmakuPicker:
             return 0
         if any(tok == text for tok in _BORING_TOKENS):
             return 0
+        # 纯标点/符号（"？？？"、"！！！"）：无实质内容，直接 0 分。
+        # 否则 "？" 在 _HOT_TOKENS 里会按"提问"狂加分（基础 10 + 12 + 3），
+        # 一条空标点反而越过门槛被精选。
+        if not _HAS_CONTENT_RE.search(text):
+            return 0
 
         score = 10  # 基础分：过了上面两道门就算 10 分起
 
@@ -750,6 +766,7 @@ class DanmakuPicker:
                 self._max_gap_timer = None
             _, uid, username, text, _ = best
             self._last_reply_at = time.time()
+            self._roll_cooldown()
         try:
             console.dim(f"[弹幕] 精选回复 {username}")
             self._cb(uid, username, text)
@@ -776,11 +793,17 @@ class DanmakuPicker:
                 self._window_started_at = None
             _, uid, username, text, _ = best
             self._last_reply_at = time.time()
+            self._roll_cooldown()
         try:
             console.dim(f"[弹幕] 保底回复 {username}")
             self._cb(uid, username, text)
         except Exception as e:
             console.error(f"[弹幕] 回调异常：{type(e).__name__}: {e}")
+
+    def _roll_cooldown(self) -> None:
+        """回复后滚动冷却时长：与主动对话共用随机间隔范围，避免固定节奏。"""
+        self._min_gap_s = random.uniform(
+            config.cfg.RESPONSE_INTERVAL_MIN, config.cfg.RESPONSE_INTERVAL_MAX)
 
     def _in_cooldown_locked(self) -> bool:
         return (time.time() - self._last_reply_at) < self._min_gap_s

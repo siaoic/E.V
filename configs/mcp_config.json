@@ -6,13 +6,13 @@
       "DEFAULT_PARAMETERS": "{\"include_images\": false, \"max_results\": 5}"
     }
   },
-  "playwright_disabled": {
+  "playwright": {
     "command": "npx",
     "args": [
       "@playwright/mcp@latest"
     ]
   },
-  "tavily_local_disabled": {
+  "tavily_local": {
     "command": "npx",
     "args": [
       "-y",

@@ -5,6 +5,7 @@ main.py 仅保留最薄的入口层（编码设置、vendor 路径注入、调�
 """
 
 import asyncio
+import json
 import logging
 import os
 import random
@@ -21,6 +22,7 @@ from src.memory import memory
 from src.llm import stream
 from src.utils.content_filter import ProfanityFilter
 from src.llm.agent import ButlerAgent
+from src.llm.evolution import EvolutionEngine
 from src.mcp.manager import MCPManager
 from src.llm.proactive import ProactiveEngine
 from src.vts.face_driver import FaceDriver
@@ -31,12 +33,84 @@ from src.vts.controller import VTSController
 from src.utils.perf_tracker import PerfTracker
 from src.utils.subtitle_server import SubtitleServer
 from src.core.output_lock import (
-    get_output_lock, set_output_owner, is_rejecting_input,
+    STATE_AI_SPEAKING, STATE_IDLE, STATE_USER_TALKING,
+    get_output_lock, get_output_owner, set_output_owner, set_global_state,
+    is_rejecting_input, set_danmaku_pending,
 )
+
+# 记忆自动整合蒸馏：碎片条数 ≥ 阈值时触发 AI 蒸馏合并（成功后才删除旧碎片），
+# 后台循环检查间隔（秒）。阈值 60 = 约 4 批 × 15 条，正常会话去重后很少触达。
+_MEMORY_INTEGRATE_THRESHOLD = 60
+_MEMORY_INTEGRATE_INTERVAL = 2 * 3600
 
 
 class Application:
     """封装整份运行时状态：原 main() 内的局部变量全部变为 self 属性。"""
+
+    # ---------- 自我进化：定期自我提示 ----------
+
+    async def _evolution_periodic_loop(self) -> None:
+        """后台循环：每 EVOLUTION_PERIODIC_INTERVAL 秒检查一次，空闲期主动补复盘。
+
+        仅当距上次复盘已达标且存在未复盘的新对话轮次时才调用 LLM
+        （见 EvolutionEngine.periodic_tick 的节流判定），不重复消费 token。
+        """
+        interval = max(60, int(self.cfg.EVOLUTION_PERIODIC_INTERVAL or 1800))
+        while True:
+            await asyncio.sleep(interval)
+            if self.evolution is None:
+                continue
+            try:
+                await self.evolution.periodic_tick(
+                    self.mm.recent_turns if self.mm is not None else [],
+                    proactive=self.proactive)
+            except Exception:
+                pass
+
+    # ---------- 记忆自动整合蒸馏 ----------
+
+    async def _memory_integration_loop(self, interval: float = _MEMORY_INTEGRATE_INTERVAL) -> None:
+        """后台循环：记忆碎片超过阈值时由 AI 蒸馏合并，并删除已蒸馏的旧条目。"""
+        while True:
+            try:
+                await self._integrate_memories()
+            except Exception as e:
+                console.dim(f"[记忆整合] 检查出错（不影响运行）：{e}")
+            await asyncio.sleep(interval)
+
+    async def _integrate_memories(self) -> None:
+        """AI 自动蒸馏整库记忆：蒸馏成功才删除旧碎片，失败保留原记忆。"""
+        if not (self.cfg.MEMORY_ENABLED and self.butler is not None
+                and self.mm is not None):
+            return
+        try:
+            files = self.mm.list_files()
+        except Exception as e:
+            console.dim(f"[记忆整合] 读取记忆库失败：{e}")
+            return
+        if len(files) < _MEMORY_INTEGRATE_THRESHOLD:
+            return
+        console.dim(f"[记忆整合] 记忆碎片达 {len(files)} 条，开始 AI 蒸馏整合...")
+        entries = await self.butler.integrate_memories(files)
+        if not entries:
+            console.dim("[记忆整合] 无可用蒸馏结果，保留原记忆")
+            return
+        # 删除前备份：蒸馏合并为破坏性操作，留一份快照便于回滚
+        try:
+            backup_path = os.path.join(
+                self.cfg.PROJECT_ROOT, "data",
+                f"backup_memories_{datetime.now().strftime('%Y%m%d_%H%M%S')}.json")
+            with open(backup_path, "w", encoding="utf-8") as f:
+                json.dump(files, f, ensure_ascii=False, indent=1)
+            console.dim(f"[记忆整合] 已备份 -> {backup_path}")
+        except OSError as e:
+            console.dim(f"[记忆整合] 备份失败（继续整合）：{e}")
+        ids = [str(f.get("id")) for f in files if f.get("id")]
+        deleted = self.mm.delete_memories(ids)
+        result = await self.mm.commit_recall_files(entries)
+        written = len(result.get("recall_files") or [])
+        console.dim(f"[记忆整合] 完成：删除 {deleted} 条碎片，"
+                    f"写入 {written} 条新记忆（当前共 {self.mm.count()} 条）")
 
     # ---------- 输入等待：事件驱动心跳 + 输入监听 ----------
 
@@ -59,6 +133,7 @@ class Application:
             return await input_fut
         stt_fut = self.stt_engine.result_future() if self.stt_engine is not None else None
         wake_task = None
+        speak_task = None
         while True:
             pending = {input_fut}
             if stt_fut is not None:
@@ -70,6 +145,13 @@ class Application:
                 if wake_task is None or wake_task.done():
                     wake_task = asyncio.create_task(self.proactive._wakeup.wait())
                 pending.add(wake_task)
+                # 主动发言播报中：挂一个「播完事件」精确唤醒（无周期轮询），
+                # 播完只需重新等待输入，不触发心跳（防刚说完立刻又接一条）
+                if (not self.proactive._speak_done.is_set()
+                        and (speak_task is None or speak_task.done())):
+                    speak_task = asyncio.create_task(
+                        self.proactive._speak_done.wait())
+                    pending.add(speak_task)
             timeout = (self.proactive.next_wake_in()
                        if self.proactive is not None else None)
             done, _ = await asyncio.wait(
@@ -90,17 +172,53 @@ class Application:
                 print("你 > ", end="", flush=True)
                 continue
 
+            if not done:
+                # 静默期「开口机会」时刻到点（单次精确唤醒）：做一次心跳，
+                # 由主模型自主决定此刻想不想说话（想说就开口，不想说保持
+                # 沉默）。heartbeat 内部自带忙碌抑制/弹幕避让/话题保护，
+                # 不会乱开口。
+                print()
+                try:
+                    await self.proactive.heartbeat()
+                except Exception as e:
+                    import traceback as _tb
+                    console.error(
+                        f"主动对话心跳出错：{e}\n"
+                        f"{''.join(_tb.format_exception(type(e), e, e.__traceback__))}")
+                print("你 > ", end="", flush=True)
+                continue
+
+            if speak_task is not None and speak_task in done:
+                # 主动播报结束：重新等待输入（speak_done 已置位，下次不会再挂）
+                continue
+
             if input_fut in done:
                 text = input_fut.result()
                 # ---- 拒收：主动 / 弹幕正在播报 → 丢本条，换新 input_fut 继续等 ----
                 if is_rejecting_input():
-                    console.dim("[输入丢弃] 正在回复弹幕 / 主动说话，忽略本次键盘输入")
+                    if text in ("/quit", "/exit", "/q"):
+                        # 停止命令穿透拒收：播报中也能优雅退出。否则控制中心
+                        # 点停止发的 /quit 被丢弃，30 秒窗口耗尽被强杀，记忆
+                        # 归档全部丢失。
+                        return text
+                    if text.startswith("!"):
+                        # 控制中心热更新命令（!config/!tts/!tools/!model 等）：
+                        # 不是用户发言，即使正在播报也照常执行，避免命令被吞
+                        try:
+                            await self._dispatch(text)
+                        except Exception as e:
+                            console.error(f"[控制中心] 命令执行失败：{e}")
+                    else:
+                        console.dim("[输入丢弃] 正在回复弹幕 / 主动说话，忽略本次键盘输入")
                     input_fut = loop.run_in_executor(None, lambda: input(""))
                     continue
+                if self.proactive is not None:
+                    # 用户输入优先：丢弃排队中的主动消息，只保留正在播报的
+                    self.proactive.discard_pending()
                 return text
 
             if stt_fut is not None and stt_fut in done:
-                text = stt_fut.result()
+                text, _ = stt_fut.result()
                 stt_fut = self.stt_engine.result_future()  # 拿下一个识别结果
                 if not text:
                     continue
@@ -108,6 +226,9 @@ class Application:
                 if is_rejecting_input():
                     console.dim("[输入丢弃] 正在回复弹幕 / 主动说话，忽略本次语音输入")
                     continue
+                if self.proactive is not None:
+                    # 用户输入优先：丢弃排队中的主动消息
+                    self.proactive.discard_pending()
                 print(f"[语音识别] {text}", flush=True)
                 return text
 
@@ -130,7 +251,7 @@ class Application:
     async def _chat_danmaku(self, uid, username, text) -> None:
         """弹幕精选回复：走完整的 LLM→TTS→字幕→口型→记忆链路。
 
-        注意：到达这里的弹幕已经过 KeyboardFilter（data/keyboard.txt）过滤，
+        注意：到达这里的弹幕已经过 ProfanityFilter（data/profanity.txt）过滤，
         命中词库的弹幕在 _on_danmaku 入口就被丢弃（不显示、不回复）。
         所以这里直接用原文，不做任何替换/过滤。
 
@@ -140,10 +261,32 @@ class Application:
         """
         cfg = self.cfg
 
-        # 正在播报中（锁被占用）：丢弃本条，播放完才接受新弹幕
+        # 正在播报中（锁被占用）：丢弃本条，播放完才接受新弹幕。
+        # 注意：_on_pick 已置位「弹幕回复待播报」标记，此处须按情况清除——
+        # 锁被另一条弹幕占用：其播完的 finally 会清 pending，这里不能抢清
+        # （否则正在播报的弹幕还没说完，主动对话就恢复触发）；
+        # 锁被主动/用户占用：本条被跳过后无人再清 pending，必须立即清除，
+        # 否则主动对话被永久静音。
         if get_output_lock().locked():
             console.dim(f"[弹幕] 正在播报，跳过本条（{username}：{text}）")
+            if get_output_owner() != "danmaku":
+                set_danmaku_pending(False)
             return
+
+        # 通过跳过检查、真正开始回复：左栏「对话」显示本条弹幕（被跳过的
+        # 弹幕不显示），同时推 SSE 让前端卡片展示
+        # （被跳过/未真正回复的弹幕不上卡片，只留在左侧实时流）
+        console.chat(f"精彩弹幕：{text}")
+        if self.bili_svc is not None:
+            try:
+                self.bili_svc.broadcaster.push({
+                    "type": "reply",
+                    "username": username,
+                    "text": text,
+                    "uid": uid,
+                })
+            except Exception:
+                pass
 
         wrapped = (
             f"[系统提示] 现在你在直播间，收到观众弹幕请自然地回一句。"
@@ -175,8 +318,9 @@ class Application:
             if not (cfg.MEMORY_ENABLED and self.butler and self.mm):
                 return
             try:
-                self.mm.add_turn("user", f"[弹幕@{username}] {_turn_user}")
-                self.mm.add_turn("muika", reply_text)
+                self.mm.add_turn("user", f"[弹幕@{username}] {_turn_user}",
+                                 source="danmaku_input")
+                self.mm.add_turn("muika", reply_text, source="danmaku_reply")
                 await self.butler.submit_extract_and_store(
                     [{"role": "user", "content": f"[弹幕@{username}] {_turn_user}"},
                      {"role": "assistant", "content": reply_text}],
@@ -184,6 +328,13 @@ class Application:
                 )
             except Exception as e:
                 console.dim(f"[ButlerAgent] 弹幕记忆提取出错：{e}")
+            # 自我进化：复盘走管家模型（agent 配置），后台执行不阻塞弹幕播报
+            if self.evolution is not None:
+                try:
+                    asyncio.create_task(self.evolution.maybe_review(
+                        self.mm.recent_turns, proactive=self.proactive))
+                except Exception:
+                    pass
 
         try:
             # 全局输出互斥（owner="danmaku"）+ 不带打断监听的 stream.converse：
@@ -191,21 +342,40 @@ class Application:
             # - owner 标记让 _wait_input 丢弃此间到达的输入；
             # - 无打断监听保证内部不会自己跳。
             output_lock = get_output_lock()
+            acquired = False
             async with output_lock:
+                acquired = True
                 set_output_owner("danmaku")
-                try:
-                    await stream.converse(
-                        self.brain, wrapped, tts=self.tts, face=self.face, sub=self.sub,
-                        profanity_filter=self.pf,
-                        profanity_filter_rate=cfg.PROFANITY_FILTER_RATE,
-                        on_llm_done=_on_llm_done if cfg.MEMORY_ENABLED else None,
-                    )
-                finally:
-                    set_output_owner(None)
+                set_global_state(STATE_AI_SPEAKING)
+                # 复位残留打断标志：用户对话中途被打断后 _interrupted 仍为 True，
+                # 若不复位，本条弹幕回复的句子会被 speak()/_pump 全部丢弃，
+                # 表现为「弹幕回复播放不完整（甚至完全无声）」。
+                if self.tts is not None:
+                    try:
+                        self.tts.clear_interrupt()
+                    except Exception:
+                        pass
+                await stream.converse(
+                    self.brain, wrapped, tts=self.tts, face=self.face, sub=self.sub,
+                    profanity_filter=self.pf,
+                    profanity_filter_rate=cfg.PROFANITY_FILTER_RATE,
+                    on_llm_done=_on_llm_done if cfg.MEMORY_ENABLED else None,
+                )
+                # 左栏对话换行：回复句子是连续流（无换行），收尾补一个，
+                # 避免与下一条弹幕/发言粘连成一行
+                console.chat()
         except asyncio.CancelledError:
             raise
         except Exception as e:
             console.error(f"弹幕回复出错：{e}")
+        finally:
+            # 兜底恢复：真正拿到锁才还原 owner/状态（避免覆盖并发说话者）；
+            # 「弹幕回复待播报」标记无论是否开场都要清除（含等锁期间取消），
+            # 否则主动对话会被永久静音。
+            if acquired:
+                set_output_owner(None)
+                set_global_state(STATE_IDLE)
+            set_danmaku_pending(False)
 
         turn_tracker.end("端到端")
         turn_tracker.print_report()
@@ -258,17 +428,19 @@ class Application:
 
         queue: asyncio.Queue = asyncio.Queue(maxsize=64)
         loop = asyncio.get_running_loop()
+        svc = BiliDanmakuService()
+        svc.start()
 
         def _on_pick(uid: int, username: str, text: str) -> None:
             try:
+                # 弹幕回复已敲定：置标记，主动对话在此期间避让不抢话
+                set_danmaku_pending(True)
                 loop.call_soon_threadsafe(queue.put_nowait, (uid, username, text))
             except Exception as e:
                 console.error(f"[弹幕] 入队失败：{e}")
 
         picker = DanmakuPicker(_on_pick)
         set_danmaku_picker(picker)
-        svc = BiliDanmakuService()
-        svc.start()
         task = asyncio.create_task(
             self._danmaku_reply_loop(queue),
             name="danmaku_reply_loop",
@@ -290,10 +462,11 @@ class Application:
         sub = self.sub
         stt = self.stt_engine
         loop = asyncio.get_running_loop()
-        print()  # 回复起始换行
+        console.chat()  # 回复起始换行
         output_lock = get_output_lock()
         async with output_lock:
             set_output_owner("user")
+            set_global_state(STATE_AI_SPEAKING)
             try:
                 if tts is not None:
                     try:
@@ -331,14 +504,21 @@ class Application:
                             watch.add(input_fut)
                             continue
                     elif stt_fut is not None and stt_fut in done:
-                        buzz = stt_fut.result()
-                        got_input = True
+                        buzz, speech_seconds = stt_fut.result()
                         old = stt_fut
                         stt_fut = stt.result_future()
                         watch.discard(old)
                         watch.add(stt_fut)
                         if not buzz.strip():
                             continue
+                        # 打断仅限说话时长超过阈值：过短语音（嗯/啊/咳嗽/
+                        # 环境音）不打断当前播报，继续监听下一条
+                        if speech_seconds <= self.cfg.STT_INTERRUPT_MIN_SECONDS:
+                            console.dim(
+                                f"[打断] 语音过短（{speech_seconds:.1f}s），"
+                                "不打断当前播报")
+                            continue
+                        got_input = True
                     if got_input:
                         # 打断：立即闭嘴 → 取消 LLM 流
                         console.dim("[打断] 用户输入/语音打断当前播报")
@@ -362,7 +542,7 @@ class Application:
                             await conv
                         except (asyncio.CancelledError, Exception):
                             pass
-                        print()  # 打断换行
+                        console.chat()  # 打断换行
                         buzz = buzz.strip()
                         if stt_fut is not None and not stt_fut.done():
                             stt_fut.cancel()
@@ -377,31 +557,40 @@ class Application:
                             console.error(f"对话流程出错：{e}")
                         if stt_fut is not None and not stt_fut.done():
                             stt_fut.cancel()
-                        print()  # 回复结束换行
+                        console.chat()  # 回复结束换行
                         if input_fut is not None and not input_fut.done():
                             return False, "", input_fut
                         return False, "", None
             finally:
                 set_output_owner(None)
+                set_global_state(STATE_IDLE)
 
     # ---------- 控制中心命令热更新：_dispatch ----------
 
     async def _speak_memory_reply(self, text: str) -> None:
         """记忆指令确认播报：控制台 + 字幕 + TTS（走全局输出锁，互斥不打断）。"""
-        if self.sub is not None:
-            self.sub.push("text", text)
         if self.tts is None:
+            # 无 TTS：直接推整句字幕（没有播放时机，逐字推进无从谈起）
+            if self.sub is not None:
+                self.sub.push("text", text)
             console.ok(text)
             return
+        # 有 TTS：字幕交给 TTS 引擎的字幕管线逐字推进，此处不预推整句，
+        # 否则整句会先于语音出现、覆盖逐字浮现效果。
         output_lock = get_output_lock()
         async with output_lock:
             set_output_owner("command")
+            set_global_state(STATE_AI_SPEAKING)
             try:
                 self.tts.clear_interrupt()
                 await self.tts.speak(text)
                 await self.tts.drain()
             finally:
                 set_output_owner(None)
+                set_global_state(STATE_IDLE)
+                # 说完后清字幕（前端据此 3 秒后淡出）
+                if self.sub is not None:
+                    self.sub.push("clear", "")
 
     async def _handle_memory_command(self, cmd: str) -> bool:
         """/memory 子命令：list 列出｜del <id>... 删除｜clear 清空｜decay 衰减。"""
@@ -551,19 +740,9 @@ class Application:
             # 桌宠窗口置顶/尺寸/待机动作热应用
             if self.pet_widget is not None:
                 self.pet_widget.apply_config(cfg_mod.cfg)
-            # 情绪控制热启停（仅桌宠模式生效）：开启时创建 actor 并加载映射，
-            # 关闭时置空（每轮用户消息的分类调用点自动跳过）；开启中则热重载映射
-            want_emotion = bool(cfg_mod.cfg.EMOTION_ACTOR_ENABLED)
-            if self.emotion_actor is not None and not want_emotion:
-                self.emotion_actor = None
-                console.ok("情绪控制已热关闭")
-            elif want_emotion:
-                if self.emotion_actor is None:
-                    if self.pet_widget is not None:
-                        from src.pet.emotion_actor import PetEmotionActor
-                        self.emotion_actor = PetEmotionActor(self.pet_widget, self.cfg)
-                        self.emotion_actor.scan()
-                        console.ok("情绪控制已热启用")
+            # 情绪映射热重载（仅桌宠模式生效）：actor 常驻（手动命令/试播始终可用），
+            # 映射文件变化即时生效；自动分类播放由调用点按 EMOTION_ACTOR_ENABLED 控制
+            if self.emotion_actor is not None:
                 self.emotion_actor.load_map()
             console.ok("配置已全部热更新（立即生效，无需重启）")
             return True
@@ -602,15 +781,43 @@ class Application:
             return True
         if self.tts is not None and cmd.startswith("!tts_text "):
             new_text = cmd[len("!tts_text "):].strip()
-            self.tts.apply_ref(self.tts.ref_audio, new_text)
+            # 只更新文本：沿用主参考原始串（ref_audio 可能是主+辅助的合成 dict）
+            self.tts.apply_ref(self.tts._ref_main, new_text)
             console.ok(f"已热更新 TTS 参考音频文本：{new_text}")
             return True
+        if self.tts is not None and cmd.startswith("!tts_audios "):
+            new_extras = cmd[len("!tts_audios "):].strip()
+            self.tts.apply_ref_extras(new_extras)
+            console.ok(f"已热更新 TTS 辅助参考音频：{new_extras}")
+            return True
 
-        # 桌宠表情/动作命令
+        # 表情/动作命令（桌宠 / VTS 模式）
         if self.emotion_actor is not None and cmd.startswith("/"):
             await self.emotion_actor.handle(cmd)
             return True
         return False
+
+    async def _archive_session(self) -> None:
+        """退出前会话归档：摘要写入档案 + 蒸馏记忆写回记忆库。
+
+        含两轮 LLM 调用（会话摘要 + 蒸馏）。两轮互不依赖，并行执行——
+        串行时停止最坏要等两轮 LLM；并行后耗时 ≈ 单轮，明显缩短停止等待。
+        退出时由 _shutdown 包一层 20s 总额超时兜底，避免 LLM 完全无响应
+        时退出无限等待。
+        """
+        turns = self.mm.recent_turns
+        summary, entries = await asyncio.gather(
+            self.butler.summarize_session(turns[-30:]),
+            self.butler.distill_session(turns[-30:]),
+        )
+        if summary:
+            await self.mm.update_archive_async(
+                summary=summary,
+                period_start=self.mm.started_at or turns[0].get("timestamp", ""),
+                period_end=datetime.now().isoformat(),
+            )
+        if entries:
+            await self.mm.commit_recall_files(entries)
 
     # ---------- 主运行入口 ----------
 
@@ -644,15 +851,18 @@ class Application:
             if self.cfg.EMOTION_ACTOR_ENABLED:
                 console.dim("表情/动作：Embedding 情绪自动控制已启用（用户消息分类情绪播放；"
                             "也可用 /expr /motion /face list 手动控制）")
+            else:
+                console.dim("表情/动作：自动情绪控制未启用（/expr /motion /face list 手动控制仍可用）")
 
             self.pet_widget = PetWidget(self.cfg)
             self.pet_widget.show()
-            if self.cfg.EMOTION_ACTOR_ENABLED:
-                from src.pet.emotion_actor import PetEmotionActor
-                self.emotion_actor = PetEmotionActor(self.pet_widget, self.cfg)
-                self.emotion_actor.scan()
-                self.emotion_actor.load_map()
-                self.pet_widget.on_model_loaded = lambda w: self.emotion_actor.scan()
+            # 表情/动作 actor 总是创建：手动命令与控制中心试播不依赖自动控制开关，
+            # 自动分类播放由调用点按 EMOTION_ACTOR_ENABLED 开关控制
+            from src.pet.emotion_actor import PetEmotionActor
+            self.emotion_actor = PetEmotionActor(self.pet_widget, self.cfg)
+            self.emotion_actor.scan()
+            self.emotion_actor.load_map()
+            self.pet_widget.on_model_loaded = lambda w: self.emotion_actor.scan()
             self.face = PetFaceDriver(self.pet_widget, self.cfg)
             self.pet_widget.attach_driver(self.face)
             self.face.start()
@@ -709,6 +919,9 @@ class Application:
         else:
             self.butler = None
 
+        # 自我进化引擎（对话后后台复盘，随配置开关创建）
+        self.evolution = EvolutionEngine() if self.cfg.EVOLUTION_ENABLED else None
+
         # MCP 管理器
         self.mcp = MCPManager() if (self.cfg.MCP_ENABLED and self.cfg.TOOLS_ENABLED) else None
         if self.mcp is not None:
@@ -753,6 +966,23 @@ class Application:
                 self.face.start()
                 if self.cfg.MOTION_PATH:
                     self.face.set_motion(self.cfg.MOTION_PATH)
+                elif self.cfg.VTS_IDLE_TAKEOVER and profile.idle_motion:
+                    self.face.set_motion(profile.idle_motion)
+                    console.ok(f"待机动画接管：{os.path.basename(profile.idle_motion)}"
+                              f"（P2 覆盖 VTS 待机，循环点已平滑）")
+
+                # 表情/动作演员（VTS 模式）：用户消息 → Embedding 情绪分类 → 播放表情/动作。
+                # 总是创建：手动命令与控制中心试播不依赖自动控制开关，
+                # 自动分类播放由主循环按 EMOTION_ACTOR_ENABLED 开关控制
+                from src.vts.emotion_actor import VtsEmotionActor
+                self.emotion_actor = VtsEmotionActor(self.vts, self.cfg, face=self.face)
+                await self.emotion_actor.scan()
+                self.emotion_actor.load_map()
+                if self.cfg.EMOTION_ACTOR_ENABLED:
+                    console.dim("表情/动作：Embedding 情绪自动控制已启用（用户消息分类情绪播放；"
+                                "也可用 /expr /motion /face list 手动控制）")
+                else:
+                    console.dim("表情/动作：自动情绪控制未启用（/expr /motion /face list 手动控制仍可用）")
 
             # TTS 引擎
             self.tts = None
@@ -762,14 +992,15 @@ class Application:
                 if not tts_ok:
                     self.tts = None
                 else:
-                    def _on_tts_play(wav: str, text: str, dur_s: float) -> None:
-                        if not self.face.load_speech_curve(wav):
-                            self.face.start_speaking(dur_s)
-                        if self.sub and text:
-                            chars = max(1, len(text))
-                            self.sub.push("text", text, speed_ms=dur_s * 1000 / chars)
+                    # 口型回调只在有脸部驱动器时注册：纯对话模式（无 VTS/桌宠）
+                    # 下 self.face 为 None，注册了会每块音频都报
+                    # 'NoneType' object has no attribute 'load_speech_curve'
+                    if self.face is not None:
+                        def _on_tts_play(wav: str, text: str, dur_s: float) -> None:
+                            if not self.face.load_speech_curve(wav):
+                                self.face.start_speaking(dur_s)
 
-                    self.tts.set_on_play_callback(_on_tts_play)
+                        self.tts.set_on_play_callback(_on_tts_play)
                     if self.sub:
                         self.tts.set_subtitle_callback(lambda t: self.sub.push("text", t))
 
@@ -787,6 +1018,8 @@ class Application:
                 asyncio.create_task(memory.warmup())
                 # 记忆时间衰减：后台定时清理长期未更新的非固定记忆
                 asyncio.create_task(memory.decay_loop())
+                # AI 自动整合蒸馏：碎片过多时后台蒸馏合并并删除旧条目
+                asyncio.create_task(self._memory_integration_loop())
 
             self.brain = LLMBrain(mcp=self.mcp)
 
@@ -804,11 +1037,16 @@ class Application:
                     profanity_filter_rate=self.cfg.PROFANITY_FILTER_RATE,
                 )
                 console.dim(
-                    f"主动对话已启用：随机+事件混合触发（互动/弹幕结束即检查，"
-                    f"静默期随机开口，安静 {self.cfg.PROACTIVE_MIN_IDLE_SECONDS:.0f}s 内不开口，"
-                    f"发言冷却 {self.cfg.PROACTIVE_COOLDOWN_SECONDS / 60:.0f}min）")
+                    f"主动对话已启用：LLM 自主开口（互动/弹幕结束即给机会，"
+                    f"静默期每 {self.cfg.RESPONSE_INTERVAL_MIN:.0f}~"
+                    f"{self.cfg.RESPONSE_INTERVAL_MAX:.0f}s 随机给一次机会，"
+                    f"是否开口由主模型自主决定）")
             else:
                 console.dim("主动对话未启用（.env 设置 PROACTIVE_ENABLED=true 开启）")
+
+            # 自我进化：定期自我提示（空闲期主动补复盘，后台循环）
+            if self.evolution is not None:
+                asyncio.create_task(self._evolution_periodic_loop())
 
             # 语音识别
             if self.cfg.STT_ENABLED:
@@ -853,6 +1091,19 @@ class Application:
                         console.ok(f"已适配新模型「{new_profile.model_name}」")
                         if self.cfg.MOTION_PATH:
                             self.face.set_motion(self.cfg.MOTION_PATH)
+                        elif self.cfg.VTS_IDLE_TAKEOVER:
+                            if new_profile.idle_motion:
+                                self.face.set_motion(new_profile.idle_motion)
+                                console.ok(f"待机动画接管：{os.path.basename(new_profile.idle_motion)}")
+                            else:
+                                # 新模型无待机动画可接管：停止旧模型遗留的动作注入
+                                self.face.stop_motion()
+                        # 表情/动作演员重扫（新模型的表情/动画热键不同）
+                        if self.emotion_actor is not None:
+                            try:
+                                await self.emotion_actor.scan()
+                            except Exception as e:
+                                console.dim(f"表情/动作重扫失败：{e}")
                     finally:
                         _scanning = False
                         self.face.start()
@@ -885,9 +1136,12 @@ class Application:
                     # 用户发言：重置主动引擎状态
                     if self.proactive is not None:
                         self.proactive.on_user_message()
+                    # 全局状态：用户输入已到达，agent 触发被抑制（忙碌避让）
+                    set_global_state(STATE_USER_TALKING)
 
-                    # 桌宠：用户消息分类情绪 → 后台播放表情/动作
-                    if self.emotion_actor is not None:
+                    # 用户消息分类情绪 → 后台播放表情/动作（桌宠/VTS 模式，仅开关开启时）
+                    if (self.emotion_actor is not None
+                            and config.cfg.EMOTION_ACTOR_ENABLED):
                         asyncio.create_task(self.emotion_actor.handle(user_text))
 
                     # 每轮对话性能埋点
@@ -907,8 +1161,9 @@ class Application:
                             if not (self.cfg.MEMORY_ENABLED and self.butler):
                                 return
                             try:
-                                self.mm.add_turn("user", _turn_user)
-                                self.mm.add_turn("muika", reply_text)
+                                self.mm.add_turn("user", _turn_user, source="user_input")
+                                self.mm.add_turn("muika", reply_text,
+                                                 source="main_llm_reply")
                                 await self.butler.submit_extract_and_store(
                                     [{"role": "user", "content": _turn_user},
                                      {"role": "assistant", "content": reply_text}],
@@ -916,6 +1171,16 @@ class Application:
                                 )
                             except Exception as e:
                                 console.dim(f"[ButlerAgent] 记忆提取出错（不影响对话）：{e}")
+                            # 自我进化：复盘走管家模型（agent 配置），
+                            # 后台执行不阻塞对话
+                            if self.evolution is not None:
+                                try:
+                                    asyncio.create_task(
+                                        self.evolution.maybe_review(
+                                            self.mm.recent_turns,
+                                            proactive=self.proactive))
+                                except Exception:
+                                    pass
 
                         interrupted, buzz, pending = await self._interruptible_converse(
                             user_text,
@@ -927,6 +1192,8 @@ class Application:
                     except Exception as e:
                         console.error(f"对话流程出错：{e}")
                         interrupted, buzz, self._pending_stdin_fut = False, "", None
+                        # 对话未正常结束：兜底复位状态，避免卡在忙碌态抑制 agent
+                        set_global_state(STATE_IDLE)
 
                     turn_tracker.end("端到端")
                     turn_tracker.print_report()
@@ -938,18 +1205,12 @@ class Application:
 
             console.dim("再见～")
         finally:
-            # 会话结束归档 + 蒸馏
+            # 会话结束归档 + 蒸馏（蒸馏条目写回记忆库，重启后检索可带出）。
+            # 归档含两轮 LLM 调用，给 20s 总额超时兜底：LLM 完全无响应时
+            # 不能无限等待（否则控制中心 30 秒强杀导致 Crashed），超时跳过。
             if self.cfg.MEMORY_ENABLED and self.butler is not None and self.mm is not None:
                 try:
-                    turns = self.mm.recent_turns
-                    summary = await self.butler.summarize_session(turns[-30:])
-                    if summary:
-                        await self.mm.update_archive_async(
-                            summary=summary,
-                            period_start=self.mm.started_at or turns[0].get("timestamp", ""),
-                            period_end=datetime.now().isoformat(),
-                        )
-                    await self.butler.distill_session(turns[-30:])
+                    await asyncio.wait_for(self._archive_session(), timeout=20)
                 except Exception as e:
                     console.warn(f"会话摘要/蒸馏失败（不影响退出）：{e}")
 
@@ -971,7 +1232,10 @@ class Application:
                     pass
             if self.tts is not None:
                 try:
-                    await asyncio.wait_for(self.tts.drain(), timeout=15)
+                    # 停止时先打断播放：drain 立即返回。否则若队列里还有
+                    # 音频，drain 会等它播完（最多 15s），停止明显变慢。
+                    self.tts.interrupt()
+                    await asyncio.wait_for(self.tts.drain(), timeout=5)
                     await asyncio.wait_for(self.tts.stop(), timeout=15)
                 except Exception:
                     pass

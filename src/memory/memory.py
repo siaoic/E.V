@@ -27,6 +27,7 @@ import os
 import re
 import sys
 import threading
+import time
 from datetime import datetime, timedelta, timezone
 
 # ---------- 常量（vtuber 语义，供调用方 / 图谱 / 测试引用） ----------
@@ -79,10 +80,15 @@ class MemoryManager:
     """
 
     def __init__(self) -> None:
-        self.recent_turns: list[dict] = []
+        self._turns: list[dict] = []
         self.started_at: str | None = None
         self._service: Any = None
         self._service_lock = threading.Lock()
+        # 会话轮次锁：读写 recent_turns 都要拿锁（后台 agent 只读快照）
+        self._turns_lock = threading.RLock()
+        # memU 服务 IO 锁：主事件循环与后台线程（memory_tools 经
+        # asyncio.to_thread 写记忆）可能并发访问 sqlite，串行化防脏数据
+        self._io_lock = threading.RLock()
 
     # ---------- service 生命周期 ----------
 
@@ -167,28 +173,42 @@ class MemoryManager:
 
     def new_session(self) -> None:
         """开启新一轮会话：清空进程内轮次并记录起始时间。"""
-        self.recent_turns = []
+        with self._turns_lock:
+            self._turns = []
         self.started_at = datetime.now().isoformat()
 
     # ---------- 会话轮次 ----------
 
-    def add_turn(self, role: str, content: str, user: str | None = None) -> None:
-        """记录一轮对话。AI 的发言归属 self，其余归传入的 user（默认用户）。"""
+    @property
+    def recent_turns(self) -> list[dict]:
+        """会话轮次快照：返回副本，防后台线程与主循环并发读写改坏列表。"""
+        with self._turns_lock:
+            return list(self._turns)
+
+    def add_turn(self, role: str, content: str, user: str | None = None,
+                 source: str | None = None) -> None:
+        """记录一轮对话。AI 的发言归属 self，其余归传入的 user（默认用户）。
+
+        source：可选来源标记（"proactive" 表示 agent 主动发言等），供记忆层
+        后续按归属区分权重，不影响既有读取逻辑。
+        """
         owner = (
             _USER_SELF
             if str(role).strip().lower() in ("assistant", "muika")
             else (user or _USER_DEFAULT)
         )
-        self.recent_turns.append({
-            "role": role,
-            "content": str(content or "").strip(),
-            "user": owner,
-            "timestamp": datetime.now().isoformat(),
-        })
-        if len(self.recent_turns) > _MAX_TURNS:
-            self.recent_turns = self.recent_turns[-_MAX_TURNS:]
-        if self.started_at is None and self.recent_turns:
-            self.started_at = self.recent_turns[0]["timestamp"]
+        with self._turns_lock:
+            self._turns.append({
+                "role": role,
+                "content": str(content or "").strip(),
+                "user": owner,
+                "source": source,
+                "timestamp": datetime.now().isoformat(),
+            })
+            if len(self._turns) > _MAX_TURNS:
+                self._turns = self._turns[-_MAX_TURNS:]
+            if self.started_at is None and self._turns:
+                self.started_at = self._turns[0]["timestamp"]
 
     # ---------- 归属与文件工具 ----------
 
@@ -220,35 +240,36 @@ class MemoryManager:
         查询失败时降级为按默认用户 + AI 自己分组回填。
         """
         service = self._ensure_service()
-        files: list[dict] = []
-        try:
-            # sqlmodel 懒加载：仅在有该依赖的环境（主程序）才可用
-            from sqlmodel import Session, select
-            model = service.database._sqla_models.RecallFile
-            with Session(service.database._sessions.engine) as session:
-                rows = session.exec(select(model)).all()
-            for row in rows:
-                files.append({
-                    "id": row.id,
-                    "name": row.name or "",
-                    "description": row.description or "",
-                    "content": row.content or "",
-                    "user": getattr(row, "user", None) or _USER_DEFAULT,
-                    "track": row.track or "memory",
-                    "created_at": str(row.created_at) if row.created_at else None,
-                    "updated_at": str(row.updated_at) if row.updated_at else None,
-                })
-        except Exception:
-            for owner in (_USER_DEFAULT, _USER_SELF):
-                rows = service.database.recall_file_repo.list_recall_files(
-                    {"user": owner}
-                ).values()
-                for record in rows:
-                    item = self._file_dict(record)
-                    item["user"] = owner
-                    files.append(item)
-        files.sort(key=lambda f: f.get("updated_at") or "", reverse=True)
-        return files
+        with self._io_lock:
+            files: list[dict] = []
+            try:
+                # sqlmodel 懒加载：仅在有该依赖的环境（主程序）才可用
+                from sqlmodel import Session, select
+                model = service.database._sqla_models.RecallFile
+                with Session(service.database._sessions.engine) as session:
+                    rows = session.exec(select(model)).all()
+                for row in rows:
+                    files.append({
+                        "id": row.id,
+                        "name": row.name or "",
+                        "description": row.description or "",
+                        "content": row.content or "",
+                        "user": getattr(row, "user", None) or _USER_DEFAULT,
+                        "track": row.track or "memory",
+                        "created_at": str(row.created_at) if row.created_at else None,
+                        "updated_at": str(row.updated_at) if row.updated_at else None,
+                    })
+            except Exception:
+                for owner in (_USER_DEFAULT, _USER_SELF):
+                    rows = service.database.recall_file_repo.list_recall_files(
+                        {"user": owner}
+                    ).values()
+                    for record in rows:
+                        item = self._file_dict(record)
+                        item["user"] = owner
+                        files.append(item)
+            files.sort(key=lambda f: f.get("updated_at") or "", reverse=True)
+            return files
 
     # ---------- 查询 ----------
 
@@ -284,31 +305,32 @@ class MemoryManager:
         if not self._ensure_embedding():
             return {"recall_files": []}
         service = self._ensure_service()
-        # 已有内容集合（精确去重基准）：user → {content}；查询失败则降级不去重
-        existing: dict[str, set[str]] = {}
-        try:
-            for row in self._walk_files():
-                owner = str(row.get("user") or _USER_DEFAULT)
-                existing.setdefault(owner, set()).add((row.get("content") or "").strip())
-        except Exception:
-            existing = {}
-        grouped: dict[str, list[dict]] = {}
-        for item in files:
-            owner = str(item.get("user") or _USER_DEFAULT).strip()[:32] or _USER_DEFAULT
-            content = (item.get("content") or "").strip()
-            if not content or content in existing.get(owner, set()):
-                continue  # 空内容或同用户已有相同内容 → 跳过
-            if await self._semantic_duplicate(content, owner):
-                console.dim(f"[记忆] 与已有记忆近似重复，跳过：{content[:24]}")
-                continue
-            existing.setdefault(owner, set()).add(content)  # 同批内也去重
-            grouped.setdefault(owner, []).append(item)
-        if not grouped:
-            return {"recall_files": []}
-        committed: list[dict] = []
-        for owner, items in grouped.items():
-            result = await service.commit_results(recall_files=items, user=self._scope(owner))
-            committed.extend(result.get("recall_files") or [])
+        with self._io_lock:
+            # 已有内容集合（精确去重基准）：user → {content}；查询失败则降级不去重
+            existing: dict[str, set[str]] = {}
+            try:
+                for row in self._walk_files():
+                    owner = str(row.get("user") or _USER_DEFAULT)
+                    existing.setdefault(owner, set()).add((row.get("content") or "").strip())
+            except Exception:
+                existing = {}
+            grouped: dict[str, list[dict]] = {}
+            for item in files:
+                owner = str(item.get("user") or _USER_DEFAULT).strip()[:32] or _USER_DEFAULT
+                content = (item.get("content") or "").strip()
+                if not content or content in existing.get(owner, set()):
+                    continue  # 空内容或同用户已有相同内容 → 跳过
+                if await self._semantic_duplicate(content, owner):
+                    console.dim(f"[记忆] 与已有记忆近似重复，跳过：{content[:24]}")
+                    continue
+                existing.setdefault(owner, set()).add(content)  # 同批内也去重
+                grouped.setdefault(owner, []).append(item)
+            if not grouped:
+                return {"recall_files": []}
+            committed: list[dict] = []
+            for owner, items in grouped.items():
+                result = await service.commit_results(recall_files=items, user=self._scope(owner))
+                committed.extend(result.get("recall_files") or [])
         export_graph_data()
         return {"recall_files": committed}
 
@@ -318,17 +340,18 @@ class MemoryManager:
         用 memU 向量检索对已有记忆做相似度召回，最高分达到阈值即跳过；
         embedding / 检索异常时保守返回 False（照常写入，不让去重拖垮记忆）。
         """
-        try:
-            service = self._ensure_service()
-            data = await service.progressive_retrieve(
-                content, where={"user": owner})
-        except Exception:
+        with self._io_lock:
+            try:
+                service = self._ensure_service()
+                data = await service.progressive_retrieve(
+                    content, where={"user": owner})
+            except Exception:
+                return False
+            for seg in data.get("segments") or []:
+                score = seg.get("score")
+                if isinstance(score, (int, float)) and float(score) >= _SEMANTIC_DUP_THRESHOLD:
+                    return True
             return False
-        for seg in data.get("segments") or []:
-            score = seg.get("score")
-            if isinstance(score, (int, float)) and float(score) >= _SEMANTIC_DUP_THRESHOLD:
-                return True
-        return False
 
     async def delete_memories_async(self, ids: list[str]) -> int:
         """异步删除（供 async 调用方，内部走线程池）。"""
@@ -340,21 +363,23 @@ class MemoryManager:
         if not id_list:
             return 0
         service = self._ensure_service()
-        deleted = service.database.recall_file_repo.clear_recall_files(
-            {"id__in": id_list}
-        )
-        service.database.recall_file_segment_repo.clear_segments(
-            {"recall_file_id__in": id_list}
-        )
+        with self._io_lock:
+            deleted = service.database.recall_file_repo.clear_recall_files(
+                {"id__in": id_list}
+            )
+            service.database.recall_file_segment_repo.clear_segments(
+                {"recall_file_id__in": id_list}
+            )
         export_graph_data()
         return len(deleted)
 
     def clear_all(self) -> None:
         """清空全部记忆文件 / 切片 / 资源。"""
         service = self._ensure_service()
-        service.database.recall_file_repo.clear_recall_files()
-        service.database.recall_file_segment_repo.clear_segments()
-        service.database.resource_repo.clear_resources()
+        with self._io_lock:
+            service.database.recall_file_repo.clear_recall_files()
+            service.database.recall_file_segment_repo.clear_segments()
+            service.database.resource_repo.clear_resources()
         export_graph_data()
 
     def remember_explicit(self, key: str, value: str) -> None:
@@ -368,15 +393,16 @@ class MemoryManager:
         if not self._ensure_embedding():
             return
         service = self._ensure_service()
-        await service.commit_results(
-            recall_files=[{
-                "name": (key or "").strip()[:64] or "记忆",
-                "track": "memory",
-                "description": key,
-                "content": str(value or "").strip(),
-            }],
-            user=self._scope(_USER_SELF),
-        )
+        with self._io_lock:
+            await service.commit_results(
+                recall_files=[{
+                    "name": (key or "").strip()[:64] or "记忆",
+                    "track": "memory",
+                    "description": key,
+                    "content": str(value or "").strip(),
+                }],
+                user=self._scope(_USER_SELF),
+            )
         export_graph_data()
 
     def forget_phrase(self, keyword: str) -> int:
@@ -385,44 +411,46 @@ class MemoryManager:
         if not keyword:
             return 0
         service = self._ensure_service()
-        rows = service.database.recall_file_repo.list_recall_files(
-            {"user__in": [_USER_DEFAULT, _USER_SELF]}
-        ).values()
-        hits = [
-            r for r in rows
-            if keyword in (r.name or "").lower()
-            or keyword in (r.description or "").lower()
-            or keyword in (r.content or "").lower()
-        ]
-        if not hits:
-            return 0
-        id_list = [r.id for r in hits]
-        service.database.recall_file_repo.clear_recall_files({"id__in": id_list})
-        service.database.recall_file_segment_repo.clear_segments(
-            {"recall_file_id__in": id_list}
-        )
+        with self._io_lock:
+            rows = service.database.recall_file_repo.list_recall_files(
+                {"user__in": [_USER_DEFAULT, _USER_SELF]}
+            ).values()
+            hits = [
+                r for r in rows
+                if keyword in (r.name or "").lower()
+                or keyword in (r.description or "").lower()
+                or keyword in (r.content or "").lower()
+            ]
+            if not hits:
+                return 0
+            id_list = [r.id for r in hits]
+            service.database.recall_file_repo.clear_recall_files({"id__in": id_list})
+            service.database.recall_file_segment_repo.clear_segments(
+                {"recall_file_id__in": id_list}
+            )
         export_graph_data()
         return len(id_list)
 
     def decay_stale_memories(self) -> int:
         """清理超过 TTL 未更新的记忆，返回清理条数。"""
         service = self._ensure_service()
-        rows = service.database.recall_file_repo.list_recall_files(
-            {"user__in": [_USER_DEFAULT, _USER_SELF]}
-        ).values()
-        cutoff = datetime.now(timezone.utc) - timedelta(days=_MEMORY_TTL_DAYS)
-        stale = [
-            r for r in rows
-            if r.updated_at is not None
-            and _to_utc(r.updated_at) < cutoff
-        ]
-        if not stale:
-            return 0
-        id_list = [r.id for r in stale]
-        service.database.recall_file_repo.clear_recall_files({"id__in": id_list})
-        service.database.recall_file_segment_repo.clear_segments(
-            {"recall_file_id__in": id_list}
-        )
+        with self._io_lock:
+            rows = service.database.recall_file_repo.list_recall_files(
+                {"user__in": [_USER_DEFAULT, _USER_SELF]}
+            ).values()
+            cutoff = datetime.now(timezone.utc) - timedelta(days=_MEMORY_TTL_DAYS)
+            stale = [
+                r for r in rows
+                if r.updated_at is not None
+                and _to_utc(r.updated_at) < cutoff
+            ]
+            if not stale:
+                return 0
+            id_list = [r.id for r in stale]
+            service.database.recall_file_repo.clear_recall_files({"id__in": id_list})
+            service.database.recall_file_segment_repo.clear_segments(
+                {"recall_file_id__in": id_list}
+            )
         export_graph_data()
         return len(id_list)
 
@@ -440,15 +468,16 @@ class MemoryManager:
             return
         service = self._ensure_service()
         name = f"会话归档 {period_start or period_end or datetime.now().strftime('%Y-%m-%d %H:%M')}"
-        await service.commit_results(
-            recall_files=[{
-                "name": name[:64],
-                "track": "memory",
-                "description": f"会话摘要（{period_start} → {period_end}）",
-                "content": summary,
-            }],
-            user=self._scope(_USER_SELF),
-        )
+        with self._io_lock:
+            await service.commit_results(
+                recall_files=[{
+                    "name": name[:64],
+                    "track": "memory",
+                    "description": f"会话摘要（{period_start} → {period_end}）",
+                    "content": summary,
+                }],
+                user=self._scope(_USER_SELF),
+            )
         export_graph_data()
 
 
@@ -487,20 +516,29 @@ async def retrieve(query: str, top_k: int = 8, user: str = _USER_DEFAULT) -> str
     """检索相关记忆并格式化为 prompt 注入段。
 
     优先走 memU 向量检索（progressive_retrieve）；embedding 不可用或
-    检索异常时回退关键词粗筛（_llm_fallback）。
+    检索异常时回退关键词粗筛（_llm_fallback）。检索耗时打印到控制台。
     """
     if not config.cfg.MEMORY_ENABLED or not (query or "").strip():
         return ""
     manager = get_manager()
+    started = time.monotonic()
     try:
         service = manager._ensure_service()
-        data = await service.progressive_retrieve(
-            query,
-            where={"user__in": [user, _USER_SELF]},
-        )
-        return _format_retrieval(data)
+        with manager._io_lock:
+            data = await service.progressive_retrieve(
+                query,
+                where={"user__in": [user, _USER_SELF]},
+            )
+        elapsed_ms = (time.monotonic() - started) * 1000
+        text = _format_retrieval(data)
+        hits = len(data.get("segments") or [])
+        console.dim(f"[记忆检索] 向量检索 {elapsed_ms:.0f}ms，命中 {hits} 段")
+        return text
     except Exception:
-        return _llm_fallback(query, user)
+        elapsed_ms = (time.monotonic() - started) * 1000
+        text = _llm_fallback(query, user)
+        console.dim(f"[记忆检索] 向量检索失败，关键词回退耗时 {elapsed_ms:.0f}ms")
+        return text
 
 
 async def warmup() -> None:
@@ -644,11 +682,38 @@ def _llm_fallback(query: str, user: str = _USER_DEFAULT) -> str:
     return "\n".join(lines)
 
 
+def format_turns_text(turns: list[dict]) -> str:
+    """把对话轮次格式化为角色明确的文本（供 LLM 记忆提取/复盘/进化使用）。
+
+    区分三方发言，避免弹幕（观众）被误当作主播或 AI 自己的发言：
+    - AI 发言（role=assistant/muika）→ "AI：..."
+    - 弹幕（source=danmaku_input 或内容以 [弹幕@ 开头）→ "观众：..."
+    - 其余轮次（主播输入等）→ "主播：..."
+    """
+    if not turns:
+        return ""
+    lines = []
+    for t in turns:
+        content = (t.get("content") or "").strip()
+        if not content:
+            continue
+        role = str(t.get("role") or "").strip().lower()
+        if role in ("assistant", "muika"):
+            speaker = "AI"
+        elif t.get("source") == "danmaku_input" or content.startswith("[弹幕@"):
+            speaker = "观众"
+        else:
+            speaker = "主播"
+        lines.append(f"{speaker}: {content}")
+    return "\n".join(lines)
+
+
 __all__ = [
     "MemoryManager",
     "get_manager",
     "count",
     "retrieve",
+    "format_turns_text",
     "extract_and_strip",
     "STANDING_INSTRUCTION",
     "remember_explicit",

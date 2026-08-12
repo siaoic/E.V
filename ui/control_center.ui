@@ -20,31 +20,50 @@
    </font>
   </property>
   <property name="styleSheet">
-   <string notr="true">/* 主窗口 - 透明（背景由 centralwidget 绘制；无边框 + 透明背景窗口下
-   QMainWindow 自身不渲染 QSS 背景，画在这里会导致背景丢失） */
+   <string notr="true">
+/* ============================================================
+   E.V 控制中心 · 角色风 QSS
+   参考角色图：奶茶棕头发 · 米色开衫 · 玫红缎带 · 浅蓝裙子 · 青绿蝴蝶结
+   角色色 → UI 角色：
+     米色 #E6D5B8  → 主背景 / 侧边栏（开衫）
+     薄荷 #78C8BC  → 主操作 / 强调（蝴蝶结）
+     玫红 #DC5A69  → 导航选中 / 标题竖条 / 删除（缎带）
+     浅蓝 #9CC8E0  → 动作区次调（裙子）
+     暖深棕 #5B4636 → 正文文字（保留）
+   ============================================================ */
+
+/* 主窗口 - 透明（背景由 centralwidget 绘制） */
 QMainWindow {
 	background: transparent;
 }
 
-/* 中央部件 - 窗口背景层：浅色渐变 + 圆角外边框
-   （纯 QWidget 的 QSS 背景会自动绘制，配合窗口透明背景四角显示圆角） */
+/* 中央部件 - 窗口背景层：米色渐变（角色米色开衫色） + 圆角米色描边 */
 QWidget#centralwidget {
-	background: qlineargradient(x1:0, y1:0, x2:1, y2:1, stop:0 rgba(250, 249, 245, 255), stop:0.5 rgba(245, 243, 235, 255), stop:1 rgba(240, 238, 230, 255));
-	border: 1px solid rgba(160, 155, 145, 150);
+	background: qlineargradient(x1:0, y1:0, x2:1, y2:1,
+		stop:0 rgba(253, 248, 238, 255),
+		stop:0.5 rgba(248, 243, 230, 255),
+		stop:1 rgba(243, 237, 222, 255));
+	border: 1px solid rgba(200, 185, 158, 160);
 	border-radius: 25px;
 }
 
-/* 侧边栏样式 - 浅灰渐变 + 柔和描边 */
+/* 侧边栏样式 - 米色渐变（与主内容区一致） */
 QFrame#sidebar {
-	background: qlineargradient(x1:0, y1:0, x2:0, y2:1, stop:0 rgba(235, 233, 225, 200), stop:0.5 rgba(230, 228, 220, 200), stop:1 rgba(225, 223, 215, 200));
-	border: 1px solid rgba(200, 195, 185, 180);
+	background: qlineargradient(x1:0, y1:0, x2:1, y2:1,
+		stop:0 rgba(253, 248, 238, 200),
+		stop:0.5 rgba(248, 243, 230, 200),
+		stop:1 rgba(243, 237, 222, 200));
+	border: 1px solid rgba(200, 185, 158, 200);
 	border-radius: 20px;
 }
 
-/* 主内容区域 - 浅色毛玻璃效果 + 柔和描边 */
+/* 主内容区域 - 米色渐变（与主背景/侧边栏同调，开衫色） */
 QFrame#contentArea {
-	background: qlineargradient(x1:0, y1:0, x2:1, y2:1, stop:0 rgba(240, 238, 230, 200), stop:0.5 rgba(235, 233, 225, 200), stop:1 rgba(230, 228, 220, 200));
-	border: 1px solid rgba(200, 195, 185, 200);
+	background: qlineargradient(x1:0, y1:0, x2:1, y2:1,
+		stop:0 rgba(253, 248, 238, 200),
+		stop:0.5 rgba(248, 243, 230, 200),
+		stop:1 rgba(243, 237, 222, 200));
+	border: 1px solid rgba(200, 185, 158, 200);
 	border-radius: 20px;
 }
 
@@ -58,65 +77,78 @@ QWidget#page, QWidget#page_llm, QWidget#page_memory, QWidget#page_settings, QWid
 	background-color: transparent;
 }
 
-/* 标签样式 */
+/* 标签样式 - 暖深棕文字（角色奶茶棕深调） */
 QLabel {
-	color: rgb(114, 95, 77);
+	color: rgb(91, 70, 54);
 	background-color: transparent;
 }
 
-/* 页面标题样式 - 底部细分隔线 */
+/* 页面标题样式 - 底部薄荷分隔线 */
 QLabel#label_title, QLabel#label_title_launch, QLabel#label_title_llm, QLabel#label_title_memory, QLabel#label_title_settings, QLabel#label_title_face, QLabel#label_title_tools, QLabel#label_title_about {
-	color: rgb(85, 70, 55);
+	color: rgb(91, 70, 54);
 	font-size: 17px;
 	font-weight: bold;
 	background-color: transparent;
-	border-bottom: 1px solid rgba(200, 195, 185, 200);
+	border-bottom: 1px solid rgba(143, 200, 188, 200);
 	padding-bottom: 8px;
 }
 
+/* 启动页左右分栏标题：小号加粗 + 底部薄荷分隔线（对话 / 工具日志） */
+QLabel#label_log_chat, QLabel#label_log_tool {
+	color: rgb(91, 70, 54);
+	font-size: 12px;
+	font-weight: bold;
+	background-color: transparent;
+	border-bottom: 1px solid rgba(143, 200, 188, 200);
+	padding-bottom: 2px;
+}
+
 /* 设置页小节标题（选项 / 语音识别 / Agent模型 / 嵌入模型 / B站弹幕）：
-   加粗 + 左侧深棕竖条，与普通文字明显区分 */
+   加粗 + 左侧玫红竖条（角色缎带色） */
 QLabel#label_title_options, QLabel#label_title_stt, QLabel#label_title_butler,
 QLabel#label_title_emb, QLabel#label_title_bili {
-	color: rgb(85, 70, 55);
+	color: rgb(91, 70, 54);
 	font-size: 14px;
 	font-weight: bold;
 	background-color: transparent;
-	border-left: 4px solid rgb(150, 128, 100);
+	border-left: 4px solid rgb(220, 90, 105);
 	padding-left: 8px;
 	margin-top: 4px;
 }
 
-/* 输入框样式 - 浅色毛玻璃效果 */
+/* 输入框样式 - 米白毛玻璃 */
 QLineEdit {
-	background: qlineargradient(x1:0, y1:0, x2:0, y2:1, stop:0 rgba(250, 249, 245, 255), stop:1 rgba(248, 247, 242, 255));
-border: 1px solid rgba(180, 175, 165, 200);
+	background: qlineargradient(x1:0, y1:0, x2:0, y2:1,
+		stop:0 rgba(252, 250, 245, 255), stop:1 rgba(248, 246, 240, 255));
+	border: 1px solid rgba(180, 200, 195, 200);
 	border-radius: 10px;
 	padding: 6px 9px;
-	color: rgb(114, 95, 77);
+	color: rgb(91, 70, 54);
 }
 
 QLineEdit:focus {
-	border: 2px solid rgb(140, 135, 125);
-	background: qlineargradient(x1:0, y1:0, x2:0, y2:1, stop:0 rgba(215, 213, 205, 255), stop:1 rgba(225, 223, 215, 255));
+	border: 2px solid rgb(120, 200, 188);
+	background: qlineargradient(x1:0, y1:0, x2:0, y2:1,
+		stop:0 rgba(230, 245, 240, 255), stop:1 rgba(240, 248, 244, 255));
 }
 
-/* 文本编辑框样式 - 浅色毛玻璃效果 */
+/* 文本编辑框样式 - 米白毛玻璃 */
 QTextEdit, QTextBrowser {
-	background: qlineargradient(x1:0, y1:0, x2:0, y2:1, stop:0 rgba(250, 249, 245, 255), stop:1 rgba(248, 247, 242, 255));
-border: 1px solid rgba(180, 175, 165, 200);
+	background: qlineargradient(x1:0, y1:0, x2:0, y2:1,
+		stop:0 rgba(252, 250, 245, 255), stop:1 rgba(248, 246, 240, 255));
+	border: 1px solid rgba(180, 200, 195, 200);
 	border-radius: 14px;
 	padding: 10px;
-	color: rgb(114, 95, 77);
+	color: rgb(91, 70, 54);
 }
 
 QTextEdit:focus, QTextBrowser:focus {
-	border: 2px solid rgb(140, 135, 125);
+	border: 2px solid rgb(120, 200, 188);
 }
 
-/* 复选框样式 */
+/* 复选框 / 单选：薄荷描边 + 玫红选中（角色缎带色） */
 QCheckBox, QRadioButton {
-	color: rgb(114, 95, 77);
+	color: rgb(91, 70, 54);
 	spacing: 10px;
 	background-color: transparent;
 }
@@ -125,37 +157,44 @@ QCheckBox::indicator {
 	width: 16px;
 	height: 16px;
 	border-radius: 4px;
-	border: 2px solid rgb(140, 135, 125);
-	background: qlineargradient(x1:0, y1:0, x2:1, y2:1, stop:0 rgba(230, 228, 220, 255), stop:1 rgba(240, 238, 230, 255));
+	border: 2px solid rgb(143, 200, 188);
+	background: qlineargradient(x1:0, y1:0, x2:1, y2:1,
+		stop:0 rgba(240, 248, 244, 255), stop:1 rgba(248, 246, 240, 255));
 }
 
 QCheckBox::indicator:checked {
-	background: qlineargradient(x1:0, y1:0, x2:1, y2:1, stop:0 rgba(120, 115, 105, 255), stop:1 rgba(100, 95, 85, 255));
-	border: 2px solid rgb(80, 75, 65);
+	background: qlineargradient(x1:0, y1:0, x2:1, y2:1,
+		stop:0 rgba(120, 200, 188, 255), stop:1 rgba(90, 175, 160, 255));
+	border: 2px solid rgb(70, 145, 130);
 }
 
 QCheckBox::indicator:hover {
-	border: 2px solid rgb(100, 95, 85);
+	border: 2px solid rgb(120, 200, 188);
 }
 
 QRadioButton::indicator {
 	width: 16px;
 	height: 16px;
 	border-radius: 8px;
-	border: 2px solid rgb(140, 135, 125);
-	background: qlineargradient(x1:0, y1:0, x2:1, y2:1, stop:0 rgba(230, 228, 220, 255), stop:1 rgba(240, 238, 230, 255));
+	border: 2px solid rgb(143, 200, 188);
+	background: qlineargradient(x1:0, y1:0, x2:1, y2:1,
+		stop:0 rgba(240, 248, 244, 255), stop:1 rgba(248, 246, 240, 255));
 }
 
 QRadioButton::indicator:checked {
-	background: qlineargradient(x1:0, y1:0, x2:1, y2:1, stop:0 rgba(120, 115, 105, 255), stop:1 rgba(100, 95, 85, 255));
-	border: 2px solid rgb(80, 75, 65);
+	background: qlineargradient(x1:0, y1:0, x2:1, y2:1,
+		stop:0 rgba(120, 200, 188, 255), stop:1 rgba(90, 175, 160, 255));
+	border: 2px solid rgb(70, 145, 130);
 }
 
-/* 通用按钮样式（严格对齐 test222.ui 全局 QPushButton） */
+/* 通用按钮 - 米白底，hover 偏薄荷（蝴蝶结色） */
 QPushButton {
-	background: qlineargradient(x1:0, y1:0, x2:1, y2:0, stop:0 rgba(250, 249, 245, 255), stop:0.5 rgba(248, 247, 242, 255), stop:1 rgba(245, 244, 240, 255));
-	color: rgb(114, 95, 77);
-	border: 1px solid rgba(160, 155, 145, 180);
+	background: qlineargradient(x1:0, y1:0, x2:1, y2:0,
+		stop:0 rgba(252, 250, 245, 255),
+		stop:0.5 rgba(248, 246, 240, 255),
+		stop:1 rgba(244, 242, 235, 255));
+	color: rgb(91, 70, 54);
+	border: 1px solid rgba(180, 200, 195, 180);
 	border-radius: 8px;
 	padding: 10px 20px;
 	font-size: 13px;
@@ -163,45 +202,53 @@ QPushButton {
 }
 
 QPushButton:hover {
-	background: qlineargradient(x1:0, y1:0, x2:1, y2:0, stop:0 rgba(180, 175, 165, 255), stop:1 rgba(170, 165, 155, 255));
-	color: rgb(40, 35, 25);
+	background: qlineargradient(x1:0, y1:0, x2:1, y2:0,
+		stop:0 rgba(210, 235, 225, 255), stop:1 rgba(190, 225, 215, 255));
+	color: rgb(60, 110, 95);
 }
 
 QPushButton:pressed {
-	background: qlineargradient(x1:0, y1:0, x2:1, y2:0, stop:0 rgba(160, 155, 145, 255), stop:1 rgba(150, 145, 135, 255));
+	background: qlineargradient(x1:0, y1:0, x2:1, y2:0,
+		stop:0 rgba(190, 220, 210, 255), stop:1 rgba(170, 215, 200, 255));
 }
 
 QPushButton:disabled {
-	color: rgb(160, 155, 145);
+	color: rgb(180, 200, 195);
 }
 
-/* 侧边栏导航按钮：继承通用按钮样式；粗体对齐 test222 导航按钮（微软雅黑 10pt bold） */
+/* 侧边栏导航按钮：粗体 */
 QPushButton#nav_launch, QPushButton#nav_llm, QPushButton#nav_memory, QPushButton#nav_settings, QPushButton#nav_face, QPushButton#nav_tools, QPushButton#nav_about {
 	font-weight: bold;
 }
 
-/* 选中态温和高亮（test222 无 :checked 样式，此处仅作当前页反馈） */
+/* 选中态：玫红渐变（角色缎带色），与「启动」「LLM配置」选中页一致 */
 QPushButton#nav_launch:checked, QPushButton#nav_llm:checked, QPushButton#nav_memory:checked, QPushButton#nav_settings:checked, QPushButton#nav_face:checked, QPushButton#nav_tools:checked, QPushButton#nav_about:checked {
-	background: qlineargradient(x1:0, y1:0, x2:1, y2:0, stop:0 rgba(205, 200, 190, 255), stop:1 rgba(195, 190, 180, 255));
-	border: 1px solid rgba(140, 135, 125, 220);
-	color: rgb(40, 35, 25);
+	background: qlineargradient(x1:0, y1:0, x2:1, y2:0,
+		stop:0 rgba(230, 104, 122, 255), stop:1 rgba(220, 90, 105, 255));
+	border: 1px solid rgba(180, 69, 83, 220);
+	color: rgb(252, 250, 245);
 }
 
-/* 底部「更新配置」按钮（对齐 test222 #saveConfigButton 深灰渐变 + 全宽） */
+/* 底部「更新配置」按钮：薄荷主操作（角色蝴蝶结色） */
 QPushButton#btn_save_config {
-	background: qlineargradient(x1:0, y1:0, x2:1, y2:0, stop:0 rgba(200, 195, 185, 255), stop:0.5 rgba(190, 185, 175, 255), stop:1 rgba(210, 205, 195, 255));
-	color: rgb(70, 65, 55);
+	background: qlineargradient(x1:0, y1:0, x2:1, y2:0,
+		stop:0 rgba(140, 215, 200, 255),
+		stop:0.5 rgba(120, 200, 188, 255),
+		stop:1 rgba(105, 185, 172, 255));
+	color: rgb(252, 250, 245);
 	font-size: 14px;
 	padding: 12px 20px;
 	border-radius: 10px;
+	border: 1px solid rgba(70, 145, 138, 220);
 }
 
 QPushButton#btn_save_config:hover {
-	background: qlineargradient(x1:0, y1:0, x2:1, y2:0, stop:0 rgba(170, 165, 155, 255), stop:1 rgba(160, 155, 145, 255));
-	color: rgb(40, 35, 25);
+	background: qlineargradient(x1:0, y1:0, x2:1, y2:0,
+		stop:0 rgba(155, 220, 200, 255), stop:1 rgba(135, 205, 188, 255));
+	color: rgb(252, 250, 245);
 }
 
-/* 表情与动作页 - 整页滚动区（无边框透明：内容超高时整页滚动，不再分块滚动） */
+/* 表情与动作页 - 整页滚动区（无边框透明） */
 QScrollArea#scroll_face_page {
 	background: transparent;
 	border: none;
@@ -213,7 +260,7 @@ QWidget#widget_face_page {
 	background: transparent;
 }
 
-/* 设置页滚动区 - 无边框透明（同表情页，防默认白色背景顶掉页面暖色底） */
+/* 设置页滚动区 - 无边框透明 */
 QScrollArea#scroll_settings_page {
 	background: transparent;
 	border: none;
@@ -225,80 +272,82 @@ QWidget#widget_settings_page {
 	background: transparent;
 }
 
-/* 情绪绑定区大背景（暖米棕渐变 + 棕描边，对齐整体暖色系） */
+/* 情绪绑定区大背景：薄荷渐变（蝴蝶结色）+ 薄荷实边
+   边框改实色：FramelessWindowHint + WA_TranslucentBackground 的无边框半透明窗口下，
+   半透明 rgba 边框经 alpha 合成后圆角处极易断线/过淡，必须用 rgb 实色 */
 QFrame#card_emotion_zone {
 	background: qlineargradient(x1:0, y1:0, x2:1, y2:1,
-		stop:0 rgba(248, 243, 235, 235),
-		stop:0.5 rgba(243, 236, 224, 235),
-		stop:1 rgba(238, 229, 214, 235));
-	border: 2px solid rgba(195, 180, 158, 210);
+		stop:0 rgba(232, 244, 240, 235),
+		stop:0.5 rgba(222, 237, 232, 235),
+		stop:1 rgba(210, 229, 222, 235));
+	border: 2px solid rgb(143, 200, 188);
 	border-radius: 12px;
 }
 
-/* 情绪区内部 widget 透明，让大背景区显示出来 */
+/* 情绪区内部 widget 透明 */
 QWidget#widget_emotion_zone {
 	background: transparent;
 }
 
-/* 情绪绑定区卡片（米白底 + 虚线浅棕边框，悬停实色高亮） */
+/* 情绪绑定区卡片：米白底 + 虚线薄荷边，悬停实色高亮 */
 QFrame#emotion_card {
-	background: rgba(255, 254, 251, 235);
-	border: 1.5px dashed rgba(195, 180, 158, 210);
+	background: rgba(252, 252, 248, 235);
+	border: 1.5px dashed rgba(143, 200, 188, 210);
 	border-radius: 10px;
 }
 
 QFrame#emotion_card:hover {
-	border: 1.5px solid rgba(180, 162, 138, 235);
-	background: rgba(255, 253, 249, 240);
+	border: 1.5px solid rgba(120, 200, 188, 235);
+	background: rgba(248, 252, 250, 240);
 }
 
-/* 情绪名：暖棕粗体 */
+/* 情绪名：玫红粗体（角色缎带色，对齐 HTML .emotion-card .name） */
 QLabel#emotion_name {
-	color: rgb(140, 118, 92);
+	color: rgb(192, 74, 88);
 	font-size: 14px;
 	font-weight: bold;
 	background: transparent;
 }
 
-/* 情绪槽位 - 未绑定：浅米底 + 虚线浅棕边 */
+/* 情绪槽位 - 未绑定：淡薄荷底 + 虚线薄荷边 */
 QLabel#slot_empty {
-	background: rgba(251, 247, 240, 200);
-	border: 1.5px dashed rgba(190, 175, 153, 215);
+	background: rgba(238, 248, 244, 200);
+	border: 1.5px dashed rgba(143, 200, 188, 215);
 	border-radius: 8px;
-	color: rgb(165, 150, 130);
+	color: rgb(110, 165, 150);
 	padding: 6px 6px;
 	font-size: 12px;
 }
 
-/* 情绪槽位 - 拖拽悬停高亮（米棕底加深） */
+/* 情绪槽位 - 拖拽悬停高亮（薄荷底加深） */
 QLabel#slot_empty[drag="true"] {
-	background: rgba(238, 228, 212, 235);
-	border: 1.5px dashed rgb(170, 148, 118);
-	color: rgb(110, 92, 68);
+	background: rgba(210, 235, 225, 235);
+	border: 1.5px dashed rgb(95, 184, 170);
+	color: rgb(63, 120, 105);
 }
 
-/* 情绪槽位 - 已绑定：暖米棕渐变 + 棕实边 */
+/* 情绪槽位 - 已绑定：薄荷渐变 + 薄荷实边 */
 QLabel#slot_filled {
 	background: qlineargradient(x1:0, y1:0, x2:0, y2:1,
-		stop:0 rgba(240, 233, 220, 255),
-		stop:1 rgba(230, 219, 200, 255));
-	border: 1.5px solid rgba(185, 168, 142, 230);
+		stop:0 rgba(210, 235, 225, 255),
+		stop:1 rgba(190, 222, 201, 255));
+	border: 1.5px solid rgba(110, 190, 170, 230);
 	border-radius: 8px;
-	color: rgb(105, 88, 64);
+	color: rgb(60, 120, 105);
 	font-weight: bold;
 	padding: 6px 6px;
 	font-size: 13px;
 }
 
-/* 表情库按钮（暖米棕渐变，对齐全局按钮；立体感暗示可交互） */
+/* 表情库按钮：薄荷渐变（蝴蝶结色） */
 QPushButton#expr_btn {
 	background: qlineargradient(x1:0, y1:0, x2:1, y2:1,
-		stop:0 rgba(250, 246, 238, 255),
-		stop:0.5 rgba(247, 240, 229, 255),
-		stop:1 rgba(244, 235, 221, 255));
-	border: 1px solid rgba(190, 172, 148, 190);
+		stop:0 rgba(232, 245, 238, 255),
+		stop:0.5 rgba(222, 240, 232, 255),
+		stop:1 rgba(208, 232, 220, 255));
+	border: 1px solid rgba(143, 200, 188, 190);
 	border-radius: 10px;
-	color: rgb(130, 108, 82);
+	color: rgb(63, 149, 137);
 	padding: 10px 12px;
 	font-size: 13px;
 	font-weight: 500;
@@ -306,26 +355,26 @@ QPushButton#expr_btn {
 
 QPushButton#expr_btn:hover {
 	background: qlineargradient(x1:0, y1:0, x2:1, y2:1,
-		stop:0 rgba(238, 230, 216, 255),
-		stop:0.5 rgba(233, 222, 204, 255),
-		stop:1 rgba(228, 214, 194, 255));
-	border: 1.5px solid rgba(170, 148, 118, 215);
-	color: rgb(95, 75, 52);
+		stop:0 rgba(210, 235, 225, 255),
+		stop:0.5 rgba(195, 225, 215, 255),
+		stop:1 rgba(180, 220, 205, 255));
+	border: 1.5px solid rgba(120, 200, 188, 215);
+	color: rgb(50, 130, 115);
 }
 
 QPushButton#expr_btn:pressed {
 	background: qlineargradient(x1:0, y1:0, x2:1, y2:1,
-		stop:0 rgba(226, 216, 198, 255),
-		stop:0.5 rgba(220, 208, 188, 255),
-		stop:1 rgba(215, 202, 180, 255));
+		stop:0 rgba(190, 222, 205, 255),
+		stop:0.5 rgba(175, 215, 195, 255),
+		stop:1 rgba(160, 208, 185, 255));
 }
 
-/* 表情库外框（按图：浅色背景 + 浅灰描边，无紫色描边） */
+/* 表情库外框：浅色背景 + 薄荷描边 */
 QFrame#card_expr_library {
 	background: qlineargradient(x1:0, y1:0, x2:0, y2:1,
-		stop:0 rgba(250, 249, 245, 220),
-		stop:1 rgba(245, 243, 235, 220));
-	border: 1px solid rgba(200, 195, 185, 160);
+		stop:0 rgba(252, 249, 244, 220),
+		stop:1 rgba(248, 246, 240, 220));
+	border: 1px solid rgb(180, 200, 195);
 	border-radius: 12px;
 }
 
@@ -334,12 +383,12 @@ QWidget#widget_expr_library {
 	background: transparent;
 }
 
-/* 动作绑定区域卡片（浅色渐变圆角，与表情库卡片一致） */
+/* 动作绑定区域卡片：米白底（与表情库外框同底色） */
 QFrame#card_action_bind {
 	background: qlineargradient(x1:0, y1:0, x2:0, y2:1,
-		stop:0 rgba(250, 249, 245, 220),
-		stop:1 rgba(245, 243, 235, 220));
-	border: 1px solid rgba(200, 195, 185, 160);
+		stop:0 rgba(252, 249, 244, 220),
+		stop:1 rgba(248, 246, 240, 220));
+	border: 1px solid rgb(168, 184, 224);
 	border-radius: 12px;
 }
 
@@ -348,40 +397,40 @@ QWidget#widget_action_library {
 	background: transparent;
 }
 
-/* 工具卡片（浅色渐变圆角，与表情库/动作库卡片一致） */
+/* 工具卡片：米色（与主背景同调，融入整体） */
 QFrame#card_tool_status {
 	background: qlineargradient(x1:0, y1:0, x2:0, y2:1,
-		stop:0 rgba(250, 249, 245, 220),
-		stop:1 rgba(245, 243, 235, 220));
-	border: 1px solid rgba(200, 195, 185, 160);
+		stop:0 rgba(253, 248, 238, 220),
+		stop:1 rgba(248, 243, 230, 220));
+	border: 1px solid rgb(200, 185, 158);
 	border-radius: 12px;
 }
 
-/* 工具卡片内部标题（粗体，与情绪区/动作区标题一致） */
+/* 工具卡片内部标题：浅蓝粗体（角色裙子色） */
 QLabel#label_tool_status_title {
-	color: rgb(60, 95, 160);
+	color: rgb(63, 110, 146);
 	font-size: 13px;
 	font-weight: bold;
 	background: transparent;
 }
 
-/* 动作绑定区标题（灰棕粗体，与整体暖色系一致） */
+/* 动作绑定区标题：玫红粗体（角色缎带色） */
 QLabel#label_action_title {
-	color: rgb(122, 122, 104);
+	color: rgb(220, 90, 105);
 	font-size: 13px;
 	font-weight: bold;
 	background: transparent;
 }
 
-/* 动作卡片按钮（浅灰棕渐变，对齐全局按钮；与表情库按钮同调性） */
+/* 动作卡片按钮：蓝紫渐变（与 #dce6ff 动作区同调） */
 QPushButton#motion_card {
 	background: qlineargradient(x1:0, y1:0, x2:1, y2:1,
-		stop:0 rgba(244, 244, 239, 255),
-		stop:0.5 rgba(239, 239, 232, 255),
-		stop:1 rgba(234, 235, 226, 255));
-	border: 1px solid rgba(185, 185, 168, 190);
+		stop:0 rgba(240, 244, 255, 255),
+		stop:0.5 rgba(231, 237, 255, 255),
+		stop:1 rgba(222, 230, 255, 255));
+	border: 1px solid rgba(168, 184, 224, 200);
 	border-radius: 10px;
-	color: rgb(122, 122, 104);
+	color: rgb(70, 105, 165);
 	padding: 10px 12px;
 	font-size: 13px;
 	font-weight: 500;
@@ -389,83 +438,82 @@ QPushButton#motion_card {
 
 QPushButton#motion_card:hover {
 	background: qlineargradient(x1:0, y1:0, x2:1, y2:1,
-		stop:0 rgba(232, 233, 224, 255),
-		stop:0.5 rgba(225, 226, 215, 255),
-		stop:1 rgba(218, 220, 207, 255));
-	border: 1.5px solid rgba(160, 160, 142, 215);
-	color: rgb(88, 88, 72);
+		stop:0 rgba(226, 233, 252, 255),
+		stop:0.5 rgba(215, 225, 248, 255),
+		stop:1 rgba(204, 217, 244, 255));
+	border: 1.5px solid rgba(140, 162, 210, 215);
+	color: rgb(55, 90, 155);
 }
 
 QPushButton#motion_card:pressed {
 	background: qlineargradient(x1:0, y1:0, x2:1, y2:1,
-		stop:0 rgba(220, 222, 210, 255),
-		stop:0.5 rgba(212, 214, 200, 255),
-		stop:1 rgba(205, 207, 192, 255));
+		stop:0 rgba(206, 219, 244, 255),
+		stop:0.5 rgba(193, 209, 240, 255),
+		stop:1 rgba(180, 199, 236, 255));
 }
 
-/* 动作槽位 - 未绑定：浅灰底 + 虚线浅灰边（与表情槽位浅棕区分） */
+/* 动作槽位 - 未绑定：淡蓝紫底 + 虚线蓝紫边（与情绪槽位薄荷区分） */
 QLabel#slot_empty_motion {
-	background: rgba(248, 248, 243, 200);
-	border: 1.5px dashed rgba(180, 180, 165, 215);
+	background: rgba(240, 244, 255, 200);
+	border: 1.5px dashed rgba(168, 184, 224, 215);
 	border-radius: 8px;
-	color: rgb(158, 158, 142);
+	color: rgb(110, 130, 180);
 	padding: 6px 6px;
 	font-size: 12px;
 }
 
-/* 动作槽位 - 拖拽悬停高亮（灰底加深） */
+/* 动作槽位 - 拖拽悬停高亮（蓝紫底加深） */
 QLabel#slot_empty_motion[drag="true"] {
-	background: rgba(231, 231, 220, 235);
-	border: 1.5px dashed rgb(155, 155, 135);
-	color: rgb(100, 100, 84);
+	background: rgba(222, 231, 252, 235);
+	border: 1.5px dashed rgb(140, 162, 210);
+	color: rgb(60, 95, 160);
 }
 
-/* 动作槽位 - 已绑定：浅灰棕渐变 + 灰实边 */
+/* 动作槽位 - 已绑定：蓝紫渐变 + 蓝紫实边 */
 QLabel#slot_filled_motion {
 	background: qlineargradient(x1:0, y1:0, x2:0, y2:1,
-		stop:0 rgba(235, 236, 228, 255),
-		stop:1 rgba(223, 225, 214, 255));
-	border: 1.5px solid rgba(175, 175, 158, 230);
+		stop:0 rgba(222, 231, 252, 255),
+		stop:1 rgba(205, 217, 244, 255));
+	border: 1.5px solid rgba(140, 162, 210, 230);
 	border-radius: 8px;
-	color: rgb(96, 96, 80);
+	color: rgb(55, 90, 155);
 	font-weight: bold;
 	padding: 6px 6px;
 	font-size: 13px;
 }
 
-/* 动作绑定区大背景（浅灰棕渐变 + 灰描边，与表情区暖米棕同调性） */
+/* 动作绑定区大背景：#dce6ff 浅蓝紫渐变 + 同色系深一档描边 */
 QFrame#card_motion_zone {
 	background: qlineargradient(x1:0, y1:0, x2:1, y2:1,
-		stop:0 rgba(243, 243, 238, 235),
-		stop:0.5 rgba(236, 237, 230, 235),
-		stop:1 rgba(229, 231, 222, 235));
-	border: 2px solid rgba(185, 185, 170, 210);
+		stop:0 rgba(232, 238, 255, 235),
+		stop:0.5 rgba(220, 230, 255, 235),
+		stop:1 rgba(207, 220, 255, 235));
+	border: 2px solid rgb(168, 184, 224);
 	border-radius: 12px;
 }
 
-/* 动作绑定区内部 widget 透明，让大背景区显示出来 */
+/* 动作绑定区内部 widget 透明 */
 QWidget#widget_motion_zone {
 	background: transparent;
 }
 
-/* 动作绑定区卡片（米白底 + 虚线浅灰边框，悬停实色高亮） */
+/* 动作绑定区卡片：米白底 + 无线框，悬停仅背景变化 */
 QFrame#motion_zone_card {
-	background: rgba(255, 255, 253, 235);
-	border: 1.5px dashed rgba(185, 185, 170, 210);
+	background: rgba(252, 252, 250, 235);
+	border: none;
 	border-radius: 10px;
 }
 
 QFrame#motion_zone_card:hover {
-	border: 1.5px solid rgba(168, 168, 150, 235);
-	background: rgba(253, 253, 250, 240);
+	background: rgba(248, 250, 254, 240);
 }
 
-/* 一键还原按钮：表情区暖米棕 / 动作区浅灰棕 */
+/* 一键还原按钮：表情区薄荷 / 动作区蓝紫（与 #dce6ff 同调） */
 QPushButton#btn_reset_expr {
 	background: qlineargradient(x1:0, y1:0, x2:1, y2:0,
-		stop:0 rgba(238, 230, 216, 255), stop:1 rgba(233, 222, 204, 255));
-	color: rgb(110, 90, 66);
-	border: 1px solid rgba(180, 162, 138, 195);
+		stop:0 rgba(210, 235, 225, 255), stop:1 rgba(190, 222, 201, 255));
+	color: rgb(60, 120, 105);
+	border: 1px solid rgba(143, 200, 188, 195);
 	border-radius: 10px;
 	padding: 8px 14px;
 	font-size: 13px;
@@ -473,15 +521,15 @@ QPushButton#btn_reset_expr {
 
 QPushButton#btn_reset_expr:hover {
 	background: qlineargradient(x1:0, y1:0, x2:1, y2:0,
-		stop:0 rgba(226, 214, 194, 255), stop:1 rgba(218, 202, 178, 255));
-	border: 1px solid rgb(150, 126, 96);
+		stop:0 rgba(190, 222, 205, 255), stop:1 rgba(170, 215, 195, 255));
+	border: 1px solid rgb(95, 184, 170);
 }
 
 QPushButton#btn_reset_action {
 	background: qlineargradient(x1:0, y1:0, x2:1, y2:0,
-		stop:0 rgba(236, 237, 230, 255), stop:1 rgba(229, 231, 222, 255));
-	color: rgb(108, 108, 92);
-	border: 1px solid rgba(178, 178, 162, 195);
+		stop:0 rgba(226, 233, 250, 255), stop:1 rgba(214, 225, 246, 255));
+	color: rgb(70, 105, 165);
+	border: 1px solid rgba(168, 184, 224, 200);
 	border-radius: 10px;
 	padding: 8px 14px;
 	font-size: 13px;
@@ -489,24 +537,25 @@ QPushButton#btn_reset_action {
 
 QPushButton#btn_reset_action:hover {
 	background: qlineargradient(x1:0, y1:0, x2:1, y2:0,
-		stop:0 rgba(224, 226, 216, 255), stop:1 rgba(215, 217, 204, 255));
-	border: 1px solid rgb(148, 148, 130);
+		stop:0 rgba(204, 217, 242, 255), stop:1 rgba(188, 206, 238, 255));
+	border: 1px solid rgb(140, 162, 210);
 }
 
-/* 情绪绑定区/表情库子标题（暖棕粗体，对齐整体文字色） */
+/* 情绪绑定区/表情库/动作库子标题：玫红粗体（角色缎带色，对齐 HTML） */
 QLabel#label_emotion_title, QLabel#label_expr_title, QLabel#label_action_lib_title {
-	color: rgb(140, 118, 92);
+	color: rgb(192, 74, 88);
 	font-size: 13px;
 	font-weight: bold;
 	background: transparent;
 }
 
-/* 列表/表格：浅色毛玻璃 + 圆角，选中态温和高亮 */
+/* 列表/表格：米白毛玻璃 + 圆角，薄荷选中 */
 QListWidget, QTableWidget {
-	background: qlineargradient(x1:0, y1:0, x2:0, y2:1, stop:0 rgba(250, 249, 245, 255), stop:1 rgba(248, 247, 242, 255));
-	border: 1px solid rgba(180, 175, 165, 200);
+	background: qlineargradient(x1:0, y1:0, x2:0, y2:1,
+		stop:0 rgba(252, 250, 245, 255), stop:1 rgba(248, 246, 240, 255));
+	border: 1px solid rgba(180, 200, 195, 200);
 	border-radius: 10px;
-	color: rgb(114, 95, 77);
+	color: rgb(91, 70, 54);
 }
 
 QListWidget::item {
@@ -515,16 +564,16 @@ QListWidget::item {
 }
 
 QListWidget::item:hover {
-	background: rgba(230, 228, 220, 255);
+	background: rgba(220, 240, 230, 255);
 }
 
 QListWidget::item:selected {
-	background: rgba(190, 185, 175, 255);
-	color: rgb(40, 35, 25);
+	background: rgba(143, 200, 188, 255);
+	color: rgb(40, 70, 60);
 }
 
 QTableWidget {
-	gridline-color: rgba(200, 195, 185, 120);
+	gridline-color: rgba(180, 200, 195, 120);
 }
 
 QTableWidget::item {
@@ -532,80 +581,95 @@ QTableWidget::item {
 }
 
 QTableWidget::item:selected {
-	background: rgba(190, 185, 175, 255);
-	color: rgb(40, 35, 25);
+	background: rgba(143, 200, 188, 255);
+	color: rgb(40, 70, 60);
 }
 
-/* 工具表格：外框用不透明实色（全局表格为半透明 1px 边框，在本无边框半透明
-   窗口中 alpha 合成后极易断线/过淡，表现为外框显示不完整；此处改为实色，四边完整可见） */
+/* 工具表格：透明无边框，背景由容器裁剪 */
 QTableWidget#table_tool_status {
-	border: 1px solid rgb(176, 171, 161);
-	border-radius: 10px;
+	background: transparent;
+	border: none;
+	border-radius: 0px;
+	alternate-background-color: rgba(245, 248, 240, 255);
+	gridline-color: rgba(180, 200, 195, 120);
+}
+
+/* 表头圆角：与容器圆角对齐 */
+QTableWidget#table_tool_status QHeaderView::section:first {
+	border-top-left-radius: 12px;
+}
+QTableWidget#table_tool_status QHeaderView::section:last {
+	border-top-right-radius: 12px;
 }
 
 QHeaderView::section {
-	background: qlineargradient(x1:0, y1:0, x2:0, y2:1, stop:0 rgba(235, 233, 225, 255), stop:1 rgba(225, 223, 215, 255));
-	color: rgb(85, 70, 55);
+	background: qlineargradient(x1:0, y1:0, x2:0, y2:1,
+		stop:0 rgba(232, 240, 234, 255), stop:1 rgba(220, 232, 224, 255));
+	color: rgb(91, 70, 54);
 	border: none;
-	border-bottom: 1px solid rgba(180, 175, 165, 200);
+	border-bottom: 1px solid rgba(143, 200, 188, 200);
 	padding: 6px 8px;
 	font-weight: bold;
 }
 
-/* QComboBox 下拉框样式（严格对齐 test222.ui：圆角 14 + 右侧下拉按钮圆角，
-   防止右侧箭头区覆盖/截断；padding-right 保证文字不被箭头遮挡） */
+/* QComboBox 下拉框：薄荷聚焦边 */
 QComboBox {
-	background: qlineargradient(x1:0, y1:0, x2:0, y2:1, stop:0 rgba(250, 249, 245, 255), stop:1 rgba(248, 247, 242, 255));
-	border: 1px solid rgba(180, 175, 165, 200);
+	background: qlineargradient(x1:0, y1:0, x2:0, y2:1,
+		stop:0 rgba(252, 250, 245, 255), stop:1 rgba(248, 246, 240, 255));
+	border: 1px solid rgba(180, 200, 195, 200);
 	border-radius: 14px;
 	padding: 6px 9px;
 	padding-right: 34px;
-	color: rgb(114, 95, 77);
+	color: rgb(91, 70, 54);
 }
 
 QComboBox:focus {
-	border: 2px solid rgb(140, 135, 125);
-	background: qlineargradient(x1:0, y1:0, x2:0, y2:1, stop:0 rgba(215, 213, 205, 255), stop:1 rgba(225, 223, 215, 255));
+	border: 2px solid rgb(120, 200, 188);
+	background: qlineargradient(x1:0, y1:0, x2:0, y2:1,
+		stop:0 rgba(230, 245, 240, 255), stop:1 rgba(240, 248, 244, 255));
 }
 
 QComboBox::drop-down {
 	subcontrol-origin: padding;
 	subcontrol-position: top right;
 	width: 30px;
-	border-left: 1px solid rgba(180, 175, 165, 200);
+	border-left: 1px solid rgba(180, 200, 195, 200);
 	border-top-right-radius: 14px;
 	border-bottom-right-radius: 14px;
-	background: qlineargradient(x1:0, y1:0, x2:0, y2:1, stop:0 rgba(240, 238, 230, 255), stop:1 rgba(235, 233, 225, 255));
+	background: qlineargradient(x1:0, y1:0, x2:0, y2:1,
+		stop:0 rgba(232, 240, 234, 255), stop:1 rgba(220, 232, 224, 255));
 }
 
 QComboBox::down-arrow {
 	width: 12px;
 	height: 12px;
 	image: none;
-	border: 2px solid rgb(114, 95, 77);
+	border: 2px solid rgb(91, 70, 54);
 	border-top: none;
 	border-right: none;
 	margin: 5px;
 }
 
 QComboBox QAbstractItemView {
-	background: qlineargradient(x1:0, y1:0, x2:0, y2:1, stop:0 rgba(250, 249, 245, 255), stop:1 rgba(248, 247, 242, 255));
-	border: 1px solid rgba(180, 175, 165, 200);
+	background: qlineargradient(x1:0, y1:0, x2:0, y2:1,
+		stop:0 rgba(252, 250, 245, 255), stop:1 rgba(248, 246, 240, 255));
+	border: 1px solid rgba(180, 200, 195, 200);
 	border-radius: 8px;
-	selection-background-color: rgba(190, 185, 175, 255);
-	color: rgb(114, 95, 77);
+	selection-background-color: rgba(143, 200, 188, 255);
+	color: rgb(91, 70, 54);
 	padding: 5px;
 }
 
 /* 控制面板样式 */
 QFrame#control_panel_frame {
-	background: qlineargradient(x1:0, y1:0, x2:0, y2:1, stop:0 rgba(240, 238, 230, 255), stop:1 rgba(235, 233, 225, 255));
-	border: 1px solid rgba(200, 195, 185, 180);
+	background: qlineargradient(x1:0, y1:0, x2:0, y2:1,
+		stop:0 rgba(248, 245, 240, 255), stop:1 rgba(240, 238, 230, 255));
+	border: 1px solid rgba(180, 200, 195, 180);
 	border-radius: 15px;
 }
 
-/* 滚动条样式：背景透明 + 上下留圆角空间，
-   避免不透明轨道盖住表格右上/右下圆角导致"边框显示不完整" */
+/* 滚动条样式：竖 = 玫红（缎带色），横 = 薄荷（蝴蝶结色）
+   背景透明 + 上下留圆角空间，避免不透明轨道盖住表格圆角 */
 QScrollBar:vertical {
 	background: transparent;
 	width: 10px;
@@ -614,14 +678,16 @@ QScrollBar:vertical {
 }
 
 QScrollBar::handle:vertical {
-	background: qlineargradient(x1:0, y1:0, x2:1, y2:0, stop:0 rgba(160, 155, 145, 255), stop:1 rgba(140, 135, 125, 255));
+	background: qlineargradient(x1:0, y1:0, x2:1, y2:0,
+		stop:0 rgba(230, 104, 122, 255), stop:1 rgba(200, 80, 96, 255));
 	border-radius: 5px;
 	min-height: 20px;
 	margin: 1px;
 }
 
 QScrollBar::handle:vertical:hover {
-	background: qlineargradient(x1:0, y1:0, x2:1, y2:0, stop:0 rgba(120, 115, 105, 255), stop:1 rgba(100, 95, 85, 255));
+	background: qlineargradient(x1:0, y1:0, x2:1, y2:0,
+		stop:0 rgba(245, 130, 145, 255), stop:1 rgba(220, 100, 115, 255));
 }
 
 QScrollBar:horizontal {
@@ -632,14 +698,16 @@ QScrollBar:horizontal {
 }
 
 QScrollBar::handle:horizontal {
-	background: qlineargradient(x1:0, y1:0, x2:0, y2:1, stop:0 rgba(160, 155, 145, 255), stop:1 rgba(140, 135, 125, 255));
+	background: qlineargradient(x1:0, y1:0, x2:0, y2:1,
+		stop:0 rgba(120, 200, 188, 255), stop:1 rgba(95, 184, 170, 255));
 	border-radius: 5px;
 	min-width: 20px;
 	margin: 1px;
 }
 
 QScrollBar::handle:horizontal:hover {
-	background: qlineargradient(x1:0, y1:0, x2:0, y2:1, stop:0 rgba(120, 115, 105, 255), stop:1 rgba(100, 95, 85, 255));
+	background: qlineargradient(x1:0, y1:0, x2:0, y2:1,
+		stop:0 rgba(140, 215, 200, 255), stop:1 rgba(120, 200, 188, 255));
 }
 
 QScrollBar::add-line:vertical, QScrollBar::sub-line:vertical,
@@ -648,31 +716,33 @@ QScrollBar::add-line:horizontal, QScrollBar::sub-line:horizontal {
 	height: 0px;
 }
 
-/* 记忆页视图容器（表格 / 图谱二选一，由切换按钮控制） */
+/* 记忆页视图容器 */
 #stack_memory {
-	border: 1px solid rgba(200, 195, 185, 160);
+	border: 1px solid rgba(180, 200, 195, 160);
 	border-radius: 10px;
-	background: rgba(250, 249, 245, 200);
+	background: rgba(252, 249, 244, 200);
 }
 
-/* 记忆图谱视图（内容区由控件自绘背景，此处只加淡边框圆角） */
+/* 记忆图谱视图 */
 #graph_memory {
-	border: 1px solid rgba(200, 195, 185, 160);
+	border: 1px solid rgba(180, 200, 195, 160);
 	border-radius: 8px;
 }
 
-/* 记忆页 - 顶部状态栏：小号浅灰文字（不抢表格主体） */
+/* 记忆页 - 顶部状态栏：浅薄荷灰文字 */
 QLabel#label_memory_status {
-	color: rgb(150, 143, 130);
+	color: rgb(150, 165, 158);
 	font-size: 12px;
 }
 
-/* 记忆页 - 视图切换按钮：深棕主操作风格，与「刷新」浅色按钮区分 */
+/* 记忆页 - 视图切换按钮：薄荷主操作（角色蝴蝶结色） */
 QPushButton#btn_memory_view_toggle {
 	background: qlineargradient(x1:0, y1:0, x2:1, y2:0,
-		stop:0 rgba(146, 122, 96, 255), stop:0.5 rgba(132, 108, 84, 255), stop:1 rgba(120, 96, 74, 255));
+		stop:0 rgba(140, 215, 200, 255),
+		stop:0.5 rgba(120, 200, 188, 255),
+		stop:1 rgba(105, 185, 172, 255));
 	color: rgb(252, 250, 245);
-	border: 1px solid rgba(96, 78, 58, 220);
+	border: 1px solid rgba(70, 145, 138, 220);
 	border-radius: 8px;
 	padding: 8px 18px;
 	font-size: 12px;
@@ -680,12 +750,12 @@ QPushButton#btn_memory_view_toggle {
 
 QPushButton#btn_memory_view_toggle:hover {
 	background: qlineargradient(x1:0, y1:0, x2:1, y2:0,
-		stop:0 rgba(162, 138, 110, 255), stop:1 rgba(142, 118, 92, 255));
+		stop:0 rgba(155, 220, 200, 255), stop:1 rgba(135, 205, 188, 255));
 }
 
 QPushButton#btn_memory_view_toggle:pressed {
 	background: qlineargradient(x1:0, y1:0, x2:1, y2:0,
-		stop:0 rgba(104, 82, 62, 255), stop:1 rgba(92, 70, 52, 255));
+		stop:0 rgba(95, 175, 160, 255), stop:1 rgba(80, 155, 140, 255));
 }
 
 /* 记忆页 - 刷新按钮：紧凑尺寸 */
@@ -695,29 +765,30 @@ QPushButton#btn_memory_refresh {
 	border-radius: 8px;
 }
 
-/* 记忆表格：悬停行高亮 + 单元格留白（底色/表头沿用全局 QTableWidget 奶油风格） */
+/* 记忆表格：悬停行高亮薄荷 */
 QTableWidget#table_memory::item {
 	padding: 4px 8px;
 	border: none;
 }
 
 QTableWidget#table_memory::item:hover {
-	background: rgba(233, 228, 217, 255);
+	background: rgba(220, 240, 230, 255);
 }
 
-/* 记忆详情弹窗文本：与全局输入框一致的奶油底色
-   （QPlainTextEdit 不在全局 QTextEdit 选择器内，需单独声明） */
+/* 记忆详情弹窗文本 */
 QPlainTextEdit {
-	background: qlineargradient(x1:0, y1:0, x2:0, y2:1, stop:0 rgba(250, 249, 245, 255), stop:1 rgba(248, 247, 242, 255));
-	border: 1px solid rgba(180, 175, 165, 200);
+	background: qlineargradient(x1:0, y1:0, x2:0, y2:1,
+		stop:0 rgba(252, 250, 245, 255), stop:1 rgba(248, 246, 240, 255));
+	border: 1px solid rgba(180, 200, 195, 200);
 	border-radius: 14px;
 	padding: 10px;
-	color: rgb(114, 95, 77);
+	color: rgb(91, 70, 54);
 }
 
 QPlainTextEdit:focus {
-	border: 2px solid rgb(140, 135, 125);
-}</string>
+	border: 2px solid rgb(120, 200, 188);
+}
+</string>
   </property>
   <widget class="QWidget" name="centralwidget">
    <layout class="QHBoxLayout" name="horizontalLayout">
@@ -788,7 +859,7 @@ QPlainTextEdit:focus {
           <set>Qt::AlignCenter</set>
          </property>
          <property name="styleSheet">
-          <string notr="true">color: rgb(160, 155, 145); font-size: 13px; font-weight: normal;</string>
+          <string notr="true">color: rgb(176, 160, 136); font-size: 13px; font-weight: normal;</string>
          </property>
         </widget>
        </item>
@@ -1015,14 +1086,14 @@ QPlainTextEdit:focus {
                <item>
                 <widget class="QRadioButton" name="radio_vts">
                  <property name="text">
-                  <string>VTubeStudio 虚拟主播（vtuber）</string>
+                  <string>VTubeStudio 虚拟主播 </string>
                  </property>
                 </widget>
                </item>
                <item>
                 <widget class="QRadioButton" name="radio_pet">
                  <property name="text">
-                  <string>桌面宠物（pet）</string>
+                  <string>桌面宠物</string>
                  </property>
                 </widget>
                </item>
@@ -1051,13 +1122,76 @@ QPlainTextEdit:focus {
             </layout>
            </item>
            <item>
-            <widget class="QTextEdit" name="log">
-             <property name="readOnly">
-              <bool>true</bool>
+            <widget class="QSplitter" name="splitter_log">
+             <property name="orientation">
+              <enum>Qt::Horizontal</enum>
              </property>
-             <property name="placeholderText">
-              <string>启动后这里实时显示主程序输出…</string>
-             </property>
+             <widget class="QWidget" name="log_chat_panel">
+              <layout class="QVBoxLayout" name="verticalLayout_log_chat_panel">
+               <property name="leftMargin">
+                <number>0</number>
+               </property>
+               <property name="topMargin">
+                <number>0</number>
+               </property>
+               <property name="rightMargin">
+                <number>0</number>
+               </property>
+               <property name="bottomMargin">
+                <number>0</number>
+               </property>
+               <item>
+                <widget class="QLabel" name="label_log_chat">
+                 <property name="text">
+                  <string>对话（弹幕 · LLM发言 · 回复）</string>
+                 </property>
+                </widget>
+               </item>
+               <item>
+                <widget class="QTextEdit" name="log_chat">
+                 <property name="readOnly">
+                  <bool>true</bool>
+                 </property>
+                 <property name="placeholderText">
+                  <string>弹幕、LLM 发言、Agent 回复…</string>
+                 </property>
+                </widget>
+               </item>
+              </layout>
+             </widget>
+             <widget class="QWidget" name="log_tool_panel">
+              <layout class="QVBoxLayout" name="verticalLayout_log_tool_panel">
+               <property name="leftMargin">
+                <number>0</number>
+               </property>
+               <property name="topMargin">
+                <number>0</number>
+               </property>
+               <property name="rightMargin">
+                <number>0</number>
+               </property>
+               <property name="bottomMargin">
+                <number>0</number>
+               </property>
+               <item>
+                <widget class="QLabel" name="label_log_tool">
+                 <property name="text">
+                  <string>工具日志（TTS · 记忆 · MCP）</string>
+                 </property>
+                </widget>
+               </item>
+               <item>
+                <widget class="QTextEdit" name="log_tool">
+                 <property name="readOnly">
+                  <bool>true</bool>
+                 </property>
+                 <property name="placeholderText">
+                  <string>工具日志、TTS 合成、状态信息…</string>
+                 </property>
+                </widget>
+               </item>
+              </layout>
+             </widget>
             </widget>
            </item>
            <item>
@@ -1421,7 +1555,7 @@ QPlainTextEdit:focus {
                  <item row="0" column="1">
                   <widget class="QLineEdit" name="ed_tts_audio">
                    <property name="placeholderText">
-                    <string>GPT-SoVITS 参考音频路径（留空 = 关闭 TTS）</string>
+                    <string>GPT-SoVITS 参考音频路径（可拖拽音频，留空 = 关闭 TTS）</string>
                    </property>
                   </widget>
                  </item>
@@ -1436,6 +1570,20 @@ QPlainTextEdit:focus {
                   <widget class="QLineEdit" name="ed_tts_text">
                    <property name="placeholderText">
                     <string>参考音频文本</string>
+                   </property>
+                  </widget>
+                 </item>
+                 <item row="2" column="0">
+                  <widget class="QLabel" name="label_tts_audios">
+                   <property name="text">
+                    <string>辅助参考：</string>
+                   </property>
+                  </widget>
+                 </item>
+                 <item row="2" column="1">
+                  <widget class="QLineEdit" name="ed_tts_audios">
+                   <property name="placeholderText">
+                    <string>辅助参考音频，多个用 | 分隔（可拖拽多个音频，与主参考混合）</string>
                    </property>
                   </widget>
                  </item>
@@ -1764,7 +1912,7 @@ QPlainTextEdit:focus {
                <item>
                 <widget class="QFrame" name="card_emotion_zone">
                  <property name="frameShape">
-                  <enum>QFrame::StyledPanel</enum>
+                  <enum>QFrame::NoFrame</enum>
                  </property>
                  <layout class="QVBoxLayout" name="verticalLayout_emotion_card">
                   <property name="spacing">
@@ -1809,7 +1957,7 @@ QPlainTextEdit:focus {
                <item>
                 <widget class="QFrame" name="card_expr_library">
                  <property name="frameShape">
-                  <enum>QFrame::StyledPanel</enum>
+                  <enum>QFrame::NoFrame</enum>
                  </property>
                  <layout class="QVBoxLayout" name="verticalLayout_expr_card">
                   <property name="spacing">
@@ -1896,7 +2044,7 @@ QPlainTextEdit:focus {
                <item>
                 <widget class="QFrame" name="card_motion_zone">
                  <property name="frameShape">
-                  <enum>QFrame::StyledPanel</enum>
+                  <enum>QFrame::NoFrame</enum>
                  </property>
                  <layout class="QVBoxLayout" name="verticalLayout_motion_card">
                   <property name="spacing">
@@ -1941,7 +2089,7 @@ QPlainTextEdit:focus {
                <item>
                 <widget class="QFrame" name="card_action_bind">
                  <property name="frameShape">
-                  <enum>QFrame::StyledPanel</enum>
+                  <enum>QFrame::NoFrame</enum>
                  </property>
                  <layout class="QVBoxLayout" name="verticalLayout_action_card">
                   <property name="spacing">
@@ -2081,7 +2229,7 @@ QPlainTextEdit:focus {
            <item>
             <widget class="QFrame" name="card_tool_status">
              <property name="frameShape">
-              <enum>QFrame::StyledPanel</enum>
+              <enum>QFrame::NoFrame</enum>
              </property>
              <layout class="QVBoxLayout" name="verticalLayout_tool_status">
               <property name="spacing">

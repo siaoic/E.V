@@ -353,6 +353,19 @@ class VTSController:
             request_id="inject",
         )
 
+    async def get_folder_info(self) -> dict:
+        """获取 VTS 内部文件夹名（VTSFolderInfoRequest，官方协议）。
+
+        Returns:
+            {models, backgrounds, items, config, logs, backup} ——
+            均为相对 StreamingAssets 的文件夹名（如 models="Live2DModels"）。
+            失败或无认证时返回空 dict。
+        """
+        if not self.authenticated:
+            return {}
+        resp = await self._request("VTSFolderInfoRequest", timeout=10.0)
+        return (resp or {}).get("data", {}) or {}
+
     async def get_current_model(self) -> dict:
         """获取当前模型信息：{modelLoaded, modelName, modelID, ...}。"""
         if not self.authenticated:

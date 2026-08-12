@@ -183,6 +183,14 @@ class Config:
     VTS_PLUGIN_DEVELOPER: str = os.getenv(
         "VTS_PLUGIN_DEVELOPER", "LocalUser")
     MOTION_PATH: str = os.getenv("MOTION_PATH", "")
+    # VTube Studio 安装根目录（待机动画接管定位模型文件用；
+    # 留空自动从 Steam 注册表定位，找不到则跳过接管）
+    VTS_ROOT: str = os.getenv("VTS_ROOT", "").strip()
+    # 待机动画接管（RUN_MODE=vtuber 且 MOTION_PATH 为空时生效）：
+    # 把模型在 VTS 里配置的待机动画交给插件注入路径播放（P2 优先级高于
+    # VTS 内置 P1 待机动画），由 MotionPlayer 平滑混合循环点，
+    # 消除待机动画尾帧→首帧硬跳（官方 API 无淡入淡出接口可修）。
+    VTS_IDLE_TAKEOVER: bool = _get_bool("VTS_IDLE_TAKEOVER", True)
 
     # ===== 口型同步 =====
     MOUTH_PARAMETER: str = os.getenv("MOUTH_PARAMETER", "")
@@ -192,9 +200,13 @@ class Config:
     GPTSOVITS_URL: str = os.getenv(
         "GPTSOVITS_URL", "http://127.0.0.1:9880")
     GPTSOVITS_REF_AUDIO: str = os.getenv("GPTSOVITS_REF_AUDIO", "")
+    # 辅助参考音频（多条以 | 分隔，与主参考混合出说话人音色；可空）
+    GPTSOVITS_REF_AUDIOS: str = os.getenv("GPTSOVITS_REF_AUDIOS", "")
     GPTSOVITS_PROMPT_TEXT: str = os.getenv(
         "GPTSOVITS_PROMPT_TEXT", "")
     GPTSOVITS_TIMEOUT: float = float(os.getenv("GPTSOVITS_TIMEOUT", "120"))
+    # 本地 TTS 模型目录（GSV-TTS-Lite 的 models_dir；留空 = GSV-TTS-Lite-main/API/models）
+    GPTSOVITS_MODELS_DIR: str = os.getenv("GPTSOVITS_MODELS_DIR", "")
 
     # ===== 内容过滤 =====
     PROFANITY_FILTER_ENABLED: bool = _get_bool(
@@ -241,6 +253,47 @@ class Config:
     TOOL_GET_WEATHER_ENABLED: bool = _get_bool(
         "TOOL_GET_WEATHER_ENABLED", True)
     TOOL_LOAD_SKILL_ENABLED: bool = _get_bool("TOOL_LOAD_SKILL_ENABLED", True)
+    TOOL_LOOK_SCREEN_ENABLED: bool = _get_bool("TOOL_LOOK_SCREEN_ENABLED", True)
+
+    # ===== 自我进化（对话后后台复盘：技能沉淀/话题进化/行为反思/话术建议） =====
+    EVOLUTION_ENABLED: bool = _get_bool("EVOLUTION_ENABLED", True)
+    # 复盘最小间隔（秒）与最小新增对话轮次：达标才调用 LLM 复盘，控制成本
+    EVOLUTION_MIN_INTERVAL: int = int(os.getenv("EVOLUTION_MIN_INTERVAL", "600"))
+    EVOLUTION_MIN_TURNS: int = int(os.getenv("EVOLUTION_MIN_TURNS", "5"))
+    # 定期自我提示：后台每 EVOLUTION_PERIODIC_INTERVAL 秒检查一次，空闲期
+    # 主动补复盘（对标 hermes 定期自我评估）。仅当距上次复盘已达标且存在
+    # 未复盘的新对话轮次时才调用 LLM，不重复消费 token。
+    EVOLUTION_PERIODIC_INTERVAL: int = int(os.getenv("EVOLUTION_PERIODIC_INTERVAL", "1800"))
+    # 技能评估闭环：技能沉淀/修补时生成测试集执行打分（fail-open，
+    # 评估失败不阻塞落盘；修补时新版更差自动回滚）。EVOLUTION_EVAL_CASES
+    # 为每次评估的测试用例数（钳制 1~3，越多越准但越耗 token）。
+    EVOLUTION_EVAL_ENABLED: bool = _get_bool("EVOLUTION_EVAL_ENABLED", True)
+    EVOLUTION_EVAL_CASES: int = max(
+        1, min(int(os.getenv("EVOLUTION_EVAL_CASES", "2")), 3))
+    # GEPA 系统提示词进化（对标 hermes 的 GEPA：变异 → 评审择优 → 注入）：
+    # 分析对话失败点变异候选行为策略段，与当前策略同批评审，择优落盘
+    # evolution_policy.json 由 llm_brain 注入系统提示。独立节流（默认 6 小时
+    # 一次），不消耗复盘节奏。
+    EVOLUTION_PROMPT_EVO_ENABLED: bool = _get_bool(
+        "EVOLUTION_PROMPT_EVO_ENABLED", True)
+    EVOLUTION_PROMPT_EVO_INTERVAL: int = int(
+        os.getenv("EVOLUTION_PROMPT_EVO_INTERVAL", "21600"))
+
+    # ===== 模型路由进化（多臂老虎机 UCB1） =====
+    # LLM_SERVERS：逗号分隔的多服务列表，每项「名称;base_url;api_key;model」。
+    # 配置 2 个及以上才启用路由（按历史成功率自动择优，越用越准）；
+    # 未配置时主对话完全走原有单一 LLM 服务逻辑，行为不变。
+    # LLM_ROUTER_EPSILON：探索率（0~1），小概率随机尝试非最优服务防局部最优。
+    LLM_SERVERS: str = os.getenv("LLM_SERVERS") or ""
+    LLM_ROUTER_ENABLED: bool = _get_bool("LLM_ROUTER_ENABLED", True)
+    LLM_ROUTER_EPSILON: float = float(os.getenv("LLM_ROUTER_EPSILON", "0.1"))
+
+    # ===== 屏幕视觉（look_at_screen 工具用） =====
+    # 截图交给多模态模型描述画面。默认跟随 BUTLER_MODEL（智谱 glm-4v-flash，
+    # 免费支持图片输入）；可用 VISION_* 单独指定其他视觉服务。
+    VISION_MODEL: str = os.getenv("VISION_MODEL") or BUTLER_MODEL or "glm-4v-flash"
+    VISION_BASE_URL: str = os.getenv("VISION_BASE_URL") or ""
+    VISION_API_KEY: str = os.getenv("VISION_API_KEY") or ""
 
     # ===== MCP（外部工具服务器） =====
     # 对标 live-2d(2)：MCP 服务器配置从外部 JSON 读取，tools 文件夹自动同步。
@@ -253,27 +306,39 @@ class Config:
     # ===== 运行参数 =====
     HISTORY_ROUNDS: int = int(os.getenv("HISTORY_ROUNDS", "10"))
 
-    # ===== 主动对话（参照 Muika-After-Story 的 Scheduler/loop 主动机制） =====
-    # 事件驱动心跳：互动/弹幕回复结束时检查；孤独/无聊状态随空闲时间累积，
-    # 突破阈值时 AI 主动开口。
+    # ===== 并发控制（LLM / 主动消息队列 / agent 避让） =====
+    # 同时进行的最多 LLM 推理数（用户对话 + agent 主动 + 弹幕回复共用信号量）；
+    # 本地大模型防显存打满、远程 API 防限流，超出排队等待而非无限并发。
+    LLM_MAX_CONCURRENCY: int = int(os.getenv("LLM_MAX_CONCURRENCY") or "2")
+    # agent 主动消息队列最大长度：超出丢弃最旧的主动消息，优先保留最新触发
+    # （用户输入 / 弹幕回复不走此队列，永远不丢）。
+    PROACTIVE_QUEUE_MAX: int = int(os.getenv("PROACTIVE_QUEUE_MAX") or "4")
+    # 主 LLM 推理/播报期间是否抑制 agent 主动触发（体验更顺滑，代价是少部分
+    # 主动搭话被推迟）
+    AGENT_AVOID_MAIN_LLM: bool = _get_bool("AGENT_AVOID_MAIN_LLM", True)
+    # agent 主动发言读取主会话历史的最大条数（精简上下文，降 token）
+    AGENT_HISTORY_SNAPSHOT: int = int(
+        os.getenv("AGENT_HISTORY_SNAPSHOT") or "6")
+    # agent 输出与最近对话的相似度去重阈值（0~1，达到即丢弃不送入队列）
+    AGENT_DUP_THRESHOLD: float = float(
+        os.getenv("AGENT_DUP_THRESHOLD") or "0.85")
+
+    # ===== 主动对话（LLM 自主决定，无时间门槛） =====
+    # 主动发言不再由孤独/无聊累积、冷却、随机唤醒点等时间参数控制：
+    # 互动结束后立即给一次机会、静默期按随机间隔给一次机会，由主模型
+    # 自主判断「此刻想不想说话、想说什么」——想说就生成发言，不想说就
+    # 保持沉默。
     # 注意：.env 中字段被清空时 os.getenv 返回空串而非默认值，一律用 `or` 兜底。
     PROACTIVE_ENABLED: bool = _get_bool("PROACTIVE_ENABLED", True)
-    # 用户发言后至少安静多久才考虑主动开口（秒）
-    PROACTIVE_MIN_IDLE_SECONDS: float = float(os.getenv("PROACTIVE_MIN_IDLE_SECONDS") or "60")
-    # 两次主动发言之间的最小间隔（秒，对标 PROACTIVE_COOLDOWN）
-    PROACTIVE_COOLDOWN_SECONDS: float = float(os.getenv("PROACTIVE_COOLDOWN_SECONDS") or "600")
-    # 孤独感 / 无聊感从 0 涨满所需小时数——决定主动开口的频率
-    # （孤独阈值 0.8 / 无聊阈值 0.6 固定，对标 Muika constants）
-    PROACTIVE_LONELINESS_HOURS: float = float(os.getenv("PROACTIVE_LONELINESS_HOURS") or "2")
-    PROACTIVE_BOREDOM_HOURS: float = float(os.getenv("PROACTIVE_BOREDOM_HOURS") or "1")
-    # ===== 主动对话：随机+事件混合触发（不用「定时回复」） =====
-    # 事件驱动（互动结束立即心跳）+ 随机唤醒点：静默期按概率随机开口，
-    # 说话时机不可预测；孤独/无聊阈值仍作为长时间不开口的兜底。
-    # PROACTIVE_RANDOM_CHANCE：每个随机唤醒点开口的概率（0~1）
-    # PROACTIVE_RANDOM_MAX_WAIT：随机唤醒点距现在的最大秒数（实际为 0~MAX 均匀随机）
-    PROACTIVE_RANDOM_ENABLED: bool = _get_bool("PROACTIVE_RANDOM_ENABLED", True)
-    PROACTIVE_RANDOM_CHANCE: float = float(os.getenv("PROACTIVE_RANDOM_CHANCE") or "0.25")
-    PROACTIVE_RANDOM_MAX_WAIT: float = float(os.getenv("PROACTIVE_RANDOM_MAX_WAIT") or "180")
+
+    # ===== 主动开口 / 弹幕回复共用的随机间隔范围（秒） =====
+    # 主动对话的开口机会间隔、弹幕回复的冷却间隔都从本范围随机取值，
+    # 避免固定时间（如 60s 整点开口）显得机械规律。互动结束后会额外
+    # 立即给一次主动开口机会。
+    RESPONSE_INTERVAL_MIN: float = float(
+        os.getenv("RESPONSE_INTERVAL_MIN") or "5")
+    RESPONSE_INTERVAL_MAX: float = float(
+        os.getenv("RESPONSE_INTERVAL_MAX") or "10")
 
     # ===== 技能系统（严格参照 Muika plugin/skills.py） =====
     # 技能根目录（相对项目根，逗号分隔可配多个）。每个目录下按
@@ -302,9 +367,10 @@ class Config:
     # 循环播放该动作（文件名，去扩展名）；留空 = 智能匹配文件名含「待机」/idle/loop
     PET_IDLE_MOTION: str = os.getenv("PET_IDLE_MOTION") or ""
 
-    # ===== 表情/动作（embedding 自动控制，仅桌宠模式生效） =====
+    # ===== 表情/动作（embedding 自动控制，桌宠 / vtuber 双模式） =====
     # 开启后：用户消息 → SiliconFlow Embedding 语义分类情绪 → 按映射表
-    # （data/emotion_map.json，可在控制中心「表情与动作」页配置）播放表情/动作。
+    # （按模式存 data/emotion_map.json / emotion_map_vts.json，可在控制中心
+    # 「表情与动作」页配置）播放表情/动作。
     EMOTION_ACTOR_ENABLED: bool = _get_bool("EMOTION_ACTOR_ENABLED", False)
     # SiliconFlow Embedding API（https://api.siliconflow.cn）
     SILICONFLOW_API_KEY: str = os.getenv("SILICONFLOW_API_KEY") or ""
@@ -322,9 +388,12 @@ class Config:
     EMBEDDING_DIMENSIONS: Optional[int] = _get_optional_int("EMBEDDING_DIMENSIONS")
     EMBEDDING_MODEL: str = os.getenv("EMBEDDING_MODEL") or (
         os.getenv("SILICONFLOW_MODEL") or "Qwen/Qwen3-Embedding-0.6B")
-    # 情绪 → 表情/动作映射文件（JSON，控制中心可配置；留空则只用默认）
+    # 情绪 → 表情/动作映射文件（JSON，控制中心可配置；留空则用默认）。
+    # 按运行模式分文件：桌宠与 VTS 模型的表情/动作名互不相同，各自维护
+    # 绑定互不干扰（桌宠 emotion_map.json，vtuber emotion_map_vts.json）
     EMOTION_MAP_FILE: str = os.getenv("EMOTION_MAP_FILE") or os.path.join(
-        _PROJECT_ROOT, "data", "emotion_map.json")
+        _PROJECT_ROOT, "data",
+        "emotion_map_vts.json" if RUN_MODE == "vtuber" else "emotion_map.json")
 
     # ===== 语音识别（STT，SiliconFlow 云端转写） =====
     # 开启后主程序监听麦克风：说话 → 能量 VAD 静音分割 → 上传
@@ -343,6 +412,11 @@ class Config:
     STT_LEVEL_THRESHOLD: float = float(os.getenv("STT_LEVEL_THRESHOLD") or "500")
     STT_SILENCE_SECONDS: float = float(os.getenv("STT_SILENCE_SECONDS") or "1.0")
     STT_MAX_SECONDS: float = float(os.getenv("STT_MAX_SECONDS") or "10")
+    # STT_INTERRUPT_MIN_SECONDS 语音打断阈值（秒）：回复播报期间识别到的
+    # 语音段「说话时长」超过该值才打断当前播报；过短语音（嗯/啊/咳嗽/
+    # 环境音）不打断，避免误触发。
+    STT_INTERRUPT_MIN_SECONDS: float = float(
+        os.getenv("STT_INTERRUPT_MIN_SECONDS") or "3")
 
     # ===== B 站直播弹幕（blivedm → SSE 弹幕气泡网页） =====
     # BILI_ENABLED：弹幕服务总开关（false 时弹幕启动.bat 不再启动服务）
@@ -390,6 +464,24 @@ def reload_tool_runtime() -> None:
         "TOOL_GET_CURRENT_TIME_ENABLED", True)
     cfg.TOOL_GET_WEATHER_ENABLED = _get_bool("TOOL_GET_WEATHER_ENABLED", True)
     cfg.TOOL_LOAD_SKILL_ENABLED = _get_bool("TOOL_LOAD_SKILL_ENABLED", True)
+    cfg.TOOL_LOOK_SCREEN_ENABLED = _get_bool("TOOL_LOOK_SCREEN_ENABLED", True)
+    cfg.EVOLUTION_ENABLED = _get_bool("EVOLUTION_ENABLED", True)
+    cfg.EVOLUTION_MIN_INTERVAL = int(os.getenv("EVOLUTION_MIN_INTERVAL", "600"))
+    cfg.EVOLUTION_MIN_TURNS = int(os.getenv("EVOLUTION_MIN_TURNS", "5"))
+    cfg.EVOLUTION_EVAL_ENABLED = _get_bool("EVOLUTION_EVAL_ENABLED", True)
+    cfg.EVOLUTION_EVAL_CASES = max(
+        1, min(int(os.getenv("EVOLUTION_EVAL_CASES", "2")), 3))
+    cfg.EVOLUTION_PROMPT_EVO_ENABLED = _get_bool(
+        "EVOLUTION_PROMPT_EVO_ENABLED", True)
+    cfg.EVOLUTION_PROMPT_EVO_INTERVAL = int(
+        os.getenv("EVOLUTION_PROMPT_EVO_INTERVAL", "21600"))
+    cfg.LLM_SERVERS = os.getenv("LLM_SERVERS") or ""
+    cfg.LLM_ROUTER_ENABLED = _get_bool("LLM_ROUTER_ENABLED", True)
+    cfg.LLM_ROUTER_EPSILON = float(os.getenv("LLM_ROUTER_EPSILON", "0.1"))
+    cfg.VISION_MODEL = (os.getenv("VISION_MODEL")
+                        or cfg.BUTLER_MODEL or "glm-4v-flash")
+    cfg.VISION_BASE_URL = os.getenv("VISION_BASE_URL") or ""
+    cfg.VISION_API_KEY = os.getenv("VISION_API_KEY") or ""
     cfg.STT_ENABLED = _get_bool("STT_ENABLED", False)
     cfg.STT_MODEL = os.getenv("STT_MODEL") or "FunAudioLLM/SenseVoiceSmall"
     cfg.STT_API_KEY = os.getenv("STT_API_KEY") or ""
@@ -420,22 +512,21 @@ def reload_config() -> None:
     # 人设（SYSTEM_PROMPT_FILE 优先，否则 UI 人设 / SYSTEM_PROMPT）
     cfg.SYSTEM_PROMPT_FILE = os.getenv("SYSTEM_PROMPT_FILE") or ""
     cfg.SYSTEM_PROMPT = _load_system_prompt()
-    # 主动对话
+    # 主动对话（LLM 自主决定，!config 热更新生效）
     cfg.PROACTIVE_ENABLED = _get_bool("PROACTIVE_ENABLED", True)
-    cfg.PROACTIVE_MIN_IDLE_SECONDS = float(
-        os.getenv("PROACTIVE_MIN_IDLE_SECONDS") or "60")
-    cfg.PROACTIVE_COOLDOWN_SECONDS = float(
-        os.getenv("PROACTIVE_COOLDOWN_SECONDS") or "600")
-    cfg.PROACTIVE_LONELINESS_HOURS = float(
-        os.getenv("PROACTIVE_LONELINESS_HOURS") or "2")
-    cfg.PROACTIVE_BOREDOM_HOURS = float(
-        os.getenv("PROACTIVE_BOREDOM_HOURS") or "1")
-    # 主动对话：随机+事件混合触发（随机唤醒点，随 !config 热更新生效）
-    cfg.PROACTIVE_RANDOM_ENABLED = _get_bool("PROACTIVE_RANDOM_ENABLED", True)
-    cfg.PROACTIVE_RANDOM_CHANCE = float(
-        os.getenv("PROACTIVE_RANDOM_CHANCE") or "0.25")
-    cfg.PROACTIVE_RANDOM_MAX_WAIT = float(
-        os.getenv("PROACTIVE_RANDOM_MAX_WAIT") or "180")
+    # 主动开口 / 弹幕回复共用随机间隔范围（!config 热更新生效）
+    cfg.RESPONSE_INTERVAL_MIN = float(
+        os.getenv("RESPONSE_INTERVAL_MIN") or "5")
+    cfg.RESPONSE_INTERVAL_MAX = float(
+        os.getenv("RESPONSE_INTERVAL_MAX") or "10")
+    # 并发控制（热更新生效，无需重启）
+    cfg.LLM_MAX_CONCURRENCY = int(os.getenv("LLM_MAX_CONCURRENCY") or "2")
+    cfg.PROACTIVE_QUEUE_MAX = int(os.getenv("PROACTIVE_QUEUE_MAX") or "4")
+    cfg.AGENT_AVOID_MAIN_LLM = _get_bool("AGENT_AVOID_MAIN_LLM", True)
+    cfg.AGENT_HISTORY_SNAPSHOT = int(
+        os.getenv("AGENT_HISTORY_SNAPSHOT") or "6")
+    cfg.AGENT_DUP_THRESHOLD = float(
+        os.getenv("AGENT_DUP_THRESHOLD") or "0.85")
     # 内容过滤
     cfg.PROFANITY_FILTER_ENABLED = _get_bool(
         "PROFANITY_FILTER_ENABLED", True)
@@ -443,8 +534,9 @@ def reload_config() -> None:
         os.getenv("PROFANITY_FILTER_RATE", "0.7"))
     # 记忆
     cfg.MEMORY_ENABLED = _get_bool("MEMORY_ENABLED", True)
-    # TTS 参考音频/文本
+    # TTS 参考音频/辅助参考/文本
     cfg.GPTSOVITS_REF_AUDIO = os.getenv("GPTSOVITS_REF_AUDIO", "")
+    cfg.GPTSOVITS_REF_AUDIOS = os.getenv("GPTSOVITS_REF_AUDIOS", "")
     cfg.GPTSOVITS_PROMPT_TEXT = os.getenv("GPTSOVITS_PROMPT_TEXT", "")
     # 桌宠窗口 / 待机动作
     cfg.PET_ALWAYS_ON_TOP = _get_bool("PET_ALWAYS_ON_TOP", True)

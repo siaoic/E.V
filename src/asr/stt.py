@@ -43,8 +43,9 @@ class STTEngine:
     - 采集线程：sounddevice InputStream 回调只把块塞进队列（轻量，不阻塞音频回调）
     - 处理线程：VAD 状态机消费块，切出语音段 → 写临时 WAV
     - 转写线程：每段语音独立线程上传转写（不阻塞 VAD，可连续说话）
-    - 交付：转写文本经 `loop.call_soon_threadsafe` 设置 asyncio future，
-      主循环 `_wait_input` 用 `asyncio.wait` 同时等待 stdin 与识别结果。
+    - 交付：转写文本 + 说话时长经 `loop.call_soon_threadsafe` 设置 asyncio future
+      （future 结果为 `(文本, 说话时长秒)` 元组），主循环 `_wait_input` /
+      `_interruptible_converse` 用 `asyncio.wait` 同时等待 stdin 与识别结果。
     """
 
     def __init__(self, cfg) -> None:
@@ -97,7 +98,7 @@ class STTEngine:
     # ---------- 结果交付（供主循环 asyncio.wait） ----------
 
     def result_future(self) -> "asyncio.Future":
-        """返回下一个识别结果的 future。
+        """返回下一个识别结果的 future，结果为 `(文本, 说话时长秒)` 元组。
 
         多次调用返回同一 future（首个未完成者），消费后下一次调用拿到新的。
         """
@@ -110,18 +111,18 @@ class STTEngine:
         self._futures.append(fut)
         return fut
 
-    def _deliver(self, text: str) -> None:
-        """主循环线程内：把识别文本交付给等待中的 future（FIFO）。"""
+    def _deliver(self, text: str, speech_seconds: float) -> None:
+        """主循环线程内：把识别文本+说话时长交付给等待中的 future（FIFO）。"""
         text = (text or "").strip()
         if not text:
             return
         if self._futures:
             fut = self._futures.pop(0)
             if not fut.done():
-                fut.set_result(text)
+                fut.set_result((text, speech_seconds))
         else:
             # 主循环在对话中（没在等输入）→ 缓冲，下次等输入时立刻拿到
-            self._pending_texts.append(text)
+            self._pending_texts.append((text, speech_seconds))
 
     # ---------- 采集线程 ----------
 
@@ -152,6 +153,7 @@ class STTEngine:
         state = "silent"
         buf: "list[np.ndarray]" = []
         silent_run = 0
+        speech_blocks = 0   # 说话（有声）块计数：供打断时长判定（不含结尾静音）
 
         while not self._stop_event.is_set():
             try:
@@ -161,8 +163,8 @@ class STTEngine:
                 if state == "speaking":
                     silent_run += 1
                     if silent_run >= silence_blocks:
-                        self._commit(buf)
-                        buf, state, silent_run = [], "silent", 0
+                        self._commit(buf, speech_blocks * BLOCK_SECONDS)
+                        buf, state, silent_run, speech_blocks = [], "silent", 0, 0
                 continue
 
             rms = _rms(block)
@@ -170,23 +172,25 @@ class STTEngine:
                 if rms > self.level_threshold:
                     state = "speaking"
                     buf = [block]
+                    speech_blocks = 1
                     silent_run = 0
             else:
                 buf.append(block)
                 if rms > self.level_threshold:
+                    speech_blocks += 1
                     silent_run = 0
                 else:
                     silent_run += 1
                     if silent_run >= silence_blocks:
-                        self._commit(buf)
-                        buf, state, silent_run = [], "silent", 0
+                        self._commit(buf, speech_blocks * BLOCK_SECONDS)
+                        buf, state, silent_run, speech_blocks = [], "silent", 0, 0
                         continue
                 # 超时强制切段（连续说话不停顿也按时长切）
                 if len(buf) * BLOCK_SECONDS >= self.max_seconds:
-                    self._commit(buf)
-                    buf, state, silent_run = [], "silent", 0
+                    self._commit(buf, speech_blocks * BLOCK_SECONDS)
+                    buf, state, silent_run, speech_blocks = [], "silent", 0, 0
 
-    def _commit(self, buf: "list[np.ndarray]") -> None:
+    def _commit(self, buf: "list[np.ndarray]", speech_seconds: float) -> None:
         """语音段收尾：校验长度/能量 → 写 WAV → 转写线程。"""
         if not buf:
             return
@@ -198,7 +202,8 @@ class STTEngine:
         path = self._write_wav(audio)
         if path:
             threading.Thread(
-                target=self._transcribe_worker, args=(path,), daemon=True
+                target=self._transcribe_worker, args=(path, speech_seconds),
+                daemon=True,
             ).start()
 
     @staticmethod
@@ -219,7 +224,7 @@ class STTEngine:
 
     # ---------- 转写 ----------
 
-    def _transcribe_worker(self, wav_path: str) -> None:
+    def _transcribe_worker(self, wav_path: str, speech_seconds: float) -> None:
         try:
             text = self.transcribe(wav_path)
         except Exception as e:
@@ -231,7 +236,7 @@ class STTEngine:
             except OSError:
                 pass
         if text and self._loop is not None:
-            self._loop.call_soon_threadsafe(self._deliver, text)
+            self._loop.call_soon_threadsafe(self._deliver, text, speech_seconds)
 
     def transcribe(self, wav_path: str) -> str:
         """上传音频到 SiliconFlow 转写，返回识别文本（失败抛异常）。"""

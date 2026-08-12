@@ -34,6 +34,11 @@ BRIGHT_YELLOW = "\033[93m"
 BRIGHT_MAGENTA = "\033[95m"
 BRIGHT_CYAN = "\033[96m"
 
+# 控制中心左右分栏标记：对话类内容（弹幕 / LLM 发言 / Agent 回复 / 用户输入）
+# 用零宽连接符包裹。普通终端里零宽字符不可见（输出效果等同 print）；
+# 控制中心捕获 stdout 后凭此标记把内容路由到左侧「对话」面板并剥离。
+CHAT_TAG = "\u2060"
+
 
 def _display_width(text: str) -> int:
     """估算终端显示宽度：东亚宽字符（中文/全角符号）按 2 列，其余按 1 列。
@@ -47,6 +52,15 @@ def _display_width(text: str) -> int:
 def paint(text: str, code: str) -> str:
     """给文本上色（含 ANSI 转义）。"""
     return f"{code}{text}{RESET}"
+
+
+def chat(text: str = "", end: str = "\n", flush: bool = False) -> None:
+    """输出「对话」类内容（弹幕 / LLM 发言 / Agent 回复 / 用户输入）。
+
+    内容与 end 一起被零宽标记包裹：控制中心据此路由到左侧「对话」面板
+    并剥离标记；直接在终端运行时零宽字符不可见，输出效果与 print 一致。
+    """
+    print(f"{CHAT_TAG}{text}{end}{CHAT_TAG}", end="", flush=flush)
 
 
 # Windows 控制台 VT 转义相关常量

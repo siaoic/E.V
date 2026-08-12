@@ -23,9 +23,9 @@ from src.utils import config, console
 _STT_TMP_PREFIX = "vtuber_stt_"
 _STT_TMP_SUFFIX = ".wav"
 
-# 服务端 TTS 合成输出目录（gsv_tts/API 写盘，见 fastapi_server_example.py
-# 的 output_dir = project_root.parent / "temp"）：仅删服务端命名的 tts_*.wav，
-# 不碰 temp/ 下其他任何文件。目录在函数内求值（依赖 config 已加载）。
+# 旧 GSV-TTS-Lite 服务端合成输出目录（项目根 temp/，服务端已随 gsv_tts 移除，
+# 此处仅兜底清理历史残留 tts_*.wav，不碰 temp/ 下其他任何文件）。
+# 目录在函数内求值（依赖 config 已加载）。
 _TTS_OUT_PREFIX = "tts_"
 _TTS_OUT_SUFFIX = ".wav"
 
@@ -53,7 +53,7 @@ def _remove_glob(directory: str, prefix: str, suffix: str) -> Tuple[int, int]:
 
 
 def _cleanup_tts_tmp() -> Tuple[int, int]:
-    """清空服务端 TTS 合成输出目录（项目根 temp/，仅 tts_*.wav）。"""
+    """清空旧服务端 TTS 合成输出目录（项目根 temp/，仅 tts_*.wav 历史残留）。"""
     try:
         return _remove_glob(_tts_out_dir(), _TTS_OUT_PREFIX, _TTS_OUT_SUFFIX)
     except Exception:
@@ -61,7 +61,7 @@ def _cleanup_tts_tmp() -> Tuple[int, int]:
 
 
 def cleanup_tts_output(verbose: bool = True) -> dict:
-    """清理服务端 TTS 合成输出（播放完/兜底调用），返回 {files, bytes}。"""
+    """清理旧服务端 TTS 合成输出残留（播放完/兜底调用），返回 {files, bytes}。"""
     files, freed_bytes = _cleanup_tts_tmp()
     stats = {"files": files, "bytes": freed_bytes}
     if verbose and files:
@@ -99,7 +99,7 @@ def cleanup_temp_files(verbose: bool = True) -> dict:
 
     - output/：TTS 临时音频（复用 engine._cleanup_output 的安全删除）
     - 系统临时目录：STT 崩溃 / 进程被杀残留的 vtuber_stt_*.wav
-    - 项目根 temp/：服务端 TTS 合成输出（tts_*.wav，仅删服务端命名文件）
+    - 项目根 temp/：旧服务端 TTS 合成输出残留（tts_*.wav）
     删除失败（文件被占用）静默跳过。
     """
     stats: Dict[str, int] = {"files": 0, "bytes": 0}
@@ -123,8 +123,7 @@ def cleanup_temp_files(verbose: bool = True) -> dict:
     except Exception:
         pass
 
-    # 3. 服务端 TTS 合成输出（项目根 temp/tts_*.wav：启动清上次残留，
-    #    退出清本次；播放完另有 cleanup_tts_output 兜底）
+    # 3. 旧服务端 TTS 合成输出残留（项目根 temp/tts_*.wav，兜底清理）
     try:
         files, freed_bytes = _cleanup_tts_tmp()
         stats["files"] += files

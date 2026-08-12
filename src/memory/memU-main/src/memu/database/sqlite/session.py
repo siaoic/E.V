@@ -5,6 +5,7 @@ from __future__ import annotations
 import logging
 from typing import Any
 
+from sqlalchemy import event
 from sqlalchemy.exc import SQLAlchemyError
 from sqlmodel import Session, create_engine
 
@@ -27,6 +28,14 @@ class SQLiteSessionManager:
         if engine_kwargs:
             kw.update(engine_kwargs)
         self._engine = create_engine(dsn, **kw)
+        # 开启 WAL 提升并发：读不再被写阻塞；busy_timeout 兜底忙等，
+        # 避免 agent 写记忆与检索读并发时出现 "database is locked"。
+        @event.listens_for(self._engine, "connect")
+        def _set_sqlite_pragma(dbapi_connection, connection_record):
+            cursor = dbapi_connection.cursor()
+            cursor.execute("PRAGMA journal_mode=WAL")
+            cursor.execute("PRAGMA busy_timeout=5000")
+            cursor.close()
 
     def session(self) -> Session:
         """Create a new database session."""

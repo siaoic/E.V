@@ -1,30 +1,30 @@
-"""主动对话引擎 —— 严格参照 Muika-After-Story 1.4.1 的主动机制。
+"""主动对话引擎 —— 由 LLM 自主决定「想说就说」，无时间门槛。
 
-机制映射（Muika → 本项目）：
-  loop.collect_events 的 5s 心跳 tick   → heartbeat() 事件驱动检查（互动结束时触发）
-  state.MuikaState 状态累积              → loneliness / boredom / curiosity / mood
-  loop.get_think_mode 触发判定           → _should_trigger()（emotional / topic / None）
-  loop._run_topic_pipeline               → 话题管线（TopicManager 选择 + expand_topic 扩写）
-  loop._run_brain_pipeline               → 情绪管线（主 Brain 生成，走完整输出管线）
-  topic_manager.TopicManager             → _pick_topic()（权重 / 冷却 / 互动率评分）
-  constants.PROACTIVE_COOLDOWN 等        → 对应 .env 配置（速率保留可调）
+机制（自主开口，取代 Muika 的定时触发）：
+  loop.collect_events 心跳          → heartbeat() 事件驱动检查（互动结束立即触发）
+  state.MuikaState 状态累积/阈值     → 删除：不再由孤独/无聊/冷却/随机点决定是否开口
+  loop.get_think_mode 触发判定       → _decide_and_generate()：主模型自主判断
+                                       （想说就生成发言，不想说输出 <SILENT>）
+  loop._run_topic_pipeline           → 灵感话题（可选）：主模型可顺着聊，也可自由发挥
+  topic_manager.TopicManager         → _pick_topic()（权重 / 冷却 / 互动率评分）
 
-agent 分工（用户确认的架构：主动发言交给 agent，agent 催促主模型）：
-  - ButlerAgent.build_proactive_prompt：负责组装主模型的发言请求——话题、
-    时段语气、类别结尾策略、记忆线索注入（对标 Muika brain.expand_topic）
-  - 主模型（stream.converse）：负责开口生成内容 + TTS/字幕/口型
-  - agent 还负责发言后的记忆蒸馏（on_llm_done 回调）：仅情绪发言
-    （孤独倾诉，反映内心状态）蒸馏为 self 记忆；话题发言（闲聊）不蒸馏
+开口机会（只决定「多久给一次机会」，是否说话完全由 LLM 自主）：
+  - 互动结束（on_user_message）→ _wakeup 事件立即给一次机会
+  - 静默期 → 从共用随机间隔范围（RESPONSE_INTERVAL_MIN~MAX）给一次机会
+
+agent 分工（主动发言交给 agent，agent 催促主模型）：
+  - ButlerAgent.build_proactive_prompt：组装主模型的自主开口请求——灵感话题、
+    时段语气、记忆线索注入；prompt 明确允许选择沉默（输出 <SILENT>）
+  - 主模型（brain.chat_stream）：决策 + 生成发言内容；`<SILENT>` → 沉默
+  - 播报由 stream.speak_text 直接播放预生成文本（不再二次调用 LLM）
+  - agent 负责发言后的记忆蒸馏（仅情感发言蒸馏为 self 记忆，话题闲聊不蒸馏）
   - 关闭记忆（无 agent）时回退内置简化 prompt
 
-与 Muika 的差异（适配本项目的控制台 REPL 场景）：
-  - 不引入完整事件系统，用事件驱动心跳 + 单次精确唤醒（互动结束事件
-    立即检查；静默期算好「下一个有意义时刻」到点只醒一次，无周期轮询）
-  - 话题冷却 / 互动率用内存记录（Muika 用 SQLite TopicHistory）
-  - 话题发言后进入 active_topic：期间心跳不再触发任何发言（防打断），
-    用户回应则话题结束并记录互动（engaged），10 分钟无回应自动结束
-  - 冷却（PROACTIVE_COOLDOWN_SECONDS）仅作用于情绪发言（对齐 Muika：
-    PROACTIVE_COOLDOWN 是「两次主动情绪发言的最小间隔」），话题发言不受限
+保留的非时间类保护（防冲突，不是说话时间限制）：
+  - 忙碌抑制：主 LLM 推理 / 播报进行中不开口（避免抢话）
+  - 弹幕回复已敲定：弹幕优先，主动不抢话
+  - 话题活跃期：刚聊完一个话题不立刻又开口（防打断，超时自动结束）
+  - 队列防堆积 / 内容去重 / 用户输入优先丢弃排队
 """
 
 import asyncio
@@ -34,6 +34,7 @@ import sys
 import time
 from collections import deque
 from datetime import datetime
+from difflib import SequenceMatcher
 from typing import Dict, List, Optional, Tuple
 
 import yaml
@@ -41,35 +42,31 @@ import yaml
 from src.utils import console
 from src.llm import stream
 from src.core.output_lock import (
-    get_output_lock, set_output_owner,
+    STATE_AGENT_THINKING, STATE_AI_SPEAKING, STATE_IDLE,
+    get_output_lock, set_output_owner, set_global_state, is_idle,
+    is_danmaku_pending,
 )
 
 # ======================================================================
-# 触发阈值 / 话题权重 —— 严格对齐 Muika-After-Story
-# （muika/core/constants.py + muika/core/topic_manager.py）
+# 话题权重 —— 严格对齐 Muika-After-Story
+# （muika/core/topic_manager.py）
 # ======================================================================
 
-# —— 触发阈值（对标 muika/core/constants.py）——
-_LONELINESS_THRESHOLD = 1.0    # 孤独感满格(100%)才触发情绪管线
-_BOREDOM_THRESHOLD = 1.0       # 无聊感满格(100%)才触发话题管线
-_CURIOSITY_DRIVE_THRESHOLD = 0.6  # 探索冲动超过此值且 30% 概率 → 话题管线
-_LONELINESS_PROACTIVE_RELIEF = 0.35  # 主动发言后孤独感降低幅度
-# 对标 LONELINESS_PROACTIVE_RELIEF：表达出来会有所缓解，但不等于彻底不孤独。
-# 两次主动情绪发言的最小间隔（秒）：Muika 默认 1 小时；本项目由
-# .env PROACTIVE_COOLDOWN_SECONDS 配置（见 _should_trigger）。
+# —— 自主开口（LLM 自主决定，无时间门槛）——
+# 主模型输出以下任一标记视为「此刻不想说」→ 保持沉默（幂等匹配）
+_SILENT_MARKERS = (
+    "<SILENT>", "SILENT", "沉默", "保持沉默", "不想说", "此刻不想说",
+    "暂无", "无", "没有", "算了", "不了", "NONE", "NULL",
+)
 
 # —— 话题类别权重（对标 topic_manager.TOPIC_WEIGHTS）——
+# 对齐 topics.yml 实际分类：neuro（日常脑洞/情绪）为主，neuro_fact（冷知识）、
+# neuro_story（故事）次之，learned（自我进化沉淀的互动话题）低频兜底
 _TOPIC_WEIGHTS: Dict[str, float] = {
-    "relationship": 0.35,
-    "philosophy": 0.25,
-    "trivia": 0.20,
-    "story": 0.10,
-    "meta": 0.05,
-}
-# 无聊感 > 好奇心时的权重调整（对标 get_next_topic：更想听点轻松的）
-_TOPIC_BOREDOM_BOOST: Dict[str, float] = {
-    "trivia": 0.10, "story": 0.05,
-    "philosophy": -0.10, "meta": -0.05,
+    "neuro": 0.35,
+    "neuro_fact": 0.25,
+    "neuro_story": 0.25,
+    "learned": 0.15,
 }
 # 近期已聊类别的权重惩罚（对标 _RECENT_TYPE_PENALTY，窗口 3，避免连续同主题）
 _RECENT_TYPE_PENALTY: float = 0.25
@@ -84,11 +81,7 @@ _INTERACTION_MID: float = 0.6
 # —— 话题活跃期（对标 state.ActiveTopicState）——
 # 话题发言后进入活跃期：期间不触发任何主动发言（防情绪管线打断话题）。
 # 用户回应 → 结束话题并记互动；超过本超时（秒）无回应自动结束。
-# 默认跟随发言冷却，使快节奏配置下话题活跃期不会过长卡死后续触发。
 _ACTIVE_TOPIC_TIMEOUT: float = 120.0
-
-# 探索冲动涨满所需小时数（直播场景比无聊更慢，作为低频惊喜触发）
-_CURIOSITY_DRIVE_HOURS: float = 4.0
 
 # 话题种子源：完整话题表（157 条，含 id/category/concept/tags/cooldown_minutes），
 # 内容取自 Muika-After-Story configs/topics.yml。原字段 cooldown_days（天），
@@ -130,12 +123,13 @@ def _load_topic_seeds() -> List[dict]:
 
 
 class ProactiveEngine:
-    """主动对话引擎：事件驱动心跳 → 状态累积 → 触发判定 → agent 准备发言 → 主模型开口。
+    """主动对话引擎：事件驱动心跳 → 灵感话题 → LLM 自主决策 → 后台播报。
 
     主循环 `_wait_input` 等待用户输入，互动/弹幕回复结束的唤醒事件到达时
     调用 `heartbeat()`；静默期靠 next_wake_in() 单次精确唤醒（到点才醒一次，
-    无周期轮询）。触发后由 ButlerAgent（若启用）组装发言请求，主模型
-    （stream.converse）生成并播报，走与用户对话相同的 TTS/字幕/口型管线。
+    无周期轮询）。触发后由 ButlerAgent（若启用）组装自主开口请求，主模型
+    自主判断想说就说 / 不想说输出 <SILENT> 保持沉默；发言文本由
+    stream.speak_text 直接播报，走与用户对话相同的 TTS/字幕/口型管线。
     """
 
     def __init__(self, brain, tts, face, sub, cfg,
@@ -153,28 +147,12 @@ class ProactiveEngine:
         # 全局输出互斥锁（模块单例，三方共用） + 说话者身份标记
         self._output_lock = get_output_lock()
 
-        # 状态（对标 MuikaState）：随空闲时间线性累积，用户发言清孤独
-        self.loneliness = 0.0
-        self.boredom = 0.0
-        self.curiosity = 0.5  # 探索欲：初始 0.5，空闲每 tick ×0.99 缓慢衰减（对标 MuikaState）
-        self.curiosity_drive = 0.0  # 探索冲动：独立累积，> 阈值且 30% 概率触发话题（对标 get_think_mode）
-        self.mood = "calm"
+        # 状态：距上次互动的时间戳（供自主决策 prompt 提供环境上下文）
         self.last_interaction = time.time()
-        self.last_proactive_at: Optional[datetime] = None  # 仅情绪发言记录（冷却）
         self.active_topic: Optional[dict] = None  # 活跃话题（对标 ActiveTopicState）
-        self._last_tick = time.time()
-        # 事件驱动心跳（对标 NagaAgent Heartbeat v3）：on_user_message
-        # （互动/弹幕回复结束）时 set，主循环立即醒来做一次心跳检查；
-        # 静默期由 next_wake_in() 单次精确唤醒兜底（无周期轮询）。
+        # 事件驱动心跳：on_user_message（互动/弹幕回复结束）时 set，
+        # 主循环立即醒来做一次心跳检查；静默期由 next_wake_in() 低频机会兜底。
         self._wakeup = asyncio.Event()
-        # 随机唤醒点（随机+事件混合触发，不用「定时回复」）：静默期下一个
-        # 「可能随机开口」的时刻，到点掷骰子决定是否开口；未命中则重采样
-        # 下一个随机点——说话时机不可预测，不依赖孤独/无聊定时累积到阈值。
-        self._random_enabled = bool(cfg.PROACTIVE_RANDOM_ENABLED)
-        self._random_chance = max(
-            0.0, min(1.0, float(cfg.PROACTIVE_RANDOM_CHANCE or 0.25)))
-        self._random_max_wait = max(1e-6, float(cfg.PROACTIVE_RANDOM_MAX_WAIT or 180))
-        self._next_random_at = time.time() + random.uniform(0, self._random_max_wait)
         self.speaking = False
         self._recent_categories: deque = deque(maxlen=_RECENT_TYPE_WINDOW)
         # 话题种子与使用记录（对标 TopicStore + TopicHistory：内存版无 DB）
@@ -183,155 +161,288 @@ class ProactiveEngine:
         # 话题互动统计：{id: {"use": 使用次数, "engaged": 用户互动次数}}
         self._topic_stats: Dict[str, dict] = {}
 
+        # ===== 主动消息队列（限流/去重/丢弃策略，见 heartbeat/_enqueue/_worker）=====
+        # 队列最大长度超出时丢弃最旧的主动消息，优先保留最新触发；
+        # 用户输入不走此队列（直接进主循环），永远不丢。
+        self._queue: asyncio.Queue = asyncio.Queue(maxsize=cfg.PROACTIVE_QUEUE_MAX)
+        # 后台消费 worker（异常捕获不退出；死亡后下次入队自动重建）
+        self._worker_task: Optional[asyncio.Task] = None
+        # 播报完成事件：worker 播完置位，_wait_input 据此精确唤醒重新等待
+        # 输入（无周期轮询）；开始播报前 clear。
+        self._speak_done = asyncio.Event()
+        # 最近播报过的主动发言文本（去重比对基准，窗口 3）
+        self._recent_prompts: deque = deque(maxlen=3)
+        # 触发/播报/丢弃统计（供调试观察 agent 行为）
+        self._stats: Dict[str, int] = {"trigger": 0, "speak": 0, "dropped": 0}
+
     # ---------- 对外接口 ----------
 
-    def on_user_message(self) -> None:
-        """用户发言：孤独、无聊直接清零；刷新交互时间，结束活跃话题记互动。
+    def add_topic_seeds(self, new_seeds: List[dict]) -> None:
+        """追加新话题种子（自我进化模块沉淀的话题），按 concept 去重合并。
 
-        规则：有人说话就清零，没人说话的沉默时间才累积孤独/无聊。
+        当前会话立即生效；进程重启后由 topics.yml 重新加载兜底。
         """
-        self.loneliness = 0.0
-        self.boredom = 0.0
+        seen = {t.get("concept") for t in self._topic_seeds}
+        for seed in new_seeds:
+            if not seed.get("concept") or seed["concept"] in seen:
+                continue
+            self._topic_seeds.append(seed)
+            seen.add(seed["concept"])
+
+    def on_user_message(self) -> None:
+        """用户发言：刷新交互时间，结束活跃话题记互动，并立即给一次开口机会。
+
+        有人说话即为互动：静默计时重新开始；主动发言是否开口由 LLM 自主
+        判断（无时间门槛），互动结束立即触发一次心跳检查。
+        """
         self.last_interaction = time.time()
         if self.active_topic is not None:
             stats = self._topic_stats.setdefault(
                 self.active_topic["topic_id"], {"use": 0, "engaged": 0})
             stats["engaged"] += 1
             self.active_topic = None
-        # 事件驱动心跳：互动结束立即唤醒主循环做一次心跳检查
+        # 事件驱动心跳：互动结束立即唤醒主循环做一次心跳检查（LLM 自主决定）
         self._wakeup.set()
-        # 随机唤醒点重新计时：互动后进入新的随机窗口（随机+事件混合）
-        self._resample_random_at()
 
     async def heartbeat(self) -> bool:
-        """事件驱动心跳检查：更新状态，若判定触发则生成并播报一次主动发言。
+        """自主开口检查：由主模型决定此刻想不想说话、想说什么。
 
-        返回是否真的开口说了话。
+        想说 → 生成发言文本并入队（后台 worker 播报）；不想说（<SILENT>）
+        → 保持沉默。不再有任何时间门槛（孤独/无聊累积、冷却、随机唤醒点）。
+
+        返回是否真的有主动消息入队。播报不再在此阻塞等待——由后台 worker
+        消费队列，带忙碌抑制 / 去重，避免「事件疯狂触发 → 一次蹦出
+        一大堆主动台词」（队列满丢弃最旧、保留最新触发）。
         """
         if not self.cfg.PROACTIVE_ENABLED:
             return False
-        self._tick_state()
-        self._log_heartbeat()
-        kind = self._should_trigger()
-        if kind is None:
-            return False
-
-        # —— 话题管线：先选话题，进入活跃期（对标 _run_topic_pipeline）——
-        topic = None
-        if kind == "topic":
-            topic = self._pick_topic()
-            # _pick_topic 内部已兜底（全部冷却时放宽冷却强制选一个），不会返回 None
-            self._begin_topic(topic)
-
-        # —— agent 准备发言请求（agent 催促主模型开口）——
-        prompt = await self._build_prompt(kind, topic)
-        if not prompt:
-            # 构造失败：回退触发状态（防单次精确唤醒空转——若阈值已满又
-            # 不重置，next_wake_in 会一直返回 0 造成忙循环），等下次累积
-            # 到阈值再重试。
-            if topic is not None:
+        # 活跃话题超时自动结束（无回应兜底防永久沉默）
+        if self.active_topic is not None:
+            if time.time() - self.active_topic["started_at"].timestamp() > _ACTIVE_TOPIC_TIMEOUT:
                 self.active_topic = None
-                self.boredom = 0.0
-            else:
-                self.loneliness = 0.0
-            console.dim("[主动] 构造发言 prompt 失败（空），本次跳过")
+        if self.speaking or not self._queue.empty():
+            # 已有发言进行中或排队中：不重复触发（防堆积）
             return False
+        # 忙碌抑制：主 LLM 推理 / 播报进行中 → 不开口（避免抢话）
+        if self.cfg.AGENT_AVOID_MAIN_LLM and (
+                not is_idle() or self._output_lock.locked()):
+            return False
+        # 弹幕回复已敲定：弹幕优先，主动不抢话（回复播报完成才恢复）
+        if is_danmaku_pending():
+            return False
+        # 话题活跃期：不触发（防打断正在进行的话题）
+        if self.active_topic is not None:
+            return False
+        self._log_heartbeat()
+
+        # —— 灵感话题（可选）：LLM 可顺着聊，也可自由发挥 ——
+        # _pick_topic 内部已兜底（全部冷却时放宽冷却强制选一个），不会返回 None
+        topic = self._pick_topic()
+
+        # —— LLM 自主决策：想说就说，不想说保持沉默 ——
+        text = await self._decide_and_generate(topic)
+        if not text:
+            return False
+
+        # —— 入队播报（后台 worker 异步消费）——
+        return self._enqueue(text, topic)
+
+    def discard_pending(self) -> int:
+        """用户输入到来时清空排队中的主动消息（优先响应用户），返回丢弃条数。
+
+        只丢弃**排队未播**的消息；正在播报的主动发言不打断（沿原有语义：
+        主动说话期间拒收输入）。
+        """
+        dropped = 0
+        while True:
+            try:
+                self._queue.get_nowait()
+                dropped += 1
+            except asyncio.QueueEmpty:
+                break
+        if dropped:
+            self._stats["dropped"] += dropped
+            console.dim(f"[主动] 用户输入优先，丢弃 {dropped} 条排队中的主动消息")
+        return dropped
+
+    # ---------- 主动消息队列（限流 / 去重 / 丢弃） ----------
+
+    def _enqueue(self, text: str, topic: Optional[dict]) -> bool:
+        """把一条主动发言放入队列；队列满丢弃最旧、与近期内容重复丢弃。
+
+        消息统一打标签 "agent_proactive"（与 user_input / main_llm_reply 区分），
+        供消费方按标签执行不同策略。
+        """
+        kind = "topic" if topic is not None else "emotional"
+        # 去重：与最近会话 / 近期已播发言高度相似 → 直接丢弃（降重复）
+        if self._is_duplicate(text, kind):
+            self._stats["dropped"] += 1
+            console.dim("[主动] 与近期内容高度相似，丢弃本条主动消息")
+            return False
+        # 队列满：丢弃最旧的主动消息，优先保留最新触发
+        if self._queue.full():
+            try:
+                self._queue.get_nowait()
+                self._stats["dropped"] += 1
+                console.dim("[主动] 队列已满，丢弃最旧的主动消息")
+            except asyncio.QueueEmpty:
+                pass
+        item = {"tag": "agent_proactive", "kind": kind,
+                "text": text, "topic": topic}
+        try:
+            self._queue.put_nowait(item)
+        except asyncio.QueueFull:
+            self._stats["dropped"] += 1
+            return False
+        self._stats["trigger"] += 1
+        self._ensure_worker()
+        return True
+
+    def _ensure_worker(self) -> None:
+        """确保消费 worker 存活（异常退出后下次入队自动重建）。"""
+        if self._worker_task is not None and not self._worker_task.done():
+            return
+        self._worker_task = asyncio.create_task(
+            self._worker(), name="proactive_worker")
+
+    async def _worker(self) -> None:
+        """主动消息消费循环：忙碌过滤后播报，异常捕获不退出（容错）。"""
+        while True:
+            item = await self._queue.get()
+            try:
+                # —— 忙碌抑制：用户正在说话 / AI 正在播报 → 丢弃本条 ——
+                if self.cfg.AGENT_AVOID_MAIN_LLM and not is_idle():
+                    self._stats["dropped"] += 1
+                    console.dim("[主动] 正在忙碌（用户/AI 处理中），丢弃本条主动消息")
+                    continue
+                # —— 弹幕回复已敲定：弹幕优先，主动避让（丢弃本条，不抢话） ——
+                if is_danmaku_pending():
+                    self._stats["dropped"] += 1
+                    console.dim("[主动] 弹幕回复已敲定，主动避让，丢弃本条主动消息")
+                    continue
+                await self._speak_item(item)
+                self._recent_prompts.append(item["text"])
+                self._stats["speak"] += 1
+            except asyncio.CancelledError:
+                raise
+            except Exception as e:
+                # agent 线程异常：告警但不退出，继续消费后续消息
+                import traceback as _tb
+                console.error(
+                    f"主动发言消费出错（线程不退出）：{e}\n"
+                    f"{''.join(_tb.format_exception(type(e), e, e.__traceback__))}")
+            finally:
+                self._queue.task_done()
+
+    def _is_duplicate(self, text: str, kind: str) -> bool:
+        """与最近会话 / 近期已播主动发言做相似度比对，高度相似视为重复。
+
+        - 最近会话（真实发言）两种发言都比对：防止「刚说过类似内容」；
+        - 近期已播主动发言只比对 topic 发言：其文本携带真实话题内容；
+          emotional 是「心里话」，与话题文本不混比，避免误判重复。
+        """
+        threshold = max(0.0, min(1.0, float(self.cfg.AGENT_DUP_THRESHOLD or 0.85)))
+        if threshold <= 0:
+            return False
+        recent: List[str] = []
+        if self.mm is not None:
+            for turn in self.mm.recent_turns[-self.cfg.AGENT_HISTORY_SNAPSHOT:]:
+                content = (turn.get("content") or "").strip()
+                if content:
+                    recent.append(content)
+        if kind == "topic":
+            recent.extend(self._recent_prompts)
+        for recent_text in recent:
+            if recent_text and SequenceMatcher(None, text, recent_text).ratio() >= threshold:
+                return True
+        return False
+
+    async def _speak_item(self, item: dict) -> None:
+        """播报一条主动发言（LLM 预生成文本）：输出锁互斥 + 拒收标记 + 播后状态回写。
+
+        发言文本已由 heartbeat 的 LLM 决策生成，这里直接播报（stream.speak_text）；
+        记忆提取在播报开始时以后台任务提交，与播报并行（原 on_llm_done 逻辑）。
+        """
+        kind = item["kind"]
+        text = item["text"]
+        topic = item.get("topic")
+        reason = "心里话" if kind == "emotional" else "话题"
+        topic_tag = (f"｜灵感话题 {topic['category']}/{topic['id']}"
+                     if topic is not None else "")
+        console.dim(f"[主动] 自主开口（{reason}）...{topic_tag}"
+                    f"（{len(text)} 字）")
 
         self.speaking = True
+        set_global_state(STATE_AGENT_THINKING)  # 正在处理主动发言
         try:
             import traceback as _tb
-            reason = "孤独" if kind == "emotional" else "无聊"
-            topic_tag = (f"｜话题 {topic['category']}/{topic['id']}"
-                         if topic is not None else "")
-            console.dim(
-                f"[主动] {reason}感驱动，开口搭话...{topic_tag}"
-                f"（prompt={len(prompt)} 字）")
-            console.dim(f"[主动] 等待输出锁…（当前锁状态："
-                        f"locked={self._output_lock.locked()})")
 
-            # 主动发言记忆提取回调：LLM 回复生成完毕立即提交后台蒸馏
-            # （submit_extract_and_store：串行 + 最新优先，防并发堆积）。
-            # 仅 emotional（孤独倾诉，反映 AI 内心状态）蒸馏为 self 记忆；
-            # topic（话题展开）是 trivia/知识类闲聊，蒸馏价值低，跳过
-            # 可省 BUTLER token 并避免堆积低价值记忆。两种发言都保留
-            # add_turn，维持上下文连贯（供后续蒸馏/检索参考）。
-            async def _on_llm_done(reply_text: str) -> None:
-                if not reply_text:
-                    return
+            # 主动发言记忆提取（原 on_llm_done 逻辑）：发言文本已生成，直接在
+            # 播报开始时后台提交（submit_extract_and_store：串行 + 最新优先，
+            # 防并发堆积），与 TTS 播报并行。仅 emotional（内心状态）蒸馏为
+            # self 记忆；topic（话题闲聊）蒸馏价值低，跳过。两种都保留
+            # add_turn 维持上下文连贯（source="proactive" 标记归属）。
+            async def _store_memory() -> None:
                 try:
                     if kind == "emotional" and self.butler is not None:
                         await self.butler.submit_extract_and_store(
-                            [{"role": "assistant", "content": reply_text}],
+                            [{"role": "assistant", "content": text}],
                             self.mm.recent_turns if self.mm is not None else None,
                         )
                     if self.mm is not None:
-                        self.mm.add_turn("muika", reply_text)
+                        self.mm.add_turn("muika", text, source="proactive")
                 except Exception:
                     pass
+
+            if self.butler is not None or self.mm is not None:
+                asyncio.create_task(_store_memory())
 
             # 全局输出互斥 + 拒收标记：
             # - 持有锁 → 弹幕/用户不能并发说话；
             # - owner="proactive" → 输入监听层丢弃期间到达的任何输入。
-            async def _speak_with_lock():
-                console.dim(f"[主动] 已拿到输出锁，开始生成并播报")
+            console.dim(f"[主动] 等待输出锁…（当前锁状态："
+                        f"locked={self._output_lock.locked()})")
+            async with self._output_lock:
+                self._speak_done.clear()  # 开始播报：置未完成，等待者重新挂起
                 set_output_owner("proactive")
+                set_global_state(STATE_AI_SPEAKING)  # 正在播报
                 try:
-                    await stream.converse(
-                        self.brain, prompt,
-                        self.tts, self.face, self.sub,
+                    console.dim(f"[主动] 已拿到输出锁，开始播报")
+                    # 复位残留打断标志：用户对话中途被打断后 _interrupted 仍为
+                    # True，若不复位，本条主动发言会被 speak()/_pump 全部丢弃
+                    if self.tts is not None:
+                        try:
+                            self.tts.clear_interrupt()
+                        except Exception:
+                            pass
+                    await stream.speak_text(
+                        text, self.tts, self.face, self.sub,
                         proactive=True,
                         profanity_filter=self.pf,
                         profanity_filter_rate=self.pf_rate,
-                        on_llm_done=_on_llm_done
-                        if (self.butler is not None or self.mm is not None) else None,
                     )
+                    # 左栏对话换行：主动发言是单条文本（无换行），收尾补一个
+                    console.chat()
                     console.dim(f"[主动] 播报完成")
                 finally:
                     set_output_owner(None)
-            async with self._output_lock:
-                await _speak_with_lock()
+                    set_global_state(STATE_IDLE)
+                    self._speak_done.set()  # 播报结束：精确唤醒等待中的主循环
         except Exception as e:
             console.error(
                 f"主动发言失败：{e}\n"
                 f"{''.join(_tb.format_exception(type(e), e, e.__traceback__))}")
         finally:
             self.speaking = False
-            if kind == "emotional":
-                # 说出来会有所缓解，但不等于彻底不孤独（对标 LONELINESS_PROACTIVE_RELIEF）；
-                # 冷却（last_proactive_at）仅情绪发言记录（对标 PROACTIVE_COOLDOWN）
-                self.loneliness = max(0.0, self.loneliness - _LONELINESS_PROACTIVE_RELIEF)
-                self.last_proactive_at = datetime.now()
-            else:
-                self.boredom = 0.0
-        return True
+            if topic is not None:
+                # 话题已开口：进入话题活跃期（期间不再主动开口，防打断）
+                self._begin_topic(topic)
 
     # ---------- 内部实现 ----------
 
-    def _rates(self) -> Tuple[float, float]:
-        """计算孤独/无聊每 tick 的增长率（每秒比例），避免多处重复计算。"""
-        lon = 1.0 / (max(1e-6, self.cfg.PROACTIVE_LONELINESS_HOURS) * 3600)
-        bor = 1.0 / (max(1e-6, self.cfg.PROACTIVE_BOREDOM_HOURS) * 3600)
-        return lon, bor
-
     def _log_heartbeat(self) -> None:
-        """心跳日志：控制台显示当前状态与距离触发的进度。
-
-        显示规则：未到阈值时显示真实百分比 + 倒计时；达到阈值显示 100% + 已就绪，
-        避免「已就绪但只有 60%」的视觉矛盾（阈值 0.6=60%，之前会 60%+已就绪同时显示）。
-        """
-        lon_rate, bor_rate = self._rates()
-        lon_ready = self.loneliness >= _LONELINESS_THRESHOLD
-        bor_ready = self.boredom >= _BOREDOM_THRESHOLD
-        if lon_ready:
-            lon_str = "孤独 100%(已就绪)"
-        else:
-            remain = (_LONELINESS_THRESHOLD - self.loneliness) / lon_rate / 60
-            lon_str = f"孤独 {self.loneliness * 100:.0f}%({remain:.0f}min后触发)"
-        if bor_ready:
-            bor_str = "无聊 100%(已就绪)"
-        else:
-            remain = (_BOREDOM_THRESHOLD - self.boredom) / bor_rate / 60
-            bor_str = f"无聊 {self.boredom * 100:.0f}%({remain:.0f}min后触发)"
+        """心跳日志：显示距上次互动与当前开口机会状态。"""
+        quiet = time.time() - self.last_interaction
         extra = ""
         if self.active_topic is not None:
             remain = _ACTIVE_TOPIC_TIMEOUT - (
@@ -342,124 +453,78 @@ class ProactiveEngine:
                 extra = " | 话题活跃中(即将超时)"
         elif self.speaking:
             extra = " | 发言中"
-        console.dim(f"[心跳] {lon_str} | {bor_str}{extra}")
-
-    def _tick_state(self) -> None:
-        now = time.time()
-        dt = now - self._last_tick
-        self._last_tick = now
-        if dt <= 0:
-            return
-        lon_rate, bor_rate = self._rates()
-        self.loneliness = min(1.0, self.loneliness + lon_rate * dt)
-        self.boredom = min(1.0, self.boredom + bor_rate * dt)
-        # 探索欲缓慢衰减（对标 MuikaState.tick_state: curiosity *= 0.99）
-        self.curiosity = max(0.0, self.curiosity * 0.99)
-        # 探索冲动独立累积（对标 get_think_mode 的 curiosity_drive）
-        self.curiosity_drive = min(
-            1.0, self.curiosity_drive + dt / (max(1e-6, _CURIOSITY_DRIVE_HOURS) * 3600))
-        # mood 规则（对标 MuikaState.tick_state）：孤独/无聊接近满格才切换情绪态
-        if self.loneliness > 0.95:
-            self.mood = "lonely"
-        elif self.boredom > 0.9:
-            self.mood = "bored"
-        else:
-            self.mood = "calm"
-        # 活跃话题超时自动结束（REPL 无 session 结束信号，超时兜底防永久沉默）
-        if self.active_topic is not None:
-            if now - self.active_topic["started_at"].timestamp() > _ACTIVE_TOPIC_TIMEOUT:
-                self.active_topic = None
-
-    def _resample_random_at(self) -> None:
-        """重置下一个随机唤醒点（当前时刻 + 0~MAX_WAIT 均匀随机延迟）。"""
-        self._next_random_at = time.time() + random.uniform(0, self._random_max_wait)
-
-    def _random_probe_wait(self, now: float) -> float:
-        """随机唤醒点距现在的秒数（随机+事件混合）。
-
-        随机点已到但静默期未过 → 重采样下一个随机点，避免 0 超时造成心跳忙循环。
-        """
-        idle_ok = (now - self.last_interaction) >= self.cfg.PROACTIVE_MIN_IDLE_SECONDS
-        if now >= self._next_random_at and not idle_ok:
-            self._resample_random_at()
-        return max(0.0, self._next_random_at - now)
+        console.dim(f"[心跳] 静默 {quiet:.0f}s，由 LLM 自主决定是否开口{extra}")
 
     def next_wake_in(self) -> float:
-        """距下一次有意义心跳的秒数（单次精确唤醒，无周期轮询）。
+        """距下一次「自主开口机会」的秒数（单次精确唤醒，无周期轮询）。
 
         主循环 sleep 到这个时刻才醒一次做心跳，而非固定间隔轮询：
+        - 发言中 / 队列非空：等 _speak_done 事件精确唤醒（这里给兜底大值，
+          不返回 0 造成心跳忙循环）
         - 活跃话题期间：只等话题超时那一刻（此后可再次开口）
-        - 平时：等无聊/孤独到阈值、随机唤醒点、或探索冲动到阈值（最近的一次）
-        - 已全部就绪（等待列表为空）→ 返回 0 立即检查
+        - 静默期：从共用随机间隔范围取一个值（与弹幕回复冷却同一范围，
+          避免固定时间显得机械；互动结束由 on_user_message 的 _wakeup
+          事件即时唤醒，不受此间隔限制）
         """
         now = time.time()
+        if self.speaking or not self._queue.empty():
+            # 播报由后台 worker 异步进行，结束会置位 _speak_done 精确唤醒
+            return max(1.0, _ACTIVE_TOPIC_TIMEOUT)
         if self.active_topic is not None:
             remain = _ACTIVE_TOPIC_TIMEOUT - (
                 now - self.active_topic["started_at"].timestamp())
             return max(0.0, remain)
-        lon_rate, bor_rate = self._rates()
-        waits = []
-        if self.loneliness < _LONELINESS_THRESHOLD:
-            waits.append((_LONELINESS_THRESHOLD - self.loneliness) / lon_rate)
-        if self.boredom < _BOREDOM_THRESHOLD:
-            waits.append((_BOREDOM_THRESHOLD - self.boredom) / bor_rate)
-        if self.curiosity_drive < _CURIOSITY_DRIVE_THRESHOLD:
-            waits.append(
-                (_CURIOSITY_DRIVE_THRESHOLD - self.curiosity_drive)
-                * _CURIOSITY_DRIVE_HOURS * 3600)
-        # 随机唤醒点：静默期到点掷骰子决定是否随机开口（随机+事件混合）
-        if self._random_enabled:
-            waits.append(self._random_probe_wait(now))
-        if not waits:
-            return 0.0
-        return max(0.0, min(waits))
+        return random.uniform(
+            self.cfg.RESPONSE_INTERVAL_MIN, self.cfg.RESPONSE_INTERVAL_MAX)
 
-    def _should_trigger(self) -> Optional[str]:
-        """判定本心跳是否触发主动发言，返回 "emotional" / "topic" / None。
+    async def _decide_and_generate(self, topic: Optional[dict]) -> Optional[str]:
+        """LLM 自主决策：想说就生成发言文本，不想说返回 None（保持沉默）。
 
-        优先级（对标 Muika loop.get_think_mode）：
-          - 正在发言 → 不触发（防嵌套）
-          - 用户最近才发言（安静期不足）→ 不触发
-          - 话题活跃期 → 不触发（防情绪管线打断正在进行的话题）
-          - 随机唤醒点（随机+事件混合）：到点按概率随机开口（情绪/话题），
-            未命中则重采样下一个随机点——不依赖定时累积
-          - 孤独 > 0.8 且情绪冷却已过 → emotional（冷却仅情绪发言）
-          - 无聊 > 0.6 → topic
-          - 探索冲动 > 0.6 且 30% 概率 → topic（触发后清零）
+        一次调用完成「决定 + 内容」：prompt 明确允许选择沉默，模型输出
+        <SILENT> 或空则沉默。决策过程不冒充用户发言（proactive=True 已剔除
+        prompt）；沉默时的回复不保留在主历史，避免污染后续上下文。
         """
-        if self.speaking:
+        prompt = await self._build_prompt(topic)
+        if not prompt:
             return None
-        now = time.time()
-        if now - self.last_interaction < self.cfg.PROACTIVE_MIN_IDLE_SECONDS:
+        history_len = len(self.brain.history)
+        try:
+            parts = []
+            async for sentence in self.brain.chat_stream(prompt, proactive=True):
+                if sentence:
+                    parts.append(sentence)
+        except Exception as e:
+            console.error(f"[主动] LLM 自主决策生成失败：{e}")
             return None
-        if self.active_topic is not None:
+        decided = self._parse_decision("".join(parts).strip())
+        if decided is None and len(self.brain.history) > history_len:
+            # 沉默：决策回复（<SILENT> 等）不保留在主历史
+            del self.brain.history[history_len:]
+        return decided
+
+    @staticmethod
+    def _parse_decision(text: str) -> Optional[str]:
+        """解析自主开口结果：沉默 → None（保持沉默）；否则返回发言文本。
+
+        模型可能输出 <SILENT>、沉默类短语或空；容错处理带引号/标点包裹。
+        """
+        if not text:
             return None
-        # —— 随机通道（随机+事件混合，不用「定时回复」）——
-        # 到随机唤醒点掷骰子：命中则随机开口（情绪/话题），未命中重采样继续等。
-        # 情绪发言受冷却限制（话题发言不受限，对齐 PROACTIVE_COOLDOWN 语义）。
-        if self._random_enabled and now >= self._next_random_at:
-            self._resample_random_at()
-            if random.random() < self._random_chance:
-                if self.last_proactive_at is not None:
-                    since_last = (datetime.now() - self.last_proactive_at).total_seconds()
-                    if since_last < self.cfg.PROACTIVE_COOLDOWN_SECONDS:
-                        return None
-                console.dim("[主动] 随机通道触发，主动开口...")
-                return "emotional" if random.random() < 0.4 else "topic"
+        t = text.strip()
+        # 去掉可能的包裹字符（引号/括号/标记符号）
+        for ch in "\"'“”‘’「」『』【】()（）<>＜＞":
+            t = t.replace(ch, "")
+        t = t.strip(" .。!！?？~～…")
+        if not t:
             return None
-        if self.loneliness >= _LONELINESS_THRESHOLD:
-            if self.last_proactive_at is not None:
-                since_last = (datetime.now() - self.last_proactive_at).total_seconds()
-                if since_last < self.cfg.PROACTIVE_COOLDOWN_SECONDS:
-                    return None
-            return "emotional"
-        if self.boredom >= _BOREDOM_THRESHOLD:
-            return "topic"
-        if self.curiosity_drive > _CURIOSITY_DRIVE_THRESHOLD and random.random() < 0.3:
-            self.curiosity_drive = 0.0
-            console.dim("[主动] 探索欲驱动，主动聊个话题...")
-            return "topic"
-        return None
+        lower = t.lower().replace(" ", "")
+        if lower in {m.lower().replace(" ", "") for m in _SILENT_MARKERS}:
+            return None
+        # 以「沉默」类表达开头且极短（如「此刻不想说」「没什么想说的」）→ 沉默
+        for m in _SILENT_MARKERS:
+            if t.startswith(m) and len(t) <= 12:
+                return None
+        return text
 
     def _begin_topic(self, topic: dict) -> None:
         """进入话题活跃期并记录使用次数（对标 ActiveTopicState + record_topic_used）。"""
@@ -471,20 +536,15 @@ class ProactiveEngine:
         self._topic_stats.setdefault(topic["id"], {"use": 0, "engaged": 0})["use"] += 1
 
     def _pick_topic(self) -> Optional[dict]:
-        """按 Muika 权重机制挑选一个话题种子（对标 TopicManager.get_next_topic）。
+        """按权重机制挑选一个话题种子（对标 TopicManager.get_next_topic）。
 
-        1. 类别权重：TOPIC_WEIGHTS 为基础；无聊 > 好奇时 trivia/story 加分、
-           philosophy/meta 减分（更想听点轻松的）；
+        1. 类别权重：TOPIC_WEIGHTS 为基础；
         2. 近期已聊类别 ×0.25 惩罚（窗口 3）；
         3. 每个话题独立冷却 cooldown_minutes（内存记录上次使用时间）；
         4. 类别内按互动率加权（用过 ≥2 次、互动率 <30% → 0.3，<50% → 0.6）；
-        5. 全部冷却中返回 None，本次跳过话题管线（对标 Muika：所有话题
-           在 cooldown 时 get_next_topic 返回 None，不兜底）。
+        5. 全部冷却中放宽冷却强制选一个（防所有话题都不可用导致无从开口）。
         """
         weights = dict(_TOPIC_WEIGHTS)
-        if self.boredom > self.curiosity:
-            for cat, boost in _TOPIC_BOREDOM_BOOST.items():
-                weights[cat] = max(0.0, weights.get(cat, 0.0) + boost)
         now = datetime.now()
         available: Dict[str, List[dict]] = {}
         for topic in self._topic_seeds:
@@ -538,11 +598,11 @@ class ProactiveEngine:
         self._topic_last_used[chosen["id"]] = now
         return chosen
 
-    async def _build_prompt(self, kind: str, topic: Optional[dict]) -> str:
-        """组装主模型的发言请求：agent（ButlerAgent）优先，无 agent 回退内置。
+    async def _build_prompt(self, topic: Optional[dict]) -> str:
+        """组装主模型的「自主开口决策」请求：agent（ButlerAgent）优先，无 agent 回退内置。
 
-        agent 负责构造（时段语气 + 类别结尾策略 + 记忆线索注入），
-        主模型负责开口生成——即「主动发言交给 agent，agent 催促主模型」。
+        agent 负责构造（时段语气 + 可选灵感话题 + 记忆线索注入），主模型
+        自主判断「想说就说 / 不想说输出 <SILENT> 保持沉默」。
         """
         memory_context = ""
         if self.mm is not None:
@@ -554,20 +614,18 @@ class ProactiveEngine:
         if self.butler is not None:
             try:
                 return self.butler.build_proactive_prompt(
-                    kind, topic, memory_context, hour)
+                    topic["concept"] if topic is not None else "",
+                    memory_context, hour)
             except Exception as e:
                 console.error(f"[主动] agent 构造发言请求失败，回退内置：{e}")
-        # —— 回退：无 agent 或 agent 失败时的内置简化 prompt ——
-        if kind == "emotional":
-            return (
-                "【安静时刻的自主行动】房间里安静了好一会儿，孤独感仍在蔓延。"
-                "请以你的人设自然开口，像自言自语一样说一小段真诚的话，"
-                "不必等待对方回应，也尽量不要连珠炮式提问。"
-            )
-        if topic is None:
-            return ""
+        # —— 回退：无 agent 或 agent 失败时的内置简化 prompt（自主决策格式）——
+        topic_hint = (f"可以顺着这个灵感话题聊：{topic['concept']}"
+                      if topic is not None else "也可以自己决定想聊什么")
         return (
-            f"【安静时刻的自主行动】你忽然想到了一个念头：「{topic['concept']}」。"
-            "请把这个念头自然地表达出来，两三句话即可，结尾留一点余韵，"
-            "不要直接向观众提问。"
+            "直播间暂时没有人说话，现在是你的自由时间，由你决定此刻想不想开口：\n"
+            "1. 保持沉默（只输出 <SILENT>，不带任何其他文字）\n"
+            "2. 说点此刻心里想说的话（像自言自语一样简短真诚，不必等待回应）\n"
+            f"3. 主动开启一个话题（{topic_hint}）\n\n"
+            "要求：想说就只输出最终要说的话（1~3 句，符合人设，简短自然），"
+            "不要输出编号、标记或解释；不想说就只输出 <SILENT>。"
         )

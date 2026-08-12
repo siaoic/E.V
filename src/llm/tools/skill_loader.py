@@ -13,8 +13,12 @@ from src.utils import console
 _MAX_SKILL_CHARS = 20000
 """load_skill / read_skill_resource 返回内容最大字符数，超出部分截断（对标 Muika）"""
 
-_RESOURCE_DIRS = ("references", "examples", "scripts")
-"""技能捆绑资源目录：这些目录下的文件不随 SKILL.md 自动加载，由 LLM 按需读取"""
+_RESOURCE_DIRS = ("references", "examples", "templates", "scripts")
+"""技能捆绑资源目录：这些目录下的文件不随 SKILL.md 自动加载，由 LLM 按需读取。
+
+对标 hermes 技能包的 references/templates/scripts 三类子文件（外加兼容
+历史已有的 examples）；进化引擎沉淀技能时可随 SKILL.md 一起落盘这些子文件。
+"""
 
 
 def _list_skill_resources(skill_dir: Path) -> list[str]:
@@ -79,6 +83,8 @@ async def _load_skill(skill_name: str) -> str:
         return f"错误：读取技能文件失败：{e}"
 
     console.dim(f"[load_skill] 已加载技能 '{skill.name}'（{skill.location}）")
+    # 记录技能使用统计（进化引擎复盘时据此辅助修补/清理决策）
+    manager.record_usage(skill.name)
     return _format_skill_text(
         skill.name, skill.location.parent, text, "load_skill", str(skill.location)
     )

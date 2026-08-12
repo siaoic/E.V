@@ -18,7 +18,7 @@ import json
 import os
 import re
 import sys
-from typing import Dict, List
+from typing import Dict, List, Tuple
 
 # 桌宠依赖（PySide6 等）装在项目内 vendor_pet/，避免污染系统环境。
 # 打包后（sys.frozen）依赖已内嵌，无需也不能再用 __file__ 找 vendor_pet
@@ -43,7 +43,7 @@ if not hasattr(six._SixMetaPathImporter, "_path"):
 from PySide6.QtCore import (
     QEasingCurve, QEvent, QMimeData, QObject,
     QPoint, QProcess, QProcessEnvironment, QPropertyAnimation, Qt,
-    Signal,
+    QUrl, Signal,
 )
 from PySide6.QtGui import (QBrush, QColor, QDrag, QIcon, QTextCursor)
 from PySide6.QtUiTools import QUiLoader
@@ -51,11 +51,12 @@ from PySide6.QtWidgets import (
     QAbstractScrollArea, QApplication, QButtonGroup, QComboBox, QDialog,
     QFrame, QGraphicsDropShadowEffect, QGridLayout,
     QHBoxLayout, QHeaderView, QLabel, QMessageBox, QPlainTextEdit,
-    QPushButton, QSizePolicy, QTableWidget, QTableWidgetItem, QVBoxLayout,
-    QWidget,
+    QPushButton, QScrollArea, QSizePolicy, QTableWidget, QTableWidgetItem,
+    QVBoxLayout, QWidget,
 )
 
 from src.utils import config, console
+from src.utils.console import CHAT_TAG
 from src.memory import memory
 from ui.launcher import _update_env
 from src.memory.memory_graph import MemoryGraphWidget, _display_user
@@ -210,6 +211,69 @@ _TOOLTIP_QSS = (
 
 # ---------- 记忆详情弹窗（点击图谱节点 / 记忆条目） ----------
 
+# 记忆类型 → 名称/主色（与 src/memory/memory_graph.py
+# _LAYER_STYLE / _TRACK_COLORS 配色一致；详情弹窗与列表行共用）
+_MEMORY_LAYER_COLORS = {
+    "core": (140, 100, 200),        # 紫：核心身份
+    "state": (70, 140, 210),        # 蓝：关系状态
+    "preference": (230, 130, 60),   # 橙：长期偏好
+    "archive": (90, 160, 100),      # 绿：历史摘要
+}
+_MEMORY_LAYER_NAMES = {
+    "core": "核心身份", "state": "关系状态",
+    "preference": "长期偏好", "archive": "历史摘要",
+}
+_MEMORY_TRACK_COLORS = {
+    "skill": (230, 130, 60),        # 橙：技能
+    "memory": (70, 140, 210),       # 蓝：通用记忆
+}
+_MEMORY_TRACK_NAMES = {"skill": "技能", "memory": "记忆"}
+
+
+def _memory_type_label(node: dict, track: str) -> Tuple[str, QColor]:
+    """记忆类型徽标：(显示名, 主色)。配色与图谱节点一致——
+    「实体记忆」（core/ 前缀三元组）优先，其次 layer 前缀，最后 track。"""
+    desc = (node.get("description") or "").strip()
+    # 实体记忆：agent 以「core/实体记忆：」落盘的结构化三元组事实，
+    # 不是图谱语义层的「核心身份」，需单独识别
+    if desc.startswith("core/实体记忆"):
+        return "实体记忆", QColor(*_MEMORY_LAYER_COLORS["core"])
+    prefix = desc.split("/")[0].strip().lower()
+    if prefix in _MEMORY_LAYER_NAMES:
+        r, g, b = _MEMORY_LAYER_COLORS[prefix]
+        return _MEMORY_LAYER_NAMES[prefix], QColor(r, g, b)
+    name = _MEMORY_TRACK_NAMES.get(track, track)
+    if track in _MEMORY_TRACK_COLORS:
+        r, g, b = _MEMORY_TRACK_COLORS[track]
+        return name, QColor(r, g, b)
+    return name, QColor(150, 150, 150)
+
+
+def _make_type_badge(text: str, color: QColor, parent: QWidget) -> QFrame:
+    """记忆类型徽标：彩色圆点 + 类型名，配色与图谱节点一致。"""
+    badge = QFrame(parent)
+    badge.setObjectName("typeBadge")
+    row = QHBoxLayout(badge)
+    row.setContentsMargins(9, 3, 11, 3)
+    row.setSpacing(4)
+    dot = QLabel("●", badge)
+    dot.setObjectName("typeDot")
+    label = QLabel(text, badge)
+    label.setObjectName("typeText")
+    row.addWidget(dot)
+    row.addWidget(label)
+    c = color
+    badge.setStyleSheet(
+        f"#typeBadge {{ background: rgba({c.red()},{c.green()},{c.blue()},28);"
+        f" border-radius: 10px; }}"
+        f"#typeDot {{ color: rgb({c.red()},{c.green()},{c.blue()});"
+        f" font-size: 8px; }}"
+        f"#typeText {{ color: rgb({c.red()},{c.green()},{c.blue()});"
+        f" font-size: 12px; font-weight: bold;"
+        f" font-family: \"微软雅黑\"; }}")
+    return badge
+
+
 class MemoryDetailDialog(QDialog):
     """记忆详情弹窗：无边框圆角卡片，暖色系对齐控制中心整体风格。
 
@@ -225,16 +289,8 @@ class MemoryDetailDialog(QDialog):
     """
 
     # 记忆层 → 标签色（与 src/memory/memory_graph.py _LAYER_STYLE 同义）
-    _LAYER_COLORS = {
-        "core": (140, 100, 200),        # 紫：核心身份
-        "state": (70, 140, 210),        # 蓝：关系状态
-        "preference": (230, 130, 60),   # 橙：长期偏好
-        "archive": (90, 160, 100),      # 绿：历史摘要
-    }
-    _LAYER_NAMES = {
-        "core": "核心身份", "state": "关系状态",
-        "preference": "长期偏好", "archive": "历史摘要",
-    }
+    _LAYER_COLORS = _MEMORY_LAYER_COLORS
+    _LAYER_NAMES = _MEMORY_LAYER_NAMES
 
     # 动画时长（毫秒）：入场 240ms / 出场 160ms，OutCubic 缓动
     _FADE_MS = 240
@@ -284,9 +340,11 @@ class MemoryDetailDialog(QDialog):
         lay.setContentsMargins(24, 22, 24, 18)
         lay.setSpacing(0)
 
-        # 1. 标题行：记忆名 + 右上标签行
+        # 1. 标题行：左上角类型徽标 + 记忆名 + 右上标签行
         title_row = QHBoxLayout()
         title_row.setSpacing(8)
+        type_text, type_color = _memory_type_label(node, track)
+        title_row.addWidget(_make_type_badge(type_text, type_color, card))
         title = QLabel(name or "记忆", card)
         title.setObjectName("titleLabel")
         title.setWordWrap(True)
@@ -359,13 +417,18 @@ class MemoryDetailDialog(QDialog):
         card.setGraphicsEffect(shadow)
 
     def _chips(self, node: dict, user: str, track: str) -> List:
-        """构建标签 chips：层级（description 前缀）→ 归属（user）→ 类型（track）。"""
+        """构建标签 chips：层级/实体（description 前缀）→ 归属（user）→ 类型（track）。"""
         chips = []
-        # 层级标签（description 前缀 core/state/preference/archive）
-        prefix = (node.get("description") or "").split("/")[0].strip().lower()
-        if prefix in self._LAYER_NAMES:
-            r, g, b = self._LAYER_COLORS[prefix]
-            chips.append((self._LAYER_NAMES[prefix], QColor(r, g, b)))
+        # 层级标签（description 前缀 core/state/preference/archive）；
+        # 「core/实体记忆」是三元组事实而非「核心身份」层，单独显示
+        desc = (node.get("description") or "").strip()
+        if desc.startswith("core/实体记忆"):
+            chips.append(("实体记忆", QColor(*self._LAYER_COLORS["core"])))
+        else:
+            prefix = desc.split("/")[0].strip().lower()
+            if prefix in self._LAYER_NAMES:
+                r, g, b = self._LAYER_COLORS[prefix]
+                chips.append((self._LAYER_NAMES[prefix], QColor(r, g, b)))
         # 归属标签：AI 自我（self）显示 AI 名字（neuro），其余为观众/用户 id
         chips.append((_display_user(user), QColor(140, 100, 200)
                       if user == "self" else QColor(60, 95, 160)))
@@ -510,6 +573,266 @@ class MemoryDetailDialog(QDialog):
 
     def showEvent(self, e) -> None:
         """首次显示时播放入场动画（exec 后触发，此前窗口已定位）。"""
+        super().showEvent(e)
+        if not getattr(self, "_animated", False):
+            self._animated = True
+            self._play_show()
+
+
+class MemoryListDialog(QDialog):
+    """记忆列表弹窗（图谱只显示人名时，点击用户名圆弹出）：
+    列出该用户全部记忆，每条带删除按钮，确认后删除并刷新列表。
+    样式与记忆详情弹窗同款暖色卡片。"""
+
+    deleted = Signal(str)  # 记忆删除成功（带 id；控制中心据此过滤并刷新）
+
+    def __init__(self, user: str, memories: list[dict], parent=None) -> None:
+        super().__init__(parent)
+        self._user = user
+        self._memories = list(memories)
+        self.setWindowFlags(
+            Qt.WindowType.Dialog | Qt.WindowType.FramelessWindowHint)
+        self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground)
+        # 非模态：父窗口仍可交互（对齐记忆详情弹窗）
+        self.setModal(False)
+        self.resize(600, 480)
+        self.setMinimumSize(480, 320)
+        self._build_ui()
+        self._apply_style()
+
+    def _build_ui(self) -> None:
+        card = QFrame(self)
+        self._card = card
+        card.setObjectName("dialogCard")
+        outer = QVBoxLayout(self)
+        outer.setContentsMargins(28, 28, 28, 28)
+        outer.addWidget(card)
+
+        lay = QVBoxLayout(card)
+        lay.setContentsMargins(24, 22, 24, 18)
+        lay.setSpacing(0)
+
+        # 1. 标题：人名 + 记忆条数
+        title = QLabel(
+            f"{_display_user(self._user)}（{len(self._memories)} 条记忆）", card)
+        title.setObjectName("titleLabel")
+        title.setWordWrap(True)
+        lay.addWidget(title)
+
+        # 2. 分隔线
+        lay.addSpacing(12)
+        divider = QFrame(card)
+        divider.setObjectName("divider")
+        divider.setFixedHeight(1)
+        lay.addWidget(divider)
+
+        # 3. 滚动列表：每条记忆一行（名称 + 内容 + 更新时间 + 删除按钮）
+        lay.addSpacing(10)
+        scroll = QScrollArea(card)
+        scroll.setWidgetResizable(True)
+        scroll.setFrameShape(QFrame.Shape.NoFrame)
+        scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        self._list_container = QWidget()
+        self._list_layout = QVBoxLayout(self._list_container)
+        self._list_layout.setContentsMargins(0, 0, 0, 0)
+        self._list_layout.setSpacing(8)
+        scroll.setWidget(self._list_container)
+        lay.addWidget(scroll, 1)
+        self._rebuild_list()
+
+        # 4. 底部：关闭按钮
+        lay.addSpacing(14)
+        bottom = QHBoxLayout()
+        close_btn = QPushButton("关闭", card)
+        close_btn.setObjectName("closeBtn")
+        close_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        close_btn.clicked.connect(self._fade_out_and_close)
+        bottom.addStretch(1)
+        bottom.addWidget(close_btn)
+        lay.addLayout(bottom)
+
+        # 限高：列表长时靠内部滚动，不超过屏幕 60%
+        screen = self.screen()
+        if screen is not None:
+            self.setMaximumHeight(
+                int(screen.availableGeometry().height() * 0.6))
+
+        # 阴影（画在卡片上；四周 margins 已为阴影留空间）
+        shadow = QGraphicsDropShadowEffect(card)
+        shadow.setBlurRadius(24)
+        shadow.setOffset(0, 6)
+        shadow.setColor(QColor(0, 0, 0, 60))
+        card.setGraphicsEffect(shadow)
+
+    def _rebuild_list(self) -> None:
+        """重建列表：清空后按最新优先填入每条记忆行。"""
+        while self._list_layout.count():
+            item = self._list_layout.takeAt(0)
+            w = item.widget()
+            if w is not None:
+                w.deleteLater()
+        if not self._memories:
+            empty = QLabel("（该用户暂无记忆）", self._list_container)
+            empty.setObjectName("metaLabel")
+            empty.setAlignment(Qt.AlignmentFlag.AlignCenter)
+            self._list_layout.addWidget(empty)
+            return
+        ordered = sorted(
+            self._memories,
+            key=lambda m: m.get("updated_at") or m.get("created_at") or "",
+            reverse=True)
+        for m in ordered:
+            self._list_layout.addWidget(self._make_row(m))
+        self._list_layout.addStretch(1)
+
+    def _make_row(self, node: dict) -> QWidget:
+        """单条记忆行：类型徽标 + 名称/内容/更新时间 + 删除按钮。"""
+        row = QWidget(self._list_container)
+        row.setObjectName("memRow")
+        lay = QHBoxLayout(row)
+        lay.setContentsMargins(12, 10, 12, 10)
+        lay.setSpacing(12)
+
+        # 行首类型徽标（与图谱节点配色一致）
+        track = str(node.get("track") or "memory")
+        type_text, type_color = _memory_type_label(node, track)
+        lay.addWidget(_make_type_badge(type_text, type_color, row))
+
+        info = QVBoxLayout()
+        info.setSpacing(3)
+        name = str(node.get("name") or "").strip()
+        if name:
+            name_label = QLabel(name, row)
+            name_label.setObjectName("rowName")
+            info.addWidget(name_label)
+        content = str(node.get("content") or "").strip()
+        if content:
+            content_label = QLabel(content, row)
+            content_label.setObjectName("rowContent")
+            content_label.setWordWrap(True)
+            info.addWidget(content_label)
+        updated = node.get("updated_at") or node.get("created_at") or ""
+        if updated:
+            meta = QLabel(
+                "更新于 " + str(updated).replace("T", " ")[:19], row)
+            meta.setObjectName("metaLabel")
+            info.addWidget(meta)
+        lay.addLayout(info, 1)
+
+        delete_btn = QPushButton("删除", row)
+        delete_btn.setObjectName("deleteBtn")
+        delete_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        node_id = str(node.get("id") or "")
+        if node_id:
+            delete_btn.clicked.connect(
+                lambda _=False, nid=node_id, nm=name or "（无名称）":
+                self._on_delete_clicked(nid, nm))
+        else:
+            delete_btn.setEnabled(False)  # 无 id 的条目不可删
+        lay.addWidget(delete_btn)
+        return row
+
+    def _on_delete_clicked(self, node_id: str, name: str) -> None:
+        """删除单条记忆：二次确认 → 删除 → 刷新列表并发 deleted 信号。"""
+        dlg = ConfirmDialog(
+            self, "删除记忆",
+            f"确定删除这条记忆？\n\n{name}\n\n删除后不可恢复。",
+            confirm_text="删除")
+        if dlg.exec() != ConfirmDialog.DialogCode.Accepted:
+            return
+        try:
+            mm = memory.get_manager()
+            n = mm.delete_memories([node_id])
+        except Exception as e:
+            QMessageBox.warning(
+                self, "删除失败", f"删除记忆失败：{type(e).__name__}: {e}")
+            return
+        if not n:
+            QMessageBox.warning(
+                self, "删除失败",
+                "记忆删除失败（存储可能被占用或损坏）。\n"
+                "可尝试先停止主程序后重试。")
+            return
+        self._memories = [
+            m for m in self._memories if str(m.get("id")) != node_id]
+        self._rebuild_list()
+        self.deleted.emit(node_id)
+
+    def _apply_style(self) -> None:
+        self.setStyleSheet(
+            "QDialog { background: transparent; }"
+            "#dialogCard { background-color: rgb(252, 250, 245);"
+            " border-radius: 14px; }"
+            "#titleLabel { color: rgb(40, 35, 25); font-size: 15px;"
+            " font-weight: bold; font-family: \"微软雅黑\"; }"
+            "#divider { background-color: rgba(140, 135, 125, 60); }"
+            "#memRow { background-color: rgb(247, 244, 238);"
+            " border-radius: 10px; }"
+            "#rowName { color: rgb(40, 35, 25); font-size: 13px;"
+            " font-weight: bold; font-family: \"微软雅黑\"; }"
+            "#rowContent { color: rgb(70, 65, 55); font-size: 12px;"
+            " font-family: \"微软雅黑\"; }"
+            "#metaLabel { color: rgb(160, 155, 145); font-size: 11px;"
+            " font-family: \"微软雅黑\"; }"
+            "#closeBtn { background-color: rgb(237, 232, 220);"
+            " color: rgb(114, 95, 77); border: none; border-radius: 10px;"
+            " padding: 6px 22px; font-size: 13px;"
+            " font-family: \"微软雅黑\"; }"
+            "#closeBtn:hover { background-color: rgb(228, 220, 203); }"
+            "#closeBtn:pressed { background-color: rgb(218, 208, 190); }"
+            "#deleteBtn { background-color: rgba(196, 86, 76, 30);"
+            " color: rgb(176, 70, 62); border: none; border-radius: 8px;"
+            " padding: 4px 14px; font-size: 12px;"
+            " font-family: \"微软雅黑\"; }"
+            "#deleteBtn:hover { background-color: rgba(196, 86, 76, 55); }"
+            "#deleteBtn:pressed { background-color: rgba(196, 86, 76, 80); }"
+            # 滚动条隐藏（列表滚轮仍可滚动，视觉清爽）
+            "QScrollBar:vertical { background: transparent; width: 0;"
+            " margin: 0; }"
+            "QScrollBar::add-line:vertical, QScrollBar::sub-line:vertical,"
+            " QScrollBar::add-page:vertical, QScrollBar::sub-page:vertical,"
+            " QScrollBar::handle:vertical { width: 0; height: 0;"
+            " background: transparent; }"
+        )
+
+    # 入场 / 出场动效（对齐记忆详情弹窗）
+    _FADE_MS = 240
+    _FADE_OUT_MS = 160
+
+    def _play_show(self) -> None:
+        """入场：淡入 0→1 + 自下而上 14px，240ms OutCubic。"""
+        geo = self.geometry()
+        end_pos = geo.topLeft()
+        start_pos = QPoint(end_pos.x(), end_pos.y() + 14)
+        self.move(start_pos)
+        self._fade = QPropertyAnimation(self, b"windowOpacity", self)
+        self._fade.setDuration(self._FADE_MS)
+        self._fade.setEasingCurve(QEasingCurve.Type.OutCubic)
+        self._fade.setStartValue(0.0)
+        self._fade.setEndValue(1.0)
+        self._fade.start()
+
+    def _fade_out_and_close(self) -> None:
+        """出场：淡出 1→0，160ms 后关闭。"""
+        out = QPropertyAnimation(self, b"windowOpacity", self)
+        out.setDuration(self._FADE_OUT_MS)
+        out.setEasingCurve(QEasingCurve.Type.InCubic)
+        out.setStartValue(1.0)
+        out.setEndValue(0.0)
+        out.finished.connect(self.accept)
+        out.start()
+
+    def mousePressEvent(self, e) -> None:
+        """点击卡片外（阴影呼吸区 / 透明背景）→ 关闭弹窗。"""
+        if not getattr(self, "_card", None) \
+                or not self._card.geometry().contains(e.position().toPoint()):
+            self._fade_out_and_close()
+            e.accept()
+            return
+        super().mousePressEvent(e)
+
+    def showEvent(self, e) -> None:
+        """首次显示时播放入场动画。"""
         super().showEvent(e)
         if not getattr(self, "_animated", False):
             self._animated = True
@@ -681,11 +1004,12 @@ class _DragButton(QPushButton):
     """
 
     def __init__(self, value: str, on_preview, mime: str, object_name: str,
-                 parent=None):
+                 on_drag_finished=None, parent=None):
         super().__init__(parent)
         self.value = value
         self._on_preview = on_preview
         self._mime = mime
+        self._on_drag_finished = on_drag_finished
         self._press_pos = None
         self._dragging = False
         self.setObjectName(object_name)
@@ -720,6 +1044,11 @@ class _DragButton(QPushButton):
         drag.setPixmap(self.grab())
         drag.setHotSpot(drag.pixmap().rect().center())
         drag.exec(Qt.DropAction.MoveAction)
+        # 拖拽结束（drag.exec 返回）后统一刷新按钮可见性：Qt 规范禁止在
+        # 拖拽进行中（dropEvent 属于 drag.exec 阻塞循环）修改源 widget 的
+        # 可见性，否则布局刷新被吞、按钮「又显示出来」。
+        if self._on_drag_finished is not None:
+            self._on_drag_finished()
 
 
 class _SlotLabel(QLabel):
@@ -777,6 +1106,15 @@ class _SlotLabel(QLabel):
         self.style().polish(self)
 
 
+def _as_list(value) -> list:
+    """归一化情绪映射绑定值：字符串 → 单元素列表（兼容旧单值配置），列表原样。"""
+    if not value:
+        return []
+    if isinstance(value, (list, tuple)):
+        return [str(v) for v in value if v]
+    return [str(value)]
+
+
 class _EmotionCard(QFrame):
     """情绪绑定卡片：表情绑定区与动作绑定区各自独立成区域（2 行 3 列网格），
     不再一个卡片双槽混排。kind="expr" 只含表情槽（紫），kind="motion"
@@ -799,12 +1137,14 @@ class _EmotionCard(QFrame):
         lay.addWidget(name_lb)
         lay.addWidget(self._slot, 1)
 
-    def set_bound(self, value: str) -> None:
-        """更新绑定显示：已绑定显示内容，未绑定恢复虚线占位。"""
+    def set_bound(self, value) -> None:
+        """更新绑定显示：已绑定（单个或列表）显示内容，未绑定恢复虚线占位。"""
+        items = _as_list(value)
+        text = "、".join(items)
         if self._kind == "expr":
-            self._slot.set_value(value, value if value else "拖拽表情到此绑定")
+            self._slot.set_value(text, text if text else "拖拽表情到此绑定")
         else:
-            self._slot.set_value(value, value if value else "拖拽动作到此绑定")
+            self._slot.set_value(text, text if text else "拖拽动作到此绑定")
 
 
 class _ComboWheelGuard(QObject):
@@ -825,6 +1165,57 @@ class _ComboWheelGuard(QObject):
                 return True
             node = node.parentWidget()
         return True
+
+
+class _AudioDropFilter(QObject):
+    """TTS 参考音频输入框拖拽过滤器：接受本地音频文件（可多选）。
+
+    主参考（单条，append=False）拖入 = 替换当前值；
+    辅助参考（多条，append=True）拖入 = 以 | 连接追加、重复去重。
+    与 src/tts/engine.py 的多参考解析（| 分隔）保持一致。
+    """
+
+    _AUDIO_EXTS = (".wav", ".mp3", ".flac", ".ogg", ".m4a", ".aac", ".wma", ".amr")
+
+    def __init__(self, line_edit, append: bool = True) -> None:
+        super().__init__(line_edit)
+        self._edit = line_edit
+        self._append = append
+
+    def _dropped_audios(self, mime: QMimeData) -> list:
+        """从拖拽数据里挑出本地音频文件路径（忽略目录/非音频）。"""
+        if not mime.hasUrls():
+            return []
+        paths = []
+        for url in mime.urls():
+            p = url.toLocalFile()
+            if p and p.lower().endswith(self._AUDIO_EXTS):
+                paths.append(p)
+        return paths
+
+    def eventFilter(self, obj, event) -> bool:
+        t = event.type()
+        if t in (QEvent.Type.DragEnter, QEvent.Type.DragMove):
+            if self._dropped_audios(event.mimeData()):
+                event.acceptProposedAction()
+                return True
+            return False
+        if t == QEvent.Type.Drop:
+            paths = self._dropped_audios(event.mimeData())
+            if not paths:
+                return False
+            if self._append:
+                parts = [p.strip() for p in self._edit.text().split("|") if p.strip()]
+                for p in paths:
+                    if p not in parts:
+                        parts.append(p)
+                self._edit.setText("|".join(parts))
+            else:
+                # 单条参考：拖入替换当前值（取第一个文件）
+                self._edit.setText(paths[0])
+            event.acceptProposedAction()
+            return True
+        return False
 
 
 class _WindowDragFilter(QObject):
@@ -1023,9 +1414,10 @@ class ControlCenter:
         self.cfg = config.cfg
         self.proc: "QProcess | None" = None
         # 日志框用等宽字体：━ 边框与空格等宽，console.header 的标题才能真正居中
-        # （微软雅黑非等宽，━ 比空格宽，居中偏移）
+        # （微软雅黑非等宽，━ 比空格宽，居中偏移）。左右分栏两个面板统一设置
         from PySide6.QtGui import QFont
-        self.ui.log.setFont(QFont("Consolas", 9))
+        for box in (self.ui.log_chat, self.ui.log_tool):
+            box.setFont(QFont("Consolas", 9))
         # 全局 tooltip 样式（QToolTip 是独立顶层窗口，QSS 需挂在 QApplication 上）
         app = QApplication.instance()
         if app is not None:
@@ -1041,6 +1433,21 @@ class ControlCenter:
         self._hide_scrollbars()
         self._init_signals()
         self._init_state()
+        # TTS 参考音频输入框：均支持拖拽音频文件。
+        # 主参考为单条（拖入替换），辅助参考为多条（拖入以 | 连接追加）
+        self.ed_tts_audio.setAcceptDrops(True)
+        self._tts_audio_drop = _AudioDropFilter(self.ed_tts_audio, append=False)
+        self.ed_tts_audio.installEventFilter(self._tts_audio_drop)
+        self.ed_tts_audios.setAcceptDrops(True)
+        self._tts_audios_drop = _AudioDropFilter(self.ed_tts_audios, append=True)
+        self.ed_tts_audios.installEventFilter(self._tts_audios_drop)
+        # 表情/动作库自动刷新（vtuber 模式轮询运行时 VTS 扫描缓存：
+        # 运行时扫描/模型切换后，页面绑定库自动重建）
+        from PySide6.QtCore import QTimer
+        self._face_lib_timer = QTimer(self.ui)
+        self._face_lib_timer.setInterval(2000)
+        self._face_lib_timer.timeout.connect(self._poll_face_lib)
+        self._update_face_lib_timer()
 
     def __getattr__(self, name):
         # UI 控件代理：self.rb_vts → self.ui.rb_vts
@@ -1078,15 +1485,23 @@ class ControlCenter:
                      scr.y() + (scr.height() - h) // 2)
 
     def _hide_scrollbars(self) -> None:
-        """隐藏界面全部滚动条（滚动功能保留：滚轮/键盘仍可滚动）。
+        """隐藏界面滚动条（滚动功能保留：滚轮/键盘仍可滚动）。
 
         遍历所有后代 QAbstractScrollArea（表格/滚动区/文本区，含
         QTableWidget、QScrollArea、QPlainTextEdit 等）设为
         ScrollBarAlwaysOff——视觉清爽，长内容靠滚轮/拖动滚动。
-        弹窗正文（MemoryDetailDialog）的滚动条由自身 QSS 隐藏。
+        例外：工具表格（table_tool_status）保留垂直滚动条——行多时
+        超出视口的行会被裁掉，且隐藏后没有滚动条就滚不到（用户
+        反馈工具页「看不见」新工具）。弹窗正文（MemoryDetailDialog）
+        的滚动条由自身 QSS 隐藏。
         """
         from PySide6.QtWidgets import QAbstractScrollArea
         for w in self.ui.findChildren(QAbstractScrollArea):
+            if w.objectName() == "table_tool_status":
+                # 工具表格只隐藏水平滚动条，保留垂直滚动条
+                w.setHorizontalScrollBarPolicy(
+                    Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+                continue
             try:
                 w.setVerticalScrollBarPolicy(
                     Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
@@ -1114,7 +1529,7 @@ class ControlCenter:
         self.nav_about.clicked.connect(lambda: self.stack.setCurrentIndex(6))
         # 启动/清空日志仅启动页显示（其他页面保留关闭按钮）
         self.stack.currentChanged.connect(self._on_page_changed)
-        self.btn_clear_log.clicked.connect(lambda: self.log.clear())
+        self.btn_clear_log.clicked.connect(self._clear_logs)
         self.btn_close.clicked.connect(self.ui.close)
         self.radio_pet.toggled.connect(self._on_mode_changed)
         self.btn_toggle.clicked.connect(self._toggle)
@@ -1122,8 +1537,8 @@ class ControlCenter:
         self.input_edit.returnPressed.connect(self._send_text)
         # 底部全长「更新配置」按钮（对齐 test222 saveConfigButton）：保存全部配置
         self.btn_save_config.clicked.connect(self._save_config)
-        # 表情与动作页（拖拽绑定）：表情库启动时按当前桌宠模型自动构建，
-        # 绑定结果随「更新配置」一并保存，无需单独按钮
+        # 表情与动作页（拖拽绑定）：表情库启动时按当前模型自动构建（桌宠读
+        # model3.json，vtuber 读运行时 VTS 扫描缓存），绑定结果随「更新配置」一并保存
         # 下拉框滚轮守卫：悬停时滚动只滚列表，不误改选中值
         self._combo_wheel_guard = _ComboWheelGuard(self.ui)
         for c in self.ui.findChildren(QComboBox):
@@ -1149,6 +1564,9 @@ class ControlCenter:
         if idx == 5:
             from PySide6.QtCore import QTimer
             QTimer.singleShot(0, self._resize_tool_rows)
+        # 进入表情与动作页：刷新 vtuber 绑定库（运行时扫描缓存可能已更新）
+        if idx == 4:
+            self._refresh_face_lib()
 
     def _init_state(self) -> None:
         # 运行模式
@@ -1178,6 +1596,7 @@ class ControlCenter:
         self.cb_stt.setChecked(bool(self.cfg.STT_ENABLED))
         self.ed_tts_audio.setText(self.cfg.GPTSOVITS_REF_AUDIO or "")
         self.ed_tts_text.setText(self.cfg.GPTSOVITS_PROMPT_TEXT or "")
+        self.ed_tts_audios.setText(self.cfg.GPTSOVITS_REF_AUDIOS or "")
         self.ed_stt_key.setText(self.cfg.STT_API_KEY or "")
         self.ed_stt_url.setText(self.cfg.STT_BASE_URL or "")
         self.ed_stt_model.setText(self.cfg.STT_MODEL or "")
@@ -1228,7 +1647,16 @@ class ControlCenter:
             self.combo_models.blockSignals(False)
 
     def _on_mode_changed(self, pet_selected: bool) -> None:
+        """切换运行模式：桌宠模型下拉随模式启用；表情与动作页重建当前模式
+        绑定库（桌宠读 model3.json，vtuber 读运行时 VTS 扫描缓存）。"""
         self.combo_models.setEnabled(pet_selected)
+        self._update_face_lib_timer()
+        if not getattr(self, "_expr_cards", None):
+            return  # 表情页尚未初始化（_init_state 阶段），由 _init_face_page 统一构建
+        # 映射文件按模式分离（emotion_map.json / emotion_map_vts.json），切换时重载
+        self._map_data = self._load_map_file()
+        self._build_expr_library()
+        self._build_action_library()
 
     # ---------- 启动页：模型切换（选择即生效，含表情动作刷新） ----------
 
@@ -1417,6 +1845,12 @@ class ControlCenter:
         else:
             add_local("TOOL_LOAD_SKILL_ENABLED", "load_skill", False, True,
                 "⭕ 已关闭", "按需加载技能 SKILL.md")
+        if cfg.TOOL_LOOK_SCREEN_ENABLED:
+            add_local("TOOL_LOOK_SCREEN_ENABLED", "look_at_screen",
+                True, True, "✅ 已启用", "屏幕截图 + 视觉模型描述画面")
+        else:
+            add_local("TOOL_LOOK_SCREEN_ENABLED", "look_at_screen",
+                False, True, "⭕ 已关闭", "屏幕截图 + 视觉模型描述画面")
 
         # ---- MCP（外部工具服务器） ----
         # MCP 未启用（MCP_ENABLED 为空）时，运行时不会加载 MCP 工具
@@ -1609,14 +2043,16 @@ class ControlCenter:
         """优雅停止：先发 /quit 让主程序走完归档/清理流程，超时未退出再强杀。
 
         直接 kill() 会跳过 main.py 的 finally——会话摘要/记忆蒸馏归档、TTS
-        排空、MCP/STT 清理全部丢失（本轮对话记忆不落库）。先给 5 秒优雅窗口。
+        排空、MCP/STT 清理全部丢失（本轮对话记忆不落库）。先给 30 秒优雅
+        窗口：归档包含两轮 LLM 调用（会话摘要 + 蒸馏），LLM 响应慢时可达
+        十几秒，5 秒窗口会导致归档未完成就被强杀（记忆丢失 + Crashed）。
         """
         if self.proc is None or self.proc.state() == QProcess.NotRunning:
             return
         if getattr(self, "_stopping", False):
             return  # 已在停止流程中（防连点重复发 /quit、重复起定时器）
         self._stopping = True
-        self._log("[控制中心] 正在优雅停止主程序…（等待记忆归档完成）\n")
+        self._log("[控制中心] 正在优雅停止主程序…（等待记忆归档完成，最长约 30 秒）\n")
         try:
             self.proc.write(b"/quit\n")
         except Exception:
@@ -1625,13 +2061,13 @@ class ControlCenter:
         timer = QTimer(self.ui)
         timer.setSingleShot(True)
         timer.timeout.connect(self._force_kill)
-        timer.start(5000)
+        timer.start(30000)
         self._stop_kill_timer = timer
 
     def _force_kill(self) -> None:
-        """优雅退出超时兜底：5 秒仍未退出则强制结束。"""
+        """优雅退出超时兜底：30 秒仍未退出则强制结束。"""
         if self.proc is not None and self.proc.state() != QProcess.NotRunning:
-            self._log("[控制中心] 主程序未在 5 秒内退出，强制结束\n")
+            self._log("[控制中心] 主程序未在 30 秒内退出，强制结束\n")
             try:
                 self.proc.kill()
             except Exception:
@@ -1643,9 +2079,17 @@ class ControlCenter:
             return
         if self.proc is not None and self.proc.state() == QProcess.ProcessState.Running:
             self.proc.write((text + "\n").encode("utf-8"))
-            # 提示符「你 > 」由主程序打印并经 stdout 回显到日志，这里不再
-            # 重复加前缀，否则同一行会显示「你 > 你 > how old are you」。
-            self._log(f"{text}\n")
+            # 主程序等待输入时已打印提示符「你 > 」（控制中心下 input() 无
+            # 回显），这里回显「你 > 内容」：先把日志末尾的提示符删掉再拼成
+            # 同一行，与原生终端（stdin echo 显示「你 > 内容」）保持一致。
+            # 若末尾不是提示符（如正在播报被拒收），直接追加一行。
+            tail = self.ui.log_tool.toPlainText()
+            if tail.endswith("你 > "):
+                cur = self.ui.log_tool.textCursor()
+                cur.movePosition(QTextCursor.End)
+                cur.movePosition(QTextCursor.Left, QTextCursor.KeepAnchor, len("你 > "))
+                cur.removeSelectedText()
+            self._log(f"你 > {text}\n")
         else:
             self._log("[控制中心] 主程序未运行，无法发送\n")
         self.input_edit.clear()
@@ -1668,21 +2112,42 @@ class ControlCenter:
             timer.stop()
             self._stop_kill_timer = None
 
-    def _log(self, text: str) -> None:
-        # 主程序 stdout 的 console.* 输出带 ANSI 颜色码（\x1b[90m 等），
-        # 日志控件不支持渲染，直接剥离避免显示 [0m[90m 等乱码
-        text = _ANSI_RE.sub("", text)
-        cur = self.log.textCursor()
+    def _clear_logs(self) -> None:
+        """清空左右两个日志面板（「清空日志」按钮）。"""
+        self.ui.log_chat.clear()
+        self.ui.log_tool.clear()
+
+    def _append_log(self, widget, text: str) -> None:
+        """把文本追加到指定日志控件尾部并滚动到底部。"""
+        if not text:
+            return
+        cur = widget.textCursor()
         cur.movePosition(QTextCursor.End)
         cur.insertText(text)
-        self.log.setTextCursor(cur)
-        self.log.ensureCursorVisible()
+        widget.setTextCursor(cur)
+        widget.ensureCursorVisible()
+
+    def _log(self, text: str) -> None:
+        # 主程序 stdout 的 console.* 输出带 ANSI 颜色码（\x1b[90m 等），
+        # 日志控件不支持渲染，写入前统一剥离。
+        # 分栏：被 CHAT_TAG（console.chat 的零宽标记）包裹的片段属于左栏
+        # 「对话」，其余归右栏「工具日志」——按标记出现顺序切分，每遇到
+        # 一个标记就切换一次归属，可正确处理两类内容交错到达的片段。
+        is_chat = False
+        chat_parts = []
+        tool_parts = []
+        for seg in text.split(CHAT_TAG):
+            seg = _ANSI_RE.sub("", seg)
+            (chat_parts if is_chat else tool_parts).append(seg)
+            is_chat = not is_chat
+        self._append_log(self.ui.log_chat, "".join(chat_parts))
+        self._append_log(self.ui.log_tool, "".join(tool_parts))
 
     # ---------- 配置保存 ----------
 
     def _save_config(self) -> None:
         """底部「更新配置」：一次保存 LLM 配置 + 设置页全部字段到 .env，
-        并把表情绑定映射一并写入 emotion_map.json。
+        并把表情绑定映射一并写入当前模式的映射文件。
         """
 
         def _bool(key: str, value: bool) -> None:
@@ -1759,6 +2224,7 @@ class ControlCenter:
             _bool("EMOTION_ACTOR_ENABLED", self.cb_emotion_actor.isChecked())
             _update_env("GPTSOVITS_REF_AUDIO", self.ed_tts_audio.text().strip())
             _update_env("GPTSOVITS_PROMPT_TEXT", self.ed_tts_text.text().strip())
+            _update_env("GPTSOVITS_REF_AUDIOS", self.ed_tts_audios.text().strip())
             # B站直播弹幕：值等于代码默认 → 不写入 .env
             _update_env_skip_default(
                 "BILI_ENABLED",
@@ -1809,12 +2275,14 @@ class ControlCenter:
             # Embedding/管家模型：嵌入器与 ButlerAgent 仅在启动时构建，无法热更新
             if _emb_changed:
                 self._log("[控制中心] Embedding/管家模型已保存，重启主程序后生效\n")
-            # TTS 参考音频/文本（立即生效，无需重启）
+            # TTS 参考音频/文本/辅助参考（立即生效，无需重启）
             self.proc.write(
                 f"!tts_audio {self.ed_tts_audio.text().strip()}\n".encode("utf-8"))
             self.proc.write(
                 f"!tts_text {self.ed_tts_text.text().strip()}\n".encode("utf-8"))
-            self._log("[控制中心] TTS 参考音频/文本已热更新（立即生效）\n")
+            self.proc.write(
+                f"!tts_audios {self.ed_tts_audios.text().strip()}\n".encode("utf-8"))
+            self._log("[控制中心] TTS 参考音频/文本/辅助参考已热更新（立即生效）\n")
             # 语音识别开关（!stt）：开关或 Key 变化时热启停/重启 STT 引擎
             if _stt_changed:
                 self.proc.write(b"!stt\n")
@@ -1828,17 +2296,18 @@ class ControlCenter:
                 self._log("[控制中心] 工具配置已热更新（立即生效）\n")
                 config.reload_tool_runtime()
                 self._fill_tool_status()
-        # —— 保存确认反馈：按钮短暂变暗（不改变色/不弹 toast），随后还原 ——
+        # —— 保存确认反馈：按钮短暂切玫红（不弹 toast），随后还原 ——
         self._dim_save_btn()
 
     def _dim_save_btn(self) -> None:
-        """保存成功：按钮文字变「已保存」+ 整体压暗（对比强烈，确认感同刷新按钮），
+        """保存成功：按钮文字变「已保存」+ 切换为侧边栏选中项玫红（确认感），
         1.2s 后还原。不用绿色。"""
         self.btn_save_config.setText("💾 已保存")
         self.btn_save_config.setStyleSheet(
             "QPushButton#btn_save_config{background:qlineargradient("
-            "x1:0,y1:0,x2:1,y2:0,stop:0 rgba(115,110,100,255),"
-            "stop:1 rgba(95,90,80,255));color:#ffffff;"
+            "x1:0,y1:0,x2:1,y2:0,stop:0 rgba(230,104,122,255),"
+            "stop:1 rgba(220,90,105,255));"
+            "border:1px solid rgba(180,69,83,220);color:#fcfaf5;"
             "font-size:14px;padding:12px 20px;border-radius:10px;}")
         from PySide6.QtCore import QTimer
         QTimer.singleShot(1200, self._restore_save_btn)
@@ -1883,7 +2352,7 @@ class ControlCenter:
         # 一键还原：表情区 / 动作区各自批量清空绑定
         self.btn_reset_expr.clicked.connect(self._reset_expr)
         self.btn_reset_action.clicked.connect(self._reset_action)
-        # 表情库按当前桌宠模型自动构建（模型在启动时已扫描，无需手动扫描）
+        # 表情库按当前模型自动构建（桌宠读 model3.json，vtuber 读运行时扫描缓存）
         self._build_expr_library()
         # 动作库：默认待机动作下拉 + 动作卡片网格（有几个动作显示几个）
         self._build_action_library()
@@ -1894,7 +2363,7 @@ class ControlCenter:
             Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
 
     def _load_map_file(self) -> dict:
-        path = self.cfg.EMOTION_MAP_FILE
+        path = self._map_path()
         if not path or not os.path.isfile(path):
             return {}
         try:
@@ -1904,33 +2373,108 @@ class ControlCenter:
         except Exception:
             return {}
 
-    def _build_expr_library(self) -> None:
-        """按当前桌宠模型（PET_MODEL_PATH）自动构建表情库 + 回填已绑定表情。
+    def _vts_face_lib(self) -> Tuple[List[str], List[str], str]:
+        """vtuber 模式表情/动作库：读运行时（VtsEmotionActor.scan）写入的
+        扫描缓存 data/vts_face_lib.json。绑定名与运行时播放完全一致
+        （VTS 可直接播放的表情 / 动画热键）；文件缺失或未扫描返回空。"""
+        path = os.path.join(self.cfg.PROJECT_ROOT, "data", "vts_face_lib.json")
+        try:
+            with open(path, "r", encoding="utf-8") as f:
+                data = json.load(f)
+            if not data.get("model_name"):
+                return [], [], ""
+            return (data.get("expressions") or [],
+                    data.get("motions") or [],
+                    str(data.get("model_name", "")))
+        except (OSError, ValueError):
+            return [], [], ""
 
-        模型在启动时已扫描过，这里直接读 model3.json 即可，无需手动操作。
+    def _current_mode(self) -> str:
+        """当前运行模式（以启动页单选为准，切换无需重启）：pet / vtuber。"""
+        return "pet" if self.radio_pet.isChecked() else "vtuber"
+
+    def _map_path(self) -> str:
+        """当前模式的情绪映射文件：桌宠 emotion_map.json，vtuber
+        emotion_map_vts.json（与运行时 cfg.EMOTION_MAP_FILE 同一规则；
+        .env 显式配置 EMOTION_MAP_FILE 时以其为准）。"""
+        env_path = os.getenv("EMOTION_MAP_FILE") or ""
+        if env_path:
+            return env_path
+        name = ("emotion_map_vts.json" if self._current_mode() == "vtuber"
+                else "emotion_map.json")
+        return os.path.join(self.cfg.PROJECT_ROOT, "data", name)
+
+    def _update_face_lib_timer(self) -> None:
+        """按当前模式启停表情库轮询（仅 vtuber 需要读运行时扫描缓存）。"""
+        if not getattr(self, "_face_lib_timer", None):
+            return  # 定时器在 __init__ 尾部创建（_init_state 阶段会先触发模式切换）
+        if self._current_mode() == "vtuber":
+            if not self._face_lib_timer.isActive():
+                self._face_lib_timer.start()
+        else:
+            self._face_lib_timer.stop()
+
+    def _refresh_face_lib(self) -> None:
+        """重新读取当前模型的表达/动作库并重建（vtuber 读运行时扫描缓存）。"""
+        if self._current_mode() != "vtuber":
+            return
+        self._build_expr_library()
+        self._build_action_library()
+
+    def _poll_face_lib(self) -> None:
+        """vtuber 模式轮询绑定库缓存：运行时扫描/模型切换后自动重建绑定库。
+        仅当表情页正在浏览且缓存内容（mtime+size）变化时重建，避免无谓刷新；
+        不在表情页时的更新由进入页面时的 _on_page_changed 兜底。"""
+        path = os.path.join(self.cfg.PROJECT_ROOT, "data", "vts_face_lib.json")
+        try:
+            st = os.stat(path)
+            key = (st.st_mtime_ns, st.st_size)
+        except OSError:
+            key = None
+        if key == getattr(self, "_face_lib_key", None):
+            return
+        self._face_lib_key = key
+        if self.stack.currentIndex() == 4:
+            self._refresh_face_lib()
+
+    def _build_expr_library(self) -> None:
+        """按当前模型自动构建表情库 + 回填已绑定表情。
+        桌宠读 PET_MODEL_PATH 的 model3.json；vtuber 读运行时 VTS 扫描缓存。
         """
-        rel = self.cfg.PET_MODEL_PATH or ""
-        if not rel:
-            self.label_map_status.setText("未配置桌宠模型（PET_MODEL_PATH）")
-            self._rebuild_expr_library([])
-            return
-        path = rel if os.path.isabs(rel) else os.path.join(
-            self.cfg.PROJECT_ROOT, rel)
-        if not os.path.isfile(path):
-            self.label_map_status.setText("模型文件不存在")
-            self._rebuild_expr_library([])
-            return
-        info = scan_model3(path)
-        self._rebuild_expr_library(info["expressions"])
+        if self._current_mode() == "vtuber":
+            exprs, _motions, model_name = self._vts_face_lib()
+            if not model_name:
+                self.label_map_status.setText(
+                    "VTS 表情库未就绪：请先启动主程序连接 VTubeStudio"
+                    "（自动扫描后本页自动刷新）")
+            else:
+                self.label_map_status.setText(
+                    f"表情库已就绪（{model_name}）：{len(exprs)} 个表情")
+            self._rebuild_expr_library(exprs)
+        else:
+            rel = self.cfg.PET_MODEL_PATH or ""
+            if not rel:
+                self.label_map_status.setText("未配置桌宠模型（PET_MODEL_PATH）")
+                self._rebuild_expr_library([])
+                return
+            path = rel if os.path.isabs(rel) else os.path.join(
+                self.cfg.PROJECT_ROOT, rel)
+            if not os.path.isfile(path):
+                self.label_map_status.setText("模型文件不存在")
+                self._rebuild_expr_library([])
+                return
+            info = scan_model3(path)
+            self._rebuild_expr_library(info["expressions"])
+            self.label_map_status.setText(
+                f"表情库已就绪：{len(info['expressions'])} 个表情")
+        # 回填已绑定表情（两模式共用）
         for emo, card in self._expr_cards.items():
             entry = self._map_data.get(emo) or {}
-            expr = str(entry.get("expression") or "")
-            card.set_bound(expr)
+            items = _as_list(entry.get("expression"))
+            card.set_bound(items)
             # 已绑定表情固定到卡片：库中对应按钮隐藏（拖上去即固定）
-            if expr and expr in self._expr_buttons:
-                self._expr_buttons[expr].setVisible(False)
-        self.label_map_status.setText(
-            f"表情库已就绪：{len(info['expressions'])} 个表情")
+            for name, btn in self._expr_buttons.items():
+                btn.setVisible(name not in items)
 
     def _clear_layout(self, layout) -> None:
         """清空布局（含嵌套子布局）：widget 与子 layout 一并移除销毁。
@@ -1949,12 +2493,11 @@ class ControlCenter:
 
     def _rebuild_button_library(self, layout, items: List[str],
                                 preview_cb, mime: str, object_name: str,
-                                prefix: str, empty_text: str,
-                                with_tooltip: bool = False
+                                empty_text: str
                                 ) -> Dict[str, _DragButton]:
         """重建可拖拽按钮库（表情/动作共用，动作区直接复用表情区逻辑）：
-        清空容器 → 无内容显示空态提示 → 否则 4 列网格按钮（显示「前缀N」，
-        悬停显示原名）；点击试播，按住拖动到上方对应槽位绑定。
+        清空容器 → 无内容显示空态提示 → 否则 4 列网格按钮（直接显示真实名称）；
+        点击试播，按住拖动到上方对应槽位绑定。
         """
         self._clear_layout(layout)
         buttons: Dict[str, _DragButton] = {}
@@ -1972,10 +2515,9 @@ class ControlCenter:
         for c in range(cols):
             grid.setColumnStretch(c, 1)
         for i, name in enumerate(items):
-            btn = _DragButton(name, preview_cb, mime, object_name)
-            btn.setText(f"{prefix}{i + 1}")   # 按钮统一显示「前缀N」
-            if with_tooltip:
-                btn.setToolTip(name)          # 悬停显示具体文件名/组名
+            btn = _DragButton(name, preview_cb, mime, object_name,
+                              on_drag_finished=self._refresh_bind_buttons)
+            btn.setText(name)                  # 直接显示真实名称（表情/动作名）
             # 固定高度：网格会把行内多余空间全部分给按钮（垂直 policy 即使
             # 是 Fixed 也会被 QGridLayout 拉伸），只有一个按钮时会撑满整块
             # 显示区域；固定高度后按钮高度恒定、不随网格伸缩。
@@ -1986,18 +2528,21 @@ class ControlCenter:
         return buttons
 
     def _rebuild_expr_library(self, expressions: List[str]) -> None:
-        """重建下方表情库：4 列网格，按图编号（表情1/表情2…）；
+        """重建下方表情库：4 列网格，按钮直接显示表情名；
         点击试播，按住拖动到上方表情槽绑定。
         """
         self._expr_buttons = self._rebuild_button_library(
             self.verticalLayout_expr_lib, expressions, self._preview_expr,
-            _DRAG_MIME_EXPR, "expr_btn", "表情", "该模型没有可用的表情")
+            _DRAG_MIME_EXPR, "expr_btn", "该模型没有可用的表情")
 
     # ---------- 动作绑定区域 ----------
 
     def _action_names(self) -> List[str]:
-        """模型可用动作名列表：MotionFile 组文件（motion/ 子目录）优先，
-        无自带动作文件时回退 model3.json 声明的 Motions 组（「组名 序号」）。"""
+        """模型可用动作名列表。桌宠：MotionFile 组文件（motion/ 子目录）优先，
+        无自带动作文件时回退 model3.json 声明的 Motions 组（「组名 序号」）；
+        vtuber：VTS 动画热键名（读运行时扫描缓存）。"""
+        if self._current_mode() == "vtuber":
+            return list(self._vts_face_lib()[1])
         rel = self.cfg.PET_MODEL_PATH or ""
         path = rel if os.path.isabs(rel) else os.path.join(
             self.cfg.PROJECT_ROOT, rel)
@@ -2022,22 +2567,23 @@ class ControlCenter:
         按钮网格直接复用表情区的 _rebuild_button_library。
         """
         names = self._action_names()
-        # 默认待机动作下拉（回填已配置值）
+        # 默认待机动作下拉（回填已配置值；默认待机为桌宠特性 PET_IDLE_MOTION，
+        # vtuber 模式的待机由运行时 MOTION_PATH 控制，这里只保留「自动」）
         idle = self.combo_idle_motion
         idle.blockSignals(True)
         idle.clear()
         idle.addItem("自动（智能匹配待机）", "")
-        for n in names:
-            idle.addItem(n, n)
+        if self._current_mode() != "vtuber":
+            for n in names:
+                idle.addItem(n, n)
         cur = str(self.cfg.PET_IDLE_MOTION or "").strip()
         idx = idle.findData(cur)
         idle.setCurrentIndex(idx if idx >= 0 else 0)
         idle.blockSignals(False)
-        # 动作卡片网格（复用表情区构建逻辑；悬停显示具体动作名）
+        # 动作卡片网格（复用表情区构建逻辑；直接显示动作名）
         self._motion_cards = self._rebuild_button_library(
             self.verticalLayout_action_lib, names, self._preview_motion,
-            _DRAG_MIME_MOTION, "motion_card", "动作", "该模型没有可用的动作",
-            with_tooltip=True)
+            _DRAG_MIME_MOTION, "motion_card", "该模型没有可用的动作")
         if not names:
             self.label_map_status.setText(
                 self.label_map_status.text() + "｜模型没有可绑定的动作")
@@ -2045,61 +2591,85 @@ class ControlCenter:
         # 动作绑定区回填已绑定动作
         for emo, card in self._motion_zone_cards.items():
             entry = self._map_data.get(emo) or {}
-            motion = str(entry.get("motion") or "")
-            card.set_bound(motion)
+            items = _as_list(entry.get("motion"))
+            card.set_bound(items)
             # 已绑定动作固定到卡片：库中对应按钮隐藏（拖上去即固定）
-            if motion and motion in self._motion_cards:
-                self._motion_cards[motion].setVisible(False)
+            for name, btn in self._motion_cards.items():
+                btn.setVisible(name not in items)
 
     def _entry(self, emotion: str) -> dict:
         """情绪映射条目（惰性创建）。"""
         return self._map_data.setdefault(emotion, {})
 
+    def _refresh_bind_buttons(self) -> None:
+        """按当前映射整体刷新绑定状态：更新全部情绪卡片的绑定显示，
+        并重算表情/动作库按钮可见性（已绑定任意情绪的按钮隐藏）。
+
+        只在拖拽结束（drag.exec 返回）后调用：Qt 规范禁止在拖拽进行中
+        修改源 widget 可见性，否则布局刷新被吞、按钮「又显示出来」。
+        """
+        expr_binds = {emo: _as_list((self._map_data.get(emo) or {}).get("expression"))
+                      for emo in self._emotions}
+        motion_binds = {emo: _as_list((self._map_data.get(emo) or {}).get("motion"))
+                        for emo in self._emotions}
+        for emo, card in getattr(self, "_expr_cards", {}).items():
+            card.set_bound(expr_binds[emo])
+        for name, btn in getattr(self, "_expr_buttons", {}).items():
+            btn.setVisible(not any(name in items for items in expr_binds.values()))
+        for emo, card in getattr(self, "_motion_zone_cards", {}).items():
+            card.set_bound(motion_binds[emo])
+        for name, btn in getattr(self, "_motion_cards", {}).items():
+            btn.setVisible(not any(name in items for items in motion_binds.values()))
+
     def _on_bind_expr(self, emotion: str, expr: str) -> None:
-        """拖拽绑定表情：按钮固定到情绪卡片（库中对应按钮隐藏），
-        映射随「更新配置」一并保存。"""
+        """拖拽绑定表情：同一情绪可绑定多个表情（再拖同名项 = 解除），
+        映射随「更新配置」一并保存；按钮可见性由拖拽结束统一刷新。"""
         entry = self._entry(emotion)
-        old = entry.get("expression")
+        items = _as_list(entry.get("expression"))
         if expr:
-            entry["expression"] = expr
+            if expr in items:
+                items.remove(expr)  # 再拖一次 = 解除绑定
+            else:
+                items.append(expr)  # 追加绑定
+        if items:
+            entry["expression"] = items
         else:
             entry.pop("expression", None)
-        # 固定：新绑定按钮从库中隐藏（拖上去即固定），旧绑定按钮恢复
-        if old and old != expr and old in self._expr_buttons:
-            self._expr_buttons[old].setVisible(True)
-        if expr and expr in self._expr_buttons:
-            self._expr_buttons[expr].setVisible(False)
-        self._expr_cards[emotion].set_bound(expr)
+        status = "、".join(items) if items else "（无）"
         self.label_map_status.setText(
-            f"已绑定：{emotion} → 表情 {expr}（点底部「更新配置」保存）")
+            f"已绑定：{emotion} → 表情 {status}（点底部「更新配置」保存）")
 
     def _on_bind_motion(self, emotion: str, motion: str) -> None:
-        """拖拽绑定动作：按钮固定到情绪卡片（库中对应按钮隐藏），
+        """拖拽绑定动作：同一情绪可绑定多个动作（再拖同名项 = 解除），
         映射随「更新配置」一并保存。"""
         entry = self._entry(emotion)
-        old = entry.get("motion")
+        items = _as_list(entry.get("motion"))
         if motion:
-            entry["motion"] = motion
+            if motion in items:
+                items.remove(motion)  # 再拖一次 = 解除绑定
+            else:
+                items.append(motion)  # 追加绑定
+        if items:
+            entry["motion"] = items
         else:
             entry.pop("motion", None)
-        # 固定：新绑定按钮从库中隐藏（拖上去即固定），旧绑定按钮恢复
-        if old and old != motion and old in self._motion_cards:
-            self._motion_cards[old].setVisible(True)
-        if motion and motion in self._motion_cards:
-            self._motion_cards[motion].setVisible(False)
-        self._motion_zone_cards[emotion].set_bound(motion)
+        # 固定：所有已绑定按钮从库中隐藏，其余恢复显示
+        for name, btn in self._motion_cards.items():
+            btn.setVisible(name not in items)
+        self._motion_zone_cards[emotion].set_bound(items)
+        status = "、".join(items) if items else "（无）"
         self.label_map_status.setText(
-            f"已绑定：{emotion} → 动作 {motion}（点底部「更新配置」保存）")
+            f"已绑定：{emotion} → 动作 {status}（点底部「更新配置」保存）")
 
     def _reset_expr(self) -> None:
         """一键还原：清空所有情绪的表情绑定（库中按钮全部恢复显示）。"""
         for emo in self._emotions:
             entry = self._map_data.get(emo)
             if entry:
-                old = entry.pop("expression", None)
-                if old and old in self._expr_buttons:
-                    self._expr_buttons[old].setVisible(True)
-            self._expr_cards[emo].set_bound("")
+                entry.pop("expression", None)
+            self._expr_cards[emo].set_bound([])
+        for btn in self._expr_buttons.values():
+            btn.setVisible(True)
         self.label_map_status.setText("已还原全部表情绑定（点底部「更新配置」保存）")
 
     def _reset_action(self) -> None:
@@ -2108,19 +2678,19 @@ class ControlCenter:
         for emo in self._emotions:
             entry = self._map_data.get(emo)
             if entry:
-                old = entry.pop("motion", None)
-                if old and old in self._motion_cards:
-                    self._motion_cards[old].setVisible(True)
-            self._motion_zone_cards[emo].set_bound("")
+                entry.pop("motion", None)
+            self._motion_zone_cards[emo].set_bound([])
+        for btn in self._motion_cards.values():
+            btn.setVisible(True)
         idx = self.combo_idle_motion.findData("")
         self.combo_idle_motion.setCurrentIndex(max(0, idx))
         self.label_map_status.setText("已还原全部动作绑定（点底部「更新配置」保存）")
 
     def _save_map(self) -> None:
-        """把内存映射写入 data/emotion_map.json（由「更新配置」触发）。"""
+        """把内存映射写入当前模式的映射文件（由「更新配置」触发）。"""
         out = {emo: entry for emo, entry in self._map_data.items()
                if emo in self._emotions and entry}
-        path = self.cfg.EMOTION_MAP_FILE
+        path = self._map_path()
         try:
             os.makedirs(os.path.dirname(path), exist_ok=True)
             with open(path, "w", encoding="utf-8") as f:
@@ -2133,17 +2703,17 @@ class ControlCenter:
                    "（点底部「更新配置」即可热生效）")
 
     def _preview_expr(self, name: str) -> None:
-        """点击表情库按钮：试播该表情（向运行中的桌宠主程序发 /expr）。"""
+        """点击表情库按钮：试播该表情（向运行中的主程序发 /expr）。"""
         self._send_face_command(f"/expr {name}")
 
     def _preview_motion(self, name: str) -> None:
-        """点击动作卡片：试播该动作（向运行中的桌宠主程序发 /motion）。"""
+        """点击动作卡片：试播该动作（向运行中的主程序发 /motion）。"""
         self._send_face_command(f"/motion {name}")
 
     def _send_face_command(self, cmd: str) -> None:
-        """试播：向运行中的主程序（桌宠模式）发送表情/动作命令。"""
+        """试播：向运行中的主程序（桌宠/VTS 模式）发送表情/动作命令。"""
         if self.proc is None or self.proc.state() != QProcess.ProcessState.Running:
-            self._log("[控制中心] 主程序未运行（需以桌宠模式启动），无法试播\n")
+            self._log("[控制中心] 主程序未运行，无法试播\n")
             return
         self.proc.write((cmd + "\n").encode("utf-8"))
         # 同上：提示符由主程序打印回显，这里只记录命令本身，避免重复「你 > 」
@@ -2169,6 +2739,8 @@ class ControlCenter:
         self.graph_memory.nodeClicked.connect(self._on_graph_node_clicked)
         self.graph_memory.userClicked.connect(self._on_user_clicked)
         self.graph_memory.blankClicked.connect(self._on_graph_blank_clicked)
+        # 只显示人名（用户簇心），不显示每条记忆圆点：点击人名弹记忆列表管理
+        self.graph_memory.show_memory_nodes = False
         # 状态栏文本可能较长（点击节点显示摘要）：水平方向 Ignored，
         # 布局不再被其 sizeHint 撑大（文本超宽自动裁切，不撑宽窗口）
         self.label_memory_status.setSizePolicy(
@@ -2186,29 +2758,19 @@ class ControlCenter:
             dlg._fade_out_and_close()  # 淡出关闭当前弹窗
             return
         self.label_memory_status.setText(
-            "点击节点查看记忆，点击用户名圆查看该用户记忆汇总，"
-            "拖动记忆圆点调整位置，滚轮缩放，中键拖动平移")
+            "点击用户名圆查看该用户记忆并管理（删除）")
 
     def _on_user_clicked(self, user: str) -> None:
-        """图谱簇心（用户名圆）单击：弹窗汇总该 user 的所有记忆。"""
+        """图谱簇心（用户名圆）单击：弹出该用户记忆列表弹窗，可逐条查看/删除。"""
         mems = [f for f in self._mem_files
                 if (f.get("user") or "chao") == user]
-        body = "\n".join(
-            f"· {str(m.get('content') or '').strip()}" for m in mems)
-        if not body:
-            body = "（该用户暂无记忆）"
-        latest = max((m.get("updated_at") or m.get("created_at") or ""
-                      for m in mems), default="")
         self.label_memory_status.setText(
             f"用户 {_display_user(user)}：{len(mems)} 条记忆")
-        self._show_memory_detail({
-            "name": _display_user(user),
-            "description": f"用户 {_display_user(user)} 的记忆汇总",
-            "content": body,
-            "user": user,
-            "track": "memory",
-            "updated_at": latest,
-        })
+        dlg = MemoryListDialog(user, mems, self.ui)
+        dlg.deleted.connect(self._on_memory_deleted)  # 删除后过滤并刷新图谱
+        dlg.show()
+        dlg.raise_()
+        dlg.activateWindow()
 
     def _on_graph_node_clicked(self, node: dict) -> None:
         """图谱节点单击：状态栏显示摘要 + 弹出该记忆详情弹窗。
@@ -2289,24 +2851,18 @@ class ControlCenter:
             f"共 {len(files)} 个记忆文件（{emb}）")
 
     def _apply_face_mode_state(self) -> None:
-        """表情/动作控制仅对桌宠模式生效：非桌宠时禁用操作控件，但页面保持可滚动浏览。
+        """表情/动作控制桌宠与 vtuber 模式均可用：页面控件全部启用。
 
         注意：scroll_face_page 本身不能 setEnabled(False)——禁用 QScrollArea 会
-        连带禁用滚动条与滚轮滚动（页面无法浏览）。非桌宠只禁操作型控件。
+        连带禁用滚动条与滚轮滚动（页面无法浏览）。绑定库未就绪时由
+        _build_expr_library 在状态栏给出提示。
         """
-        pet = self.cfg.RUN_MODE == "pet"
         for w in (self.card_emotion_zone, self.card_expr_library,
                   self.card_action_bind, self.btn_reset_expr,
                   self.btn_reset_action):
-            w.setEnabled(pet)
-        if not pet:
-            self.label_face_hint.setText(
-                "表情/动作控制仅在桌宠模式（RUN_MODE=pet）下生效。\n"
-                "请到启动页选择「桌面宠物」模式并重新启动后，本页功能可用。")
-            self.label_face_hint.setVisible(True)
-        else:
-            # 桌宠模式下不显示说明文字（拖拽绑定/即时保存为直觉操作）
-            self.label_face_hint.setVisible(False)
+            w.setEnabled(True)
+        # 两模式均不显示说明文字（拖拽绑定/即时保存为直觉操作）
+        self.label_face_hint.setVisible(False)
 
 
 def main() -> None:

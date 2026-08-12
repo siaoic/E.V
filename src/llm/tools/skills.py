@@ -9,8 +9,11 @@
 from __future__ import annotations
 
 import atexit
+import json
+import os
 import re
 import threading
+import time
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Iterable, Optional
@@ -21,6 +24,11 @@ from watchdog.observers import Observer
 from watchdog.observers.api import BaseObserver
 
 from src.utils import config, console
+
+# 技能使用统计持久化文件：record_usage 记录 load 次数与最近使用时间，
+# 复盘时注入进化引擎，让技能修补/清理有真实使用数据支撑（对标 hermes 的
+# skill usage counters——但 hermes 明确 use=0 不作为归档依据，这里同样只供参考）
+_USAGE_PATH = os.path.join(config.cfg.PROJECT_ROOT, "data", "skill_usage.json")
 
 _SKILL_FILENAME = "SKILL.md"
 """技能定义文件名"""
@@ -39,25 +47,27 @@ class AgentSkill:
     name: str
     description: str
     location: Path  # 指向 SKILL.md 的绝对路径
+    pinned: bool = False  # frontmatter pinned: true → 禁止自动修补/合并/归档
 
 
-def _parse_skill_md(path: Path) -> tuple[str, str]:
+def _parse_skill_md(path: Path) -> tuple[str, str, bool]:
     """
-    解析 SKILL.md，提取技能名与描述。
+    解析 SKILL.md，提取技能名、描述与 pin 状态。
 
-    优先读取 YAML frontmatter 中的 name / description；
+    优先读取 YAML frontmatter 中的 name / description / pinned；
     frontmatter 缺失或损坏时回退：name 取目录名，description 取首个 Markdown 标题，
-    再退化为首个非空行（截断至 _DESCRIPTION_MAX_CHARS）。
+    再退化为首个非空行（截断至 _DESCRIPTION_MAX_CHARS）；pinned 回退 False。
 
     :param path: SKILL.md 文件路径
-    :return: (name, description)
+    :return: (name, description, pinned)
     """
     fallback_name = path.parent.name
+    pinned = False
     try:
         text = path.read_text(encoding="utf-8", errors="replace")
     except Exception as e:
         console.warn(f"读取技能文件失败 {path}: {e}")
-        return fallback_name, ""
+        return fallback_name, "", pinned
 
     name: Optional[str] = None
     description: Optional[str] = None
@@ -71,6 +81,8 @@ def _parse_skill_md(path: Path) -> tuple[str, str]:
                     name = meta["name"].strip()
                 if isinstance(meta.get("description"), str) and meta["description"].strip():
                     description = meta["description"].strip()
+                # frontmatter pinned: true → 该技能受保护（对标 hermes curator pin）
+                pinned = bool(meta.get("pinned"))
         except yaml.YAMLError:
             # frontmatter 损坏时静默回退
             pass
@@ -90,7 +102,7 @@ def _parse_skill_md(path: Path) -> tuple[str, str]:
             break
         description = description[:_DESCRIPTION_MAX_CHARS]
 
-    return name, description
+    return name, description, pinned
 
 
 def _scan_roots(roots: Iterable[Path]) -> dict[str, AgentSkill]:
@@ -109,10 +121,11 @@ def _scan_roots(roots: Iterable[Path]) -> dict[str, AgentSkill]:
             console.dim(f"[Skills] 技能目录不存在，跳过: {root}")
             continue
         for skill_md in sorted(root.glob(f"*/{_SKILL_FILENAME}")):
-            name, description = _parse_skill_md(skill_md)
+            name, description, pinned = _parse_skill_md(skill_md)
             if name in skills:
                 console.warn(f"[Skills] 技能名冲突: '{name}' ({skill_md}) 将覆盖 ({skills[name].location})")
-            skills[name] = AgentSkill(name=name, description=description, location=skill_md.resolve())
+            skills[name] = AgentSkill(name=name, description=description,
+                                      location=skill_md.resolve(), pinned=pinned)
     return skills
 
 
@@ -172,6 +185,8 @@ class SkillManager:
         """当前技能注册表（name -> AgentSkill），替换时整体原子交换"""
         self._skills_lock = threading.Lock()
         """保护 _skills 替换（观察者线程写入，asyncio 线程读取）"""
+        self._usage: dict[str, dict] = self._load_usage()
+        """技能使用统计（name -> {loads, last_used}），持久化在 data/skill_usage.json"""
         self.observer: Optional[BaseObserver] = None
         """文件监视器"""
         self._watched_roots: set[Path] = set()
@@ -259,6 +274,55 @@ class SkillManager:
             return
         self.observer.stop()
         self.observer.join()
+
+    # ---------- 技能使用统计（进化引擎数据源） ----------
+
+    def _load_usage(self) -> dict[str, dict]:
+        """读取技能使用统计（文件缺失/损坏时返回空字典）。"""
+        try:
+            with open(_USAGE_PATH, "r", encoding="utf-8") as f:
+                data = json.load(f)
+            return data if isinstance(data, dict) else {}
+        except (OSError, ValueError):
+            return {}
+
+    def _save_usage(self) -> None:
+        """覆写技能使用统计文件（失败静默，统计丢失不影响功能）。"""
+        try:
+            os.makedirs(os.path.dirname(_USAGE_PATH), exist_ok=True)
+            with open(_USAGE_PATH, "w", encoding="utf-8") as f:
+                json.dump(self._usage, f, ensure_ascii=False, indent=2)
+        except OSError:
+            pass
+
+    def record_usage(self, name: str) -> None:
+        """记录一次技能使用：load 次数 +1 并更新最近使用时间。"""
+        with self._skills_lock:
+            entry = self._usage.setdefault(name, {"loads": 0, "last_used": 0.0})
+            entry["loads"] = int(entry.get("loads") or 0) + 1
+            entry["last_used"] = time.time()
+            self._save_usage()
+
+    def usage_of(self, name: str) -> Optional[dict]:
+        """返回单个技能的使用统计（{loads, last_used}），未使用过返回 None。"""
+        with self._skills_lock:
+            entry = self._usage.get(name)
+            return dict(entry) if entry else None
+
+    def usage_section(self) -> str:
+        """当前全部技能的使用统计文本段（复盘注入用），无数据返回空串。"""
+        with self._skills_lock:
+            usage = dict(self._usage)
+        if not usage:
+            return ""
+        lines = []
+        for name, entry in sorted(usage.items()):
+            loads = int(entry.get("loads") or 0)
+            last_used = entry.get("last_used") or 0.0
+            stamp = (time.strftime("%m-%d %H:%M", time.localtime(last_used))
+                     if last_used else "从未")
+            lines.append(f"- {name}: loads={loads}, last_used={stamp}")
+        return "\n".join(lines)
 
 
 _skill_manager: Optional[SkillManager] = None

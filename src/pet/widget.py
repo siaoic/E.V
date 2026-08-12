@@ -14,11 +14,12 @@ import glob
 import json
 import os
 import random
+import sys
 import time
 from typing import Dict, List, Optional, Tuple
 
 from PySide6.QtCore import Qt, QTimer
-from PySide6.QtGui import QFont, QFontDatabase, QMouseEvent, QSurfaceFormat
+from PySide6.QtGui import QCursor, QFont, QFontDatabase, QMouseEvent, QSurfaceFormat
 from PySide6.QtOpenGLWidgets import QOpenGLWidget
 from PySide6.QtWidgets import QApplication, QLabel
 
@@ -95,6 +96,15 @@ _STALL_GRACE = 0.5
 #     IsMotionFinished 永不结束、待机循环被永久卡死。
 _USER_GRACE = 1.0
 _UNKNOWN_MOTION_TIMEOUT = 90.0
+
+# 模型空白区鼠标穿透（Win32 WS_EX_TRANSPARENT）：
+# 轮询鼠标位置切换穿透的周期（毫秒）。穿透开启后本窗口收不到鼠标事件，
+# 只能靠系统级 GetCursorPos 判断位置，故用定时器而不是鼠标事件驱动。
+_CLICK_THROUGH_POLL_MS = 50
+# Win32 窗口扩展样式索引（GetWindowLongW/SetWindowLongW 的 GWL_EXSTYLE）
+_WIN_GWL_EXSTYLE = -20
+# Win32 鼠标穿透扩展样式位（WS_EX_TRANSPARENT）
+_WIN_WS_EX_TRANSPARENT = 0x00000020
 
 
 def _scan_motion_files(model3_path: str) -> List[str]:
@@ -180,9 +190,14 @@ class PetWidget(QOpenGLWidget):
             "padding: 8px 16px;"
         )
         self._bubble.hide()
-        self._bubble_timer = QTimer(self)
-        self._bubble_timer.setSingleShot(True)
-        self._bubble_timer.timeout.connect(self._bubble.hide)
+
+        # 模型空白区点击穿透：鼠标位于透明区域时点击落到下层窗口。
+        # 定时按鼠标位置切换 Win32 WS_EX_TRANSPARENT（见 _update_click_through）
+        self._click_through_on = False   # 当前是否已开启穿透（避免重复 SetWindowLong）
+        self._in_system_move = False     # 系统拖动中禁止切换样式，避免干扰拖动
+        self._click_timer = QTimer(self)
+        self._click_timer.timeout.connect(self._update_click_through)
+        self._click_timer.start(_CLICK_THROUGH_POLL_MS)
 
         self._load_motion_groups()
 
@@ -704,7 +719,12 @@ class PetWidget(QOpenGLWidget):
     # ---------- 气泡字幕（复用 stream 的 sub 接口） ----------
 
     def show_text(self, text: str, speed_ms: int = 0) -> None:
-        """显示一句气泡字幕。speed_ms = 每字符停留毫秒（0 用默认 4s）。"""
+        """显示一句气泡字幕（持续显示，直到 clear_text 清除）。
+
+        不再按字数自动隐藏：TTS 逐字推送时句间合成间隙可达数秒，短定时器
+        会在回复中途把气泡藏起又显示，造成闪烁。字幕生命周期统一由
+        clear_text 控制（回复结束 / 打断时调用）。
+        """
         if not text:
             return
         self._bubble.setText(text)
@@ -717,12 +737,9 @@ class PetWidget(QOpenGLWidget):
             bh,
         )
         self._bubble.show()
-        stay = (len(text) * speed_ms + 500) if speed_ms > 0 else 4000
-        self._bubble_timer.start(max(2000, stay))
 
     def clear_text(self) -> None:
-        """立即清除气泡字幕（回复结束 / 静音时）。"""
-        self._bubble_timer.stop()
+        """立即清除气泡字幕（回复结束 / 打断时）。"""
         self._bubble.hide()
 
     # ---------- Qt 渲染回调 ----------
@@ -830,6 +847,43 @@ class PetWidget(QOpenGLWidget):
         except Exception:
             return True  # 检测失败则按整窗可拖
 
+    def _update_click_through(self) -> None:
+        """按鼠标位置动态切换窗口点击穿透（仅 Windows）。
+
+        鼠标位于模型空白区（未命中模型）→ 开启穿透，点击落到下层窗口；
+        位于模型命中区 → 关闭穿透，可点击/拖动模型。
+        用轮询而非鼠标事件驱动：穿透开启后本窗口收不到鼠标事件，
+        只能靠系统级 GetCursorPos 判断位置（QTimer 不受穿透影响）。
+        """
+        if not self.isVisible() or self._in_system_move \
+                or not sys.platform.startswith("win"):
+            return
+        pos = self.mapFromGlobal(QCursor.pos())
+        want = self.rect().contains(pos) \
+            and not self._hit_model(pos.x(), pos.y())
+        if want != self._click_through_on:
+            self._click_through_on = want
+            self._set_click_through(want)
+
+    def _set_click_through(self, enable: bool) -> None:
+        """设置窗口鼠标穿透（Win32 WS_EX_TRANSPARENT）；非 Windows / 失败静默。
+
+        WS_EX_TRANSPARENT 使整窗对命中测试透明——点击直接落到下层窗口。
+        ctypes 懒加载（对齐项目约定，模块顶层不 import ctypes）。
+        """
+        try:
+            import ctypes
+            hwnd = int(self.winId())
+            user32 = ctypes.windll.user32
+            style = user32.GetWindowLongW(hwnd, _WIN_GWL_EXSTYLE)
+            if enable:
+                style |= _WIN_WS_EX_TRANSPARENT
+            else:
+                style &= ~_WIN_WS_EX_TRANSPARENT
+            user32.SetWindowLongW(hwnd, _WIN_GWL_EXSTYLE, style)
+        except Exception:
+            pass  # 穿透切换失败不影响模型渲染/交互
+
     def _play_tap_motion(self) -> None:
         """点击模型：随机播放一组点击动作（优先 TapBody 组）。"""
         model = self.model
@@ -864,7 +918,11 @@ class PetWidget(QOpenGLWidget):
             # （渲染不中断），从根本上消除卡顿与 GL 状态损坏。
             wh = self.windowHandle()
             if wh is not None:
-                wh.startSystemMove()
+                self._in_system_move = True
+                try:
+                    wh.startSystemMove()
+                finally:
+                    self._in_system_move = False
                 # 拖动结束（阻塞返回）强制重绘一次，确保画面立即恢复
                 if self.isVisible():
                     self.update()

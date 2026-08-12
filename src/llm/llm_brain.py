@@ -36,6 +36,7 @@ content 增量传回主事件循环，按句切分后 yield，实现「边思考
 
 import asyncio
 import json
+import os
 import re
 import time
 from typing import Any, AsyncGenerator, List, Optional
@@ -69,6 +70,45 @@ _MAX_TOOL_RESULT_LOG = 300
 
 # 跨轮历史中工具结果保留的最大长度（防 token 污染；本轮内仍用完整结果）
 _MAX_TOOL_HISTORY_LOG = 500
+
+# 生效话术建议文件：进化引擎写入（data/evolution_advice_active.json），
+# 到期后由进化复盘回评续期/移除，这里只读取未到期条目注入系统提示
+_ADVICE_ACTIVE_PATH = os.path.join(
+    config.cfg.PROJECT_ROOT, "data", "evolution_advice_active.json")
+
+# 生效话术建议读取缓存时长（秒）：避免每轮对话都读文件
+_ADVICE_CACHE_TTL = 30
+
+# 观众画像文件：进化引擎复盘提炼（data/evolution_profile.json），
+# 本模块每轮按关键词召回注入系统提示（对标 hermes 的 USER.md/MEMORY.md）
+_PROFILE_PATH = os.path.join(
+    config.cfg.PROJECT_ROOT, "data", "evolution_profile.json")
+
+# 画像读取缓存时长（秒）：避免每轮对话都读文件
+_PROFILE_CACHE_TTL = 30
+
+# 单轮最多注入的画像条数（按与当前消息相关度排序取前 N，控制 token）
+_PROFILE_INJECT_MAX = 3
+
+# GEPA 进化策略段文件：prompt_evo.py 择优落盘（data/evolution_policy.json），
+# 本模块每轮读取注入系统提示（对标 hermes GEPA 的 prompt 进化层）
+_POLICY_PATH = os.path.join(
+    config.cfg.PROJECT_ROOT, "data", "evolution_policy.json")
+
+# 策略段读取缓存时长（秒）：避免每轮对话都读文件
+_POLICY_CACHE_TTL = 30
+
+
+def _bigram_hits(text: str, query: str) -> int:
+    """公共 2-gram 片段数：轻量关键词召回（无第三方分词依赖）。
+
+    中文按字符 2-gram 取交集，两个文本共享片段越多说明越相关。
+    """
+    def bigrams(s: str) -> set:
+        s = re.sub(r"\s+", "", s)
+        return {s[i:i + 2] for i in range(len(s) - 1)} if len(s) >= 2 else set()
+
+    return len(bigrams(text) & bigrams(query))
 
 
 def _summarize_tool_content(content) -> str:
@@ -362,6 +402,11 @@ class LLMBrain:
             max_retries=2,
         )
         self.history: list = []
+        # LLM 并发信号量（.env LLM_MAX_CONCURRENCY，默认 2）：用户对话 + agent
+        # 主动 + 弹幕回复共用，同时最多 N 个 LLM 推理，超出排队等待而非无限
+        # 并发——本地大模型防显存打满、远程 API 防限流。
+        self._llm_semaphore = asyncio.Semaphore(
+            max(1, int(config.cfg.LLM_MAX_CONCURRENCY or 2)))
         # 长对话摘要压缩（对标 NagaAgent 上下文压缩）：
         # 历史超长被裁剪时，后台把丢弃的早期轮次压缩成摘要，
         # 下一轮以 system 段注入，避免长聊后早期信息永久丢失；
@@ -370,6 +415,19 @@ class LLMBrain:
         self._summary_task: Optional[asyncio.Task] = None
         # MCP 管理器（外部工具服务器）；None 表示禁用
         self.mcp = mcp
+        # 生效话术建议缓存（进化引擎写入 active json，30s TTL 防每轮读文件）
+        self._advice_cache_ts = 0.0
+        self._advice_cache: list[str] = []
+        # 观众画像缓存（进化引擎写入 profile json，30s TTL 防每轮读文件）
+        self._profile_cache_ts = 0.0
+        self._profile_cache: list[dict] = []
+        # GEPA 进化策略段缓存（prompt_evo.py 写入 policy json，30s TTL）
+        self._policy_cache_ts = 0.0
+        self._policy_cache: str = ""
+        # 模型路由进化（多臂老虎机）：配置多 LLM 服务时按历史表现选服务；
+        # 未配置/未启用时 router 为 None，完全走原有单一 LLM 服务逻辑
+        from src.llm.model_router import get_router
+        self.router = get_router()
 
     def reload_client(self) -> None:
         """控制中心「更新配置」热更新后重建 OpenAI client。
@@ -385,6 +443,95 @@ class LLMBrain:
             timeout=120.0,
             max_retries=2,
         )
+
+    # ---------- 生效话术建议注入 ----------
+
+    def _active_advice_section(self) -> str:
+        """读取未到期的生效话术建议，拼装成注入系统提示的段落。
+
+        30s TTL 缓存避免每轮对话都读文件；无生效建议时返回空字符串。
+        """
+        now = time.time()
+        if now - self._advice_cache_ts >= _ADVICE_CACHE_TTL:
+            self._advice_cache_ts = now
+            try:
+                with open(_ADVICE_ACTIVE_PATH, "r", encoding="utf-8") as f:
+                    data = json.load(f)
+                self._advice_cache = [
+                    (it.get("text") or "").strip()
+                    for it in data
+                    if isinstance(it, dict) and (it.get("expires") or 0) > now
+                ]
+            except (OSError, ValueError):
+                self._advice_cache = []
+        if not self._advice_cache:
+            return ""
+        return ("### 生效中的话术建议（直播时尽量遵循，若已被验证无效可忽略）\n"
+                + "\n".join(f"- {t}" for t in self._advice_cache))
+
+    # ---------- 观众画像注入（进化引擎复盘的长期事实，关键词召回） ----------
+
+    def _profile_section(self, user_text: str) -> str:
+        """按关键词召回观众画像，拼装成注入系统提示的段落。
+
+        轻量关键词召回（公共 2-gram 片段，无第三方分词依赖），补充向量
+        记忆检索之外的召回；30s TTL 缓存避免每轮对话都读文件；
+        无相关条目时返回空字符串。
+        """
+        now = time.time()
+        if now - self._profile_cache_ts >= _PROFILE_CACHE_TTL:
+            self._profile_cache_ts = now
+            try:
+                with open(_PROFILE_PATH, "r", encoding="utf-8") as f:
+                    data = json.load(f)
+                self._profile_cache = [
+                    {"owner": (it.get("owner") or "").strip()[:32],
+                     "fact": (it.get("fact") or "").strip()}
+                    for it in data
+                    if isinstance(it, dict) and (it.get("fact") or "").strip()
+                ]
+            except (OSError, ValueError):
+                self._profile_cache = []
+        if not self._profile_cache:
+            return ""
+        query = (user_text or "").strip()
+        if not query:
+            return ""
+        # 相关度 = 与当前消息的公共 2-gram 片段数，降序取前 N
+        hits = sorted(
+            ((_bigram_hits(it["fact"], query), it) for it in self._profile_cache),
+            key=lambda x: x[0], reverse=True,
+        )
+        top = [it for score, it in hits if score > 0][:_PROFILE_INJECT_MAX]
+        if not top:
+            return ""
+        return ("### 观众画像（复盘提炼的长期事实，相关时自然融入回答，不要机械复述）\n"
+                + "\n".join(f"- {it['owner'] or 'chao'}：{it['fact']}" for it in top))
+
+    # ---------- GEPA 进化策略段注入 ----------
+
+    def _policy_section(self) -> str:
+        """读取 GEPA 择优落盘的行为策略段，拼装成注入系统提示的段落。
+
+        30s TTL 缓存避免每轮对话都读文件；无策略或未启用进化时返回空字符串。
+        """
+        if not getattr(self.cfg, "EVOLUTION_PROMPT_EVO_ENABLED", True):
+            return ""
+        now = time.time()
+        if now - self._policy_cache_ts >= _POLICY_CACHE_TTL:
+            self._policy_cache_ts = now
+            try:
+                with open(_POLICY_PATH, "r", encoding="utf-8") as f:
+                    data = json.load(f)
+                self._policy_cache = (
+                    (data.get("text") or "").strip() if isinstance(data, dict) else ""
+                )
+            except (OSError, ValueError):
+                self._policy_cache = ""
+        if not self._policy_cache:
+            return ""
+        return ("### 进化行为策略（GEPA 迭代沉淀，直播中相关情境优先遵循，"
+                "与生效中的话术建议冲突时以本策略为准）\n" + self._policy_cache)
 
     # ---------- 工具 ----------
 
@@ -561,14 +708,27 @@ class LLMBrain:
         except (TypeError, ValueError, AttributeError):
             return _MAX_TOOL_ITERATIONS
 
-    async def chat_stream(self, user_text: str, *, proactive: bool = False) -> AsyncGenerator[str, None]:
+    async def chat_stream(self, user_text: str, *, proactive: bool = False,
+                          history: Optional[list] = None) -> AsyncGenerator[str, None]:
         """流式对话生成器：多轮工具调用，实时打印思考过程，按句 yield 纯对话文本。
 
         proactive=True 表示这是「内部自主行动指令」（主动发言）而非用户消息：
         请求时照常以 user 角色注入以便模型理解，但保存历史时会剔除该条
         prompt（不冒充用户发言），只保留模型回复保持上下文连贯
         （对标 Muika 的 time_tick prompt 不写入 recent_turns）。
+
+        history：可选历史快照（agent 主动发言只给最近 N 条精简上下文，降
+        token）；None 时用完整 self.history（与原有行为一致）。
         """
+        # LLM 并发信号量：用户对话 / agent 主动 / 弹幕回复共用，防止同时
+        # 发起多个 LLM 请求（本地 GPU 显存打满 / 远程 API 限流）
+        async with self._llm_semaphore:
+            async for item in self._chat_stream_inner(user_text, proactive=proactive, history=history):
+                yield item
+
+    async def _chat_stream_inner(self, user_text: str, *, proactive: bool,
+                                 history: Optional[list]) -> AsyncGenerator[str, None]:
+        """chat_stream 实际实现体（信号量外），保持原有逻辑不变。"""
         tracker = PerfTracker("LLM")
         tracker.begin("首字延迟")     # 从调用到第一个 content chunk
         tracker.begin("总生成")       # 整个流程（含工具调用）耗时
@@ -588,11 +748,24 @@ class LLMBrain:
                     "\n\n### 检索到的记忆（segments / files，按相关度排序）\n"
                     + mem_ctx
                 )
+        # 注入观众画像（进化引擎复盘的长期事实，关键词召回补充向量记忆）
+        profile_section = self._profile_section(user_text)
+        if profile_section:
+            sys_content += "\n\n" + profile_section
         # 注入技能段（严格参照 Muika agent.py：系统提示 = 人设 + Available skills 段）。
         # 只列技能名+描述（轻量），完整指令由 load_skill 工具按需加载。
         skills_section = get_skill_manager().render_prompt_section()
         if skills_section:
             sys_content += "\n\n" + skills_section
+        # 注入生效中的话术建议（进化引擎沉淀，到期由复盘回评续期/移除）
+        advice_section = self._active_advice_section()
+        if advice_section:
+            sys_content += "\n\n" + advice_section
+        # 注入 GEPA 进化策略段（对标 hermes 的 GEPA：变异 → 评审择优落盘，
+        # 与话术建议互补——策略是长期行为准则，建议是短期话术优化）
+        policy_section = self._policy_section()
+        if policy_section:
+            sys_content += "\n\n" + policy_section
         messages: List[dict] = [{"role": "system", "content": sys_content}]
         # 注入早期对话摘要（历史裁剪时后台压缩生成，跨会话继承）
         summary = self._consume_summary()
@@ -601,11 +774,24 @@ class LLMBrain:
                 "role": "system",
                 "content": f"【早期对话摘要（以下为被压缩掉的更早对话内容）】{summary}",
             })
-        messages.extend(self.history)
+        # agent 主动发言：只带精简历史快照（最近 N 条），降低 token 消耗
+        messages.extend(history if history is not None else self.history)
         messages.append({"role": "user", "content": user_text})
 
         # 每轮对话实时合并一次工具列表（对标 live-2d(2) getMergedToolsList，不缓存）
         tools = self._get_tools()
+
+        # 模型路由进化：本轮按 UCB1 选择要用的 LLM 服务（未启用时均为
+        # None → 沿用 self.client / LLM_MODEL，与原有行为完全一致）
+        route_name = None
+        route_client = None
+        route_model = None
+        if self.router is not None:
+            route_name = self.router.select()
+            if route_name is not None:
+                route_client = self.router.client_for(route_name)
+                service = self.router.service(route_name)
+                route_model = (service or {}).get("model") or None
 
         loop = asyncio.get_running_loop()
         iteration = 0            # 工具调用轮数（含空响应催促轮）
@@ -628,22 +814,29 @@ class LLMBrain:
                 nonlocal _first_content
 
                 def _create():
-                    """发起一次带 tools 的流式请求。thinking 字段不被支持时自动降级重试。"""
-                    nonlocal extra_body
-                    kwargs = dict(
-                        model=self.cfg.LLM_MODEL,
-                        messages=self._clean_messages_for_api(messages),
-                        stream=True,
-                        max_tokens=2048,
-                        temperature=0.95,
-                    )
-                    if tools:
-                        kwargs["tools"] = tools
-                    try:
+                    """发起一次带 tools 的流式请求。thinking 字段不被支持时
+                    自动降级重试；路由服务整体不可用时回退默认 LLM 服务重试一次。"""
+                    nonlocal extra_body, route_name, route_client, route_model
+                    client = route_client or self.client
+                    model = route_model or self.cfg.LLM_MODEL
+
+                    def _send():
+                        kwargs = dict(
+                            model=model,
+                            messages=self._clean_messages_for_api(messages),
+                            stream=True,
+                            max_tokens=2048,
+                            temperature=0.95,
+                        )
+                        if tools:
+                            kwargs["tools"] = tools
                         if extra_body is not None:
-                            return self.client.chat.completions.create(
+                            return client.chat.completions.create(
                                 **kwargs, extra_body=extra_body)
-                        return self.client.chat.completions.create(**kwargs)
+                        return client.chat.completions.create(**kwargs)
+
+                    try:
+                        return _send()
                     except Exception as e:
                         # 429 是服务端限流不是 thinking 不支持，不能走降级分支
                         # （否则会把 429 误判成「不支持 thinking」打误导警告）
@@ -654,7 +847,26 @@ class LLMBrain:
                             raise
                         console.warn("LLM 服务不支持 thinking 参数，降级为普通模式")
                         extra_body = None
-                        return self.client.chat.completions.create(**kwargs)
+                        try:
+                            return _send()
+                        except Exception as e2:
+                            from openai import RateLimitError
+                            if isinstance(e2, RateLimitError) or "429" in str(e2):
+                                raise
+                            # 路由服务整体不可用 → 记录失败并回退默认服务重试
+                            # （route_name 清空后成功路径不再误记到该服务头上）
+                            if route_name is not None:
+                                self.router.record(route_name, False)
+                                console.warn(
+                                    f"[模型路由] 服务 {route_name!r} 不可用，"
+                                    "回退默认 LLM 服务重试")
+                                route_name = None
+                                route_client = None
+                                route_model = None
+                                client = self.client
+                                model = self.cfg.LLM_MODEL
+                                return _send()
+                            raise
 
                 def _push(content: str) -> None:
                     """把 content 增量推回主循环（记录首字延迟）。"""
@@ -717,7 +929,14 @@ class LLMBrain:
                         try:
                             extra_body = {"thinking": {"type": "enabled"
                                                        if self.cfg.LLM_THINKING else "disabled"}}
+                            _drain_start = time.perf_counter()
                             _drain(_create())
+                            # 路由服务调用成功 → 记录奖励与耗时（供 UCB1 择优）；
+                            # route_name 已被回退清空时不记录（成功属于默认服务）
+                            if route_name is not None:
+                                self.router.record(
+                                    route_name, True,
+                                    time.perf_counter() - _drain_start)
                             break
                         except Exception as e:
                             from openai import RateLimitError
@@ -886,8 +1105,24 @@ class LLMBrain:
         # assistant+tool_calls + tool 响应都进历史，跨轮保留上下文）=====
         if final_reply is not None:
             messages.append({"role": "assistant", "content": final_reply})
-        # 丢弃 system（每轮按最新记忆重建），其余完整保留
-        self.history = messages[1:]
+        if history is not None:
+            # 用快照发起的请求（agent 主动发言）：只把本轮新产出的消息并入
+            # 真实历史，不能整体替换——否则被精简掉的早期轮次会丢失
+            new_parts = messages[1 + len(history):]
+            self.history = self.history + [
+                m for m in new_parts
+                if not (m.get("role") == "user"
+                        and m.get("content") == user_text)
+            ]
+        else:
+            # 丢弃 system（每轮按最新记忆重建），其余完整保留
+            self.history = messages[1:]
+            if proactive:
+                # 主动发言：剔除注入的内部指令 user 消息（不冒充用户发言），
+                # 保留 assistant 回复以维持上下文连贯
+                self.history = [m for m in self.history
+                                if not (m.get("role") == "user"
+                                        and m.get("content") == user_text)]
         # 工具结果历史摘要化（对标 NagaAgent「消除历史污染」）：
         # 跨轮次历史中的 tool 消息只保留结果摘要（截断超长 JSON），
         # 防 token 污染；本轮内 messages 保持完整，不影响多轮工具调用链。
@@ -896,12 +1131,6 @@ class LLMBrain:
             if m.get("role") == "tool" else m
             for m in self.history
         ]
-        if proactive:
-            # 主动发言：剔除注入的内部指令 user 消息（不冒充用户发言），
-            # 保留 assistant 回复以维持上下文连贯
-            self.history = [m for m in self.history
-                            if not (m.get("role") == "user"
-                                    and m.get("content") == user_text)]
         max_messages = self.cfg.HISTORY_ROUNDS * 2
         if len(self.history) > max_messages:
             dropped = self.history[: len(self.history) - max_messages]

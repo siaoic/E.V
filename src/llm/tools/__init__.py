@@ -28,6 +28,7 @@ from src.llm.tools.time import _get_current_time
 from src.llm.tools.weather import _get_weather
 from src.llm.tools.skill_loader import _load_skill, _read_skill_resource
 from src.llm.tools.memory_tools import _remember_fact, _forget_memory
+from src.llm.tools.screen import _look_at_screen
 
 __all__ = [
     "get_merged_tools",
@@ -50,6 +51,7 @@ _LOCAL_REGISTRY = {
     "read_skill_resource": _read_skill_resource,
     "remember_fact": _remember_fact,
     "forget_memory": _forget_memory,
+    "look_at_screen": _look_at_screen,
 }
 
 
@@ -93,6 +95,9 @@ def get_merged_tools(mcp=None) -> List[dict]:
     if config.cfg.MEMORY_ENABLED:
         available_names.add("remember_fact")
         available_names.add("forget_memory")
+    # 屏幕视觉（截屏 + 多模态描述），不依赖外部 key
+    if config.cfg.TOOL_LOOK_SCREEN_ENABLED:
+        available_names.add("look_at_screen")
 
     # MCP 已提供 Tavily 官方搜索（tavily-search/tavily-extract）时，
     # 隐藏本地 web_search，避免两个搜索工具让 LLM 选择混乱（对标 Tavily MCP 文档）
@@ -149,4 +154,6 @@ def get_local_tool_names() -> List[str]:
     if config.cfg.MEMORY_ENABLED:
         names.add("remember_fact")
         names.add("forget_memory")
+    if config.cfg.TOOL_LOOK_SCREEN_ENABLED:
+        names.add("look_at_screen")
     return sorted(names)

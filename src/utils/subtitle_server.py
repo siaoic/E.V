@@ -1,242 +1,297 @@
-"""字幕网页服务器：SSE 流推送（与 TTS 引擎的字级时间戳字幕一致）。
+"""VTube 模式网页在线字幕服务器（参考桌宠模式 BubbleSub 接口设计）。
 
-浏览器打开 http://127.0.0.1:8765/ 即可看到虚拟主播的字幕：
-- AI 回复按「字级时间戳」逐字浮现（由 TTS 引擎驱动，对齐语音，非前端估速）
-- 历史记录向上滚动（小字号）
-- 状态栏显示连接状态（自动重连）
+提供 HTTP + SSE 的轻量 Web 字幕层：
+- 浏览器打开 http://127.0.0.1:{port}/ 即可看到透明字幕层
+- push("text", text) 推送字幕累积文本（打字机效果）
+- push("clear", "") 清除字幕并触发淡出
+- push("user", text) 用户/观众发言（弹幕、键盘输入），单独一行展示并自动淡出
+- 字幕持续显示，直到 push("clear", "") 触发淡出（回复结束才隐藏，句间不闪烁）
 
-实现：ThreadingHTTPServer（标准库），两个端点：
-- GET /        → 字幕网页（HTML + JS 直接显示 + EventSource）
-- GET /events  → SSE 流（text/event-stream），广播 {type, text} 消息
-
-与 engine.py 一致：引擎每推进一个字级时间戳，就 push 一次「累积到当前字的
-整句文本」，前端直接替换显示——逐字浮现完全由真实音频时间戳驱动，
-前端不做估算打字机。
-
-用法：
-    server = SubtitleServer().start()
-    server.push("text", "你好呀～")   # 累积文本（每字推进推送一次）
-    server.push("user", "在吗")      # 用户输入
-    server.stop()
+字体：
+- 中文：字魂布丁体（src/utils/字魂布丁体(商用需授权).ttf）
+- 英文：ArtierEN-2（src/utils/ArtierEN-2.ttf）
+@font-face + unicode-range 按字符自动分流。
 """
 
-import json
 import os
 import threading
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
-from typing import List, Optional
+from queue import Empty, Queue
+from typing import Callable, Optional
 
-from src.utils import console
-
-# 默认端口，可用环境变量 SUBTITLE_PORT 覆盖
-_PORT = int(os.getenv("SUBTITLE_PORT", "8765"))
-
-# SSE 心跳间隔（秒，防止代理/浏览器断开空闲连接）
-_HEARTBEAT_S = 15
-# 历史记录保留条数（新连接先收到历史再接收实时）
-_MAX_HISTORY = 200
-
-# 字幕字体：与服务器同目录的 ArtierEN-2.ttf（缺失时回退系统字体，不影响功能）
-_FONT_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "ArtierEN-2.ttf")
-_FONT_BYTES: bytes | None = None
-try:
-    with open(_FONT_PATH, "rb") as _f:
-        _FONT_BYTES = _f.read()
-except OSError:
-    _FONT_BYTES = None
-
-_HTML = """<!DOCTYPE html>
-<html lang="zh">
-<head>
-<meta charset="UTF-8">
-<meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>AI 虚拟主播字幕</title>
-<style>
-  @font-face {
-    font-family: 'ArtierEN';
-    src: url('/font.ttf') format('truetype');
-    font-display: swap;
-  }
-  :root { --accent:#58a6ff; }
-  * { box-sizing: border-box; }
-  /* 透明背景：可直接叠加在 OBS/直播画面上；白字+黑描边保证任意背景可读 */
-  body { background:transparent; color:#ffffff;
-         font-family:'ArtierEN','Microsoft YaHei','PingFang SC',sans-serif;
-         margin:0; min-height:100vh; display:flex; align-items:center; justify-content:center;
-         padding:48px; }
-  .stage { width:100%; max-width:1100px; text-align:center; }
-  .subtitle { font-size:46px; line-height:1.7; font-weight:600; min-height:1.7em;
-              text-shadow:0 2px 10px rgba(0,0,0,.75), 0 0 4px rgba(0,0,0,.6);
-              word-break:break-all; }
-</style>
-</head>
-<body>
-  <div class="stage">
-    <div class="subtitle" id="subtitle"></div>
-  </div>
-
-<script>
-  const es = new EventSource('/events');
-  const subtitle = document.getElementById('subtitle');
-
-  es.onmessage = (e) => {
-    let msg;
-    try { msg = JSON.parse(e.data); } catch { return; }
-    if (msg.type === 'clear') {
-      // 收到清除指令 → 立即清空字幕
-      subtitle.textContent = '';
-      return;
-    }
-    // 只显示 AI 正在说的那句，忽略用户输入
-    if (msg.type === 'text') {
-      // 字级时间戳驱动：TTS 引擎每推进一个字，就推送「累积到当前字的整句文本」，
-      // 前端直接替换显示即可（逐字浮现的节奏由真实音频时间戳决定，前端不估速）。
-      subtitle.textContent = msg.text;
-    }
-  };
-</script>
-</body>
-</html>
-"""
+from src.utils import config, console
 
 
-class _Handler(BaseHTTPRequestHandler):
-    """字幕页面 + SSE 流。"""
+# 中文字体文件（项目根路径）
+_FONT_CN_NAME = "字魂布丁体(商用需授权).ttf"
+_FONT_EN_NAME = "ArtierEN-2.ttf"
 
-    def __init__(self, server: "SubtitleServer", *args, **kwargs) -> None:
-        self.sub = server
-        super().__init__(*args, **kwargs)
+# 字幕页面文件（与本文件同目录）
+_HTML_NAME = "字幕.html"
 
-    # 关闭默认访问日志（避免刷屏）
-    def log_message(self, fmt: str, *args) -> None:
-        pass
+# 默认端口：与弹幕服务 8766 错开
+_DEFAULT_PORT = 8765
 
-    def handle(self) -> None:
-        """浏览器可能在请求中途断开（刷新/关闭标签页/取消字体下载），
-        静默忽略，避免 socketserver 线程打印 traceback 刷屏。"""
-        try:
-            super().handle()
-        except Exception:
-            pass
 
-    def do_GET(self) -> None:
-        if self.path == "/" or self.path == "/index.html":
-            self._serve_page()
-        elif self.path == "/events":
-            self._serve_events()
-        elif self.path == "/font.ttf":
-            self._serve_font()
-        else:
-            self.send_error(404)
+def _font_dir() -> str:
+    """字体文件目录：src/utils/（与本文件同目录）。"""
+    return os.path.dirname(os.path.abspath(__file__))
 
-    def _serve_font(self) -> None:
-        """返回 ArtierEN-2.ttf 字体文件（@font-face 引用）。"""
-        if not _FONT_BYTES:
-            self.send_error(404)
-            return
-        self.send_response(200)
-        self.send_header("Content-Type", "font/ttf")
-        self.send_header("Content-Length", str(len(_FONT_BYTES)))
-        self.send_header("Cache-Control", "public, max-age=86400")
-        self.end_headers()
-        self.wfile.write(_FONT_BYTES)
 
-    def _serve_page(self) -> None:
-        body = _HTML.encode("utf-8")
-        self.send_response(200)
-        self.send_header("Content-Type", "text/html; charset=utf-8")
+def _html_path() -> str:
+    """字幕页面文件路径：ui/字幕.html（网页资源统一放在项目 ui/ 目录）。"""
+    return os.path.join(config.cfg.PROJECT_ROOT, "ui", _HTML_NAME)
+
+
+def _font_cn_path() -> str:
+    return os.path.join(_font_dir(), _FONT_CN_NAME)
+
+
+def _font_en_path() -> str:
+    return os.path.join(_font_dir(), _FONT_EN_NAME)
+
+
+# ----------------------------- 同步 SSE 广播管理（threading.Queue） -----------------------------
+
+class _SSEBroker:
+    """简易 SSE 广播：任意线程 push → 所有连接的浏览器收到。"""
+
+    def __init__(self) -> None:
+        self._lock = threading.Lock()
+        self._queues: list[Queue] = []
+
+    def attach(self) -> Queue:
+        q: Queue = Queue(maxsize=64)
+        with self._lock:
+            self._queues.append(q)
+        return q
+
+    def detach(self, q: Queue) -> None:
+        with self._lock:
+            try:
+                self._queues.remove(q)
+            except ValueError:
+                pass
+
+    def broadcast(self, data: str, event: str = "message") -> None:
+        """跨线程安全：把 SSE 帧写入每路连接的队列。"""
+        msg = f"event: {event}\ndata: {data}\n\n"
+        with self._lock:
+            queues = list(self._queues)
+        for q in queues:
+            try:
+                q.put_nowait(msg)
+            except Exception:
+                # 队列满（浏览器卡死不读）→ 直接忽略，不阻塞广播
+                pass
+
+
+# ----------------------------- 页面：字幕.html（独立文件） -----------------------------
+# 字幕页面已抽离为 ui/字幕.html，按需从磁盘读取（改样式无需重启服务）。
+
+
+# ----------------------------- HTTP Request Handler -----------------------------
+
+class _SubtitleHandler(BaseHTTPRequestHandler):
+    """HTTP 请求路由：/ 返回 HTML、/events 返回 SSE、/font/*.ttf 返回字体。"""
+
+    server_version = "EVSubtitle/1.0"
+
+    # 静态共享：由 SubtitleServer 启动时注入
+    broker: Optional[_SSEBroker] = None
+    font_cn: bytes = b""
+    font_en: bytes = b""
+
+    # ---------- 工具：简化响应 ----------
+
+    def _send(self, status: int, body: bytes, content_type: str) -> None:
+        self.send_response(status)
+        self.send_header("Content-Type", content_type)
         self.send_header("Content-Length", str(len(body)))
-        # 禁止缓存：避免浏览器加载旧版页面（如残留的"已连接"状态栏）
-        self.send_header("Cache-Control", "no-store, no-cache, must-revalidate")
-        self.send_header("Pragma", "no-cache")
-        self.send_header("Expires", "0")
+        self.send_header("Cache-Control", "no-store")
         self.end_headers()
-        self.wfile.write(body)
+        if body:
+            self.wfile.write(body)
 
-    def _serve_events(self) -> None:
-        """SSE：先发历史，再实时推送；15s 心跳保活。"""
+    def _not_found(self) -> None:
+        self._send(404, b"Not Found", "text/plain; charset=utf-8")
+
+    # ---------- SSE ----------
+
+    def _do_events(self) -> None:
+        broker = _SubtitleHandler.broker
+        if broker is None:
+            self._not_found()
+            return
         self.send_response(200)
         self.send_header("Content-Type", "text/event-stream; charset=utf-8")
         self.send_header("Cache-Control", "no-cache")
         self.send_header("Connection", "keep-alive")
+        self.send_header("Access-Control-Allow-Origin", "*")
         self.end_headers()
-
+        q: Optional[Queue] = None
         try:
-            idx = 0  # 历史游标
-            with self.sub._cond:
-                while True:
-                    # 1) 推送所有新消息
-                    while idx < len(self.sub._history):
-                        msg = self.sub._history[idx]
-                        idx += 1
-                        self.wfile.write(
-                            f"data: {json.dumps(msg, ensure_ascii=False)}\n\n".encode("utf-8"))
+            q = broker.attach()
+            # 初始心跳（SSE 规范：注释帧保持连接）
+            try:
+                self.wfile.write(b": connected\n\n")
+                self.wfile.flush()
+            except Exception:
+                return
+            # 循环读取队列：阻塞 2s 超时 → 发注释帧保活；异常/断开 → 退出
+            while True:
+                try:
+                    msg = q.get(timeout=2.0)
+                except Empty:
+                    try:
+                        self.wfile.write(b": ping\n\n")
                         self.wfile.flush()
-                    # 2) 心跳保活（等待新消息或超时）
-                    self.sub._cond.wait(timeout=_HEARTBEAT_S)
-                    self.wfile.write(b": ping\n\n")
+                        continue
+                    except Exception:
+                        return
+                try:
+                    self.wfile.write(msg.encode("utf-8"))
                     self.wfile.flush()
-        except (BrokenPipeError, ConnectionResetError, ConnectionAbortedError):
-            pass  # 浏览器断开，正常结束
+                except Exception:
+                    # 浏览器断开连接（wfile 写失败）
+                    return
         except Exception:
             pass
+        finally:
+            if q is not None and broker is not None:
+                broker.detach(q)
 
+    # ---------- 路由分发 ----------
+
+    def do_GET(self) -> None:  # noqa: N802 (HTTP 方法命名)
+        path = (self.path or "").split("?", 1)[0]
+        if path == "/" or path == "/index.html":
+            # 每次请求从磁盘读取，改样式/JS 刷新即生效，无需重启服务
+            try:
+                with open(_html_path(), "rb") as f:
+                    body = f.read()
+            except OSError:
+                body = f"未找到字幕页面：{_HTML_NAME}".encode("utf-8")
+            self._send(200, body, "text/html; charset=utf-8")
+        elif path == "/events":
+            self._do_events()
+        elif path == "/font/cn.ttf":
+            if _SubtitleHandler.font_cn:
+                self._send(200, _SubtitleHandler.font_cn, "font/ttf")
+            else:
+                self._not_found()
+        elif path == "/font/en.ttf":
+            if _SubtitleHandler.font_en:
+                self._send(200, _SubtitleHandler.font_en, "font/ttf")
+            else:
+                self._not_found()
+        else:
+            self._not_found()
+
+    def log_message(self, format, *args) -> None:  # noqa: A002 (基类签名)
+        # 静默：不打印请求日志，避免刷屏
+        return
+
+
+# ----------------------------- 对外 SubtitleServer -----------------------------
 
 class SubtitleServer:
-    """后台线程运行的字幕服务器（线程安全 push）。"""
+    """VTube 模式网页字幕层（与桌宠模式 BubbleSub 接口对齐）。
 
-    def __init__(self, port: int = _PORT) -> None:
-        self.port = port
-        self._cond = threading.Condition()
-        self._history: List[dict] = []
-        self._httpd: ThreadingHTTPServer = None
-        self._thread: threading.Thread = None
+    用法：
+        sub = SubtitleServer().start()
+        sub.push("text", spoken_text)   # 打字机累积显示
+        sub.push("clear", "")           # 对话结束：2.5 秒后淡出
+        sub.stop()                      # 进程退出前清理
+    """
+
+    def __init__(self) -> None:
+        self.port: int = _DEFAULT_PORT
+        self._httpd: Optional[ThreadingHTTPServer] = None
+        self._th: Optional[threading.Thread] = None
+        self._broker = _SSEBroker()
+        self._last_text: str = ""
+
+    # ---------- 生命周期 ----------
 
     def start(self) -> "SubtitleServer":
-        handler = lambda *a, **kw: _Handler(self, *a, **kw)
-        self._httpd = ThreadingHTTPServer(("127.0.0.1", self.port), handler)
-        self._thread = threading.Thread(target=self._httpd.serve_forever, daemon=True)
-        self._thread.start()
-        console.info(f"字幕网页已启动：http://127.0.0.1:{self.port}/")
+        """启动 HTTP 服务器（绑定成功后返回 self，port 属性可用）。"""
+        # 预加载字体（二进制，避免请求时重复读文件）
+        for path, attr, name in [
+            (_font_cn_path(), "font_cn", _FONT_CN_NAME),
+            (_font_en_path(), "font_en", _FONT_EN_NAME),
+        ]:
+            if os.path.isfile(path):
+                try:
+                    with open(path, "rb") as f:
+                        setattr(_SubtitleHandler, attr, f.read())
+                except Exception as e:
+                    console.warn(f"字幕字体 {name} 读取失败：{e}")
+            else:
+                console.warn(f"字幕字体 {name} 不存在：{path}")
+        _SubtitleHandler.broker = self._broker
+
+        # 尝试绑定：默认端口 +1 递增，最多试 16 次
+        last_err = None
+        for offset in range(16):
+            port = _DEFAULT_PORT + offset
+            try:
+                self._httpd = ThreadingHTTPServer(
+                    ("127.0.0.1", port), _SubtitleHandler)
+                self.port = port
+                break
+            except OSError as e:
+                last_err = e
+                self._httpd = None
+        if self._httpd is None:
+            console.warn(f"字幕服务器启动失败：{last_err}")
+            return self
+
+        def _serve():
+            try:
+                self._httpd.serve_forever(poll_interval=0.5)
+            except Exception:
+                pass
+
+        self._th = threading.Thread(target=_serve, name="SubtitleServer", daemon=True)
+        self._th.start()
         return self
 
-    def push(self, type_: str, text: str, speed_ms: Optional[int] = None) -> None:
-        """推送一条字幕消息。
-
-        type_=text（AI 回复）/ user（用户输入，前端忽略）。
-        与 engine.py 字级时间戳字幕一致：引擎每推进一个字调用一次
-        push("text", <累积文本>)，前端直接替换显示——逐字浮现由真实
-        音频时间戳驱动。speed_ms 参数仅保留兼容（前端不再用于估速打字机）。
-        """
-        text = (text or "").strip()
-        if not text:
-            return
-        msg = {"type": type_, "text": text}
-        if speed_ms:
-            msg["speed_ms"] = int(speed_ms)
-        with self._cond:
-            self._history.append(msg)
-            if len(self._history) > _MAX_HISTORY:
-                del self._history[:-_MAX_HISTORY]
-            self._cond.notify_all()
-
     def stop(self) -> None:
-        if self._httpd:
+        """停止 HTTP 服务器（进程退出 finally 统一调用）。"""
+        if self._httpd is not None:
             try:
                 self._httpd.shutdown()
             except Exception:
                 pass
             self._httpd = None
-        if self._thread:
-            self._thread.join(timeout=2)
-            self._thread = None
+        self._broker = _SSEBroker()  # 丢弃旧连接
+        _SubtitleHandler.broker = None
 
+    # ---------- 字幕接口（与 BubbleSub 对齐） ----------
 
-if __name__ == "__main__":
-    import time
-    s = SubtitleServer().start()
-    print("推送测试：打开 http://127.0.0.1:%d/ 观察打字机效果" % s.port)
-    s.push("user", "测试：你好！")
-    s.push("text", "大家好呀，欢迎来到我的直播间！这是字幕打字机效果演示。")
-    time.sleep(30)
-    s.stop()
+    def push(self, kind: str, text: str = "", speed_ms: int = 0) -> None:
+        """推送字幕事件（任意线程安全）。
+
+        kind:
+          - "text": 累积字幕文本（打字机效果），sent = 新显示的整句
+          - "user": 用户/观众发言（弹幕、键盘输入），单独一行展示并自动淡出
+          - "clear": 清除（对话结束，浏览器端淡出隐藏）
+        """
+        if kind == "clear":
+            # 广播空事件：浏览器端保留文字并触发 CSS 淡出（不立即清空，过渡更平滑）
+            self._broker.broadcast("", event="clear")
+            self._last_text = ""
+            return
+        if kind == "user":
+            # 观众弹幕 / 键盘输入：浏览器端单独一行展示（不干扰 AI 字幕行）
+            t = str(text or "")
+            if t:
+                self._broker.broadcast(t, event="user")
+            return
+        if kind == "text":
+            t = str(text or "")
+            self._last_text = t
+            self._broker.broadcast(t, event="text")
+            return
+        # 未知类型忽略

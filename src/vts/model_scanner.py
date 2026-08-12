@@ -15,6 +15,9 @@ LLM 通过 [参数:名称=数值] 指令直接控制跟踪参数来驱动表情�
 不再依赖模型内置表情预设或热键。"""
 
 import asyncio
+import json
+import os
+import winreg
 from dataclasses import dataclass, field
 from typing import Dict, List, Optional, Set, Tuple
 
@@ -26,6 +29,138 @@ EYE_PARAMS = ("EyeOpenLeft", "EyeOpenRight")
 # 微表情扰动可用参数
 MICRO_PARAMS = ("MouthSmile", "BrowLeftY", "BrowRightY", "FaceAngleZ")
 # （身体左右摇摆不再由本模块合成，由动作文件直接驱动，相关校准代码已移除）
+
+# VTube Studio 相对 Steam 库的安装子路径
+_VTS_STEAM_REL = os.path.join("steamapps", "common", "VTube Studio")
+
+
+def _find_vts_root(cfg) -> str:
+    """定位 VTube Studio 安装根目录：VTS_ROOT 配置优先，其次 Steam 注册表。
+
+    待机动画接管需要读取模型配置文件（官方 API 不返回模型文件路径），
+    这里只做文件定位，不发送任何非官方消息。找不到时返回 ""（跳过接管）。
+    """
+    if getattr(cfg, "VTS_ROOT", ""):
+        return cfg.VTS_ROOT
+    try:
+        with winreg.OpenKey(winreg.HKEY_CURRENT_USER,
+                            r"Software\Valve\Steam") as key:
+            steam_path = winreg.QueryValueEx(key, "SteamPath")[0]
+        candidate = os.path.join(steam_path, _VTS_STEAM_REL)
+        if os.path.isdir(candidate):
+            return candidate
+    except OSError:
+        pass
+    return ""
+
+
+async def locate_model_folder(vts: VTSController, cfg) -> str:
+    """定位当前 VTS 模型文件夹的绝对路径（官方 API 不暴露模型文件路径）。
+
+    定位方式：
+    1. 定位 VTube Studio 安装目录（VTS_ROOT 配置或 Steam 注册表）
+    2. VTSFolderInfoRequest 取模型目录名（如 Live2DModels）
+    3. 按 CurrentModelRequest 的 vtsModelName 定位模型文件夹
+
+    任一步失败返回 ""，调用方跳过（不影响原有流程）。
+    供待机动画接管（resolve_idle_motion）与表情/动作文件夹扫描
+    （VtsEmotionActor）复用。
+    """
+    vts_root = _find_vts_root(cfg)
+    if not vts_root:
+        console.dim("未定位到 VTube Studio 安装目录"
+                    "（可配置 VTS_ROOT），跳过模型文件夹扫描")
+        return ""
+    models_dir = (await vts.get_folder_info()).get("models", "") or ""
+    if not models_dir:
+        console.dim("VTSFolderInfoRequest 未返回模型目录，跳过模型文件夹扫描")
+        return ""
+    vts_model_name = (await vts.get_current_model()).get("vtsModelName", "") or ""
+    if not vts_model_name:
+        console.dim("未取得 vtsModelName，跳过模型文件夹扫描")
+        return ""
+
+    root = os.path.join(vts_root, "VTube Studio_Data",
+                        "StreamingAssets", models_dir)
+    if not os.path.isdir(root):
+        console.dim(f"模型目录不存在 {root}，跳过模型文件夹扫描")
+        return ""
+    for entry in os.listdir(root):
+        candidate = os.path.join(root, entry)
+        if os.path.isfile(os.path.join(candidate, vts_model_name)):
+            return candidate
+    console.dim(f"模型目录下未找到 {vts_model_name}，跳过模型文件夹扫描")
+    return ""
+
+
+async def resolve_idle_motion(vts: VTSController, cfg) -> str:
+    """解析当前模型在 VTS 中配置的待机动画文件（供循环接管）。
+
+    VTS 内置待机动画（P1）循环到尾帧后直接硬跳回首帧，官方 API 无淡入淡出
+    接口可修。本函数返回该待机动画的绝对路径，由 FaceDriver 改走插件注入
+    路径播放（P2 优先级高于 P1），循环点由 MotionPlayer 平滑混合。
+
+    仅当文件存在且 Meta.Loop=true（循环播放才有跳变问题）时返回绝对路径；
+    任一步失败返回 ""，调用方跳过接管，不影响原有流程。
+    """
+    model_folder = await locate_model_folder(vts, cfg)
+    if not model_folder:
+        console.dim("待机动画接管：模型文件夹定位失败，跳过")
+        return ""
+
+    vts_model_name = (await vts.get_current_model()).get("vtsModelName", "") or ""
+    if not vts_model_name:
+        console.dim("待机动画接管：未取得 vtsModelName，跳过")
+        return ""
+    try:
+        with open(os.path.join(model_folder, vts_model_name),
+                  "r", encoding="utf-8") as f:
+            vtube_cfg = json.load(f)
+    except Exception as e:
+        console.dim(f"待机动画接管：读取 {vts_model_name} 失败（{e}），跳过")
+        return ""
+    idle_name = (vtube_cfg.get("FileReferences", {})
+                 .get("IdleAnimation") or "").strip()
+    if not idle_name:
+        console.dim("待机动画接管：模型未配置待机动画，跳过")
+        return ""
+    # VTS 模型设置里待机动画可直接选模型文件夹任意子目录下的文件，
+    # 存的是文件名（如 def.motion3.json），需在模型文件夹内递归同名定位
+    idle_path = os.path.join(model_folder, idle_name)
+    if not os.path.isfile(idle_path):
+        idle_path = ""
+        for _base, _dirs, _files in os.walk(model_folder):
+            if idle_name in _files:
+                idle_path = os.path.join(_base, idle_name)
+                break
+    if not idle_path:
+        console.dim(f"待机动画接管：模型文件夹内未找到 {idle_name}，跳过")
+        return ""
+
+    # 仅接管循环待机动画：Loop=false 时 VTS 播放一次即停，无循环跳变问题
+    try:
+        with open(idle_path, "r", encoding="utf-8") as f:
+            motion_meta = json.load(f).get("Meta", {})
+    except Exception as e:
+        console.dim(f"待机动画接管：读取 {idle_name} 失败（{e}），跳过")
+        return ""
+    if not motion_meta.get("Loop", False):
+        console.dim(f"待机动画接管：{idle_name} 非循环动画，跳过")
+        return ""
+    idle_path = os.path.normpath(idle_path)
+    # 文件级无缝化：在待机动画末尾追加首尾过渡段（改前自动备份 .bak），
+    # 让 VTS 原生播放待机动画时循环点自然。插件注入只能覆盖少量标准参数，
+    # 而动画主体（Live2D 自定义参数）由 VTS 原生播放——文件无缝化才能消除
+    # 循环点跳变。幂等（文件已无缝则跳过）；失败不影响接管，按原文件播放。
+    try:
+        from src.vts.motion_player import make_seamless
+        if make_seamless(idle_path):
+            console.dim("待机动画已无缝化：循环点跳变已消除"
+                        "（原文件备份为 .bak，需在 VTS 重载模型生效）")
+    except Exception as e:
+        console.dim(f"待机动画无缝化失败（{e}），按原文件播放")
+    console.info(f"待机动画接管：{idle_path}")
+    return idle_path
 
 
 @dataclass
@@ -42,6 +177,7 @@ class ModelProfile:
     micro_params: Set[str] = field(default_factory=set)      # 微表情扰动可用参数
     sway_drivers: List[Tuple[str, float]] = field(default_factory=list)  # 摇摆驱动[(参数,系数)]
     face_angle_range: float = 1.0                    # FaceAngleY 输入参数范围（呼吸注入上限）
+    idle_motion: str = ""                            # 待机动画文件绝对路径（循环接管用）
 
 
 async def _read_params(vts: VTSController, names: Set[str]) -> Dict[str, float]:
@@ -260,6 +396,12 @@ async def scan_model(vts: VTSController, cfg) -> ModelProfile:
 
     # 6) 参数列表输出
     console.kv("可用参数", f"{len(profile.input_params)} 个输入 tracking 参数")
+
+    # 7) 待机动画接管解析（消除 VTS 待机动画循环点尾帧→首帧硬跳）
+    if getattr(cfg, "VTS_IDLE_TAKEOVER", True):
+        profile.idle_motion = await resolve_idle_motion(vts, cfg)
+        if profile.idle_motion:
+            console.kv("待机动画", os.path.basename(profile.idle_motion))
 
     # 复位眼部参数，从干净基线开始运行
     await vts.inject_parameters(
