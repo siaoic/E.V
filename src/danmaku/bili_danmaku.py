@@ -40,12 +40,18 @@ _HEARTBEAT_S = 15      # SSE 心跳（秒）
 _MAX_HISTORY = 20      # SSE 历史缓存条数
 _RECONNECT_S = 5       # 客户端异常退出后的重建间隔（秒）
 _AVATAR_CACHE_MAX = 1000   # 头像缓存条数上限
+_DEDUP_WINDOW_S = 300      # 相同弹幕去重窗口（秒）：窗口内同内容只展示/回复一次
+_RECENT_DANMAKU_MAX = 500  # 相同弹幕去重缓存条数上限（防无限膨胀）
 
 _UA = ("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
        "(KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36")
 
 # 脏话过滤器（data/profanity.txt，7 万词，惰性加载一次）
 _PROFANITY_FILTER: "ProfanityFilter | None" = None
+
+# 相同弹幕去重缓存：text → 最近一次展示时间戳。
+# 仅弹幕事件循环线程读写（无并发）；重连后 handler 重建但缓存保留。
+_RECENT_DANMAKU: "OrderedDict[str, float]" = OrderedDict()
 
 
 def _get_profanity_filter() -> ProfanityFilter:
@@ -304,6 +310,16 @@ class _BiliDanmakuHandler(blivedm.BaseHandler):
         # 表情包弹幕：内容为占位文本
         if message.dm_type == 1 and message.emoticon_options_dict.get("url"):
             text = f"[表情] {text}"
+        # 相同弹幕去重：去重窗口内（_DEDUP_WINDOW_S 秒）同内容只展示/回复一次，
+        # 防刷屏（"666"、"主播唱首歌"连刷）导致弹幕墙刷屏、AI 重复回复
+        now = time.time()
+        last = _RECENT_DANMAKU.get(text)
+        if last is not None and now - last < _DEDUP_WINDOW_S:
+            return
+        _RECENT_DANMAKU[text] = now
+        _RECENT_DANMAKU.move_to_end(text)
+        if len(_RECENT_DANMAKU) > _RECENT_DANMAKU_MAX:
+            _RECENT_DANMAKU.popitem(last=False)
         uid = message.uid or 0
         uname = message.uname or "匿名"
         avatar = message.face or self._avatars.get(uid)

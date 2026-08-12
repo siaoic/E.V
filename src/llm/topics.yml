@@ -1537,3 +1537,35 @@ topics:
   - comparison
   - respect
   cooldown_minutes: 3
+- id: learned_dcd6fea5
+  category: learned
+  concept: 全屏弹幕互动体验设计
+  tags:
+  - live_stream
+  - audience_engagement
+  - visual_design
+  cooldown_minutes: 3
+- id: learned_21e5a473
+  category: learned
+  concept: CS游戏回归观众心理安抚
+  tags:
+  - gaming_narrative
+  - viewer_retention
+  - community_building
+  cooldown_minutes: 3
+- id: learned_f5708eda
+  category: learned
+  concept: 虚拟主播的幽默互动方式
+  tags:
+  - humor
+  - interaction
+  - stream
+  cooldown_minutes: 3
+- id: learned_46778b82
+  category: learned
+  concept: 观众对主播身份的期待与反馈
+  tags:
+  - identity
+  - audience
+  - stream
+  cooldown_minutes: 3

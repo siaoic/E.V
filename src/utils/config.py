@@ -257,9 +257,10 @@ class Config:
 
     # ===== 自我进化（对话后后台复盘：技能沉淀/话题进化/行为反思/话术建议） =====
     EVOLUTION_ENABLED: bool = _get_bool("EVOLUTION_ENABLED", True)
-    # 复盘最小间隔（秒）与最小新增对话轮次：达标才调用 LLM 复盘，控制成本
+    # 复盘最小间隔（秒）与最小新增对话轮次：达标才调用 LLM 复盘，控制成本。
+    # 轮数阈值对标 hermes memory.nudge_interval（默认每 10 轮触发一次记忆复盘）
     EVOLUTION_MIN_INTERVAL: int = int(os.getenv("EVOLUTION_MIN_INTERVAL", "600"))
-    EVOLUTION_MIN_TURNS: int = int(os.getenv("EVOLUTION_MIN_TURNS", "5"))
+    EVOLUTION_MIN_TURNS: int = int(os.getenv("EVOLUTION_MIN_TURNS", "10"))
     # 定期自我提示：后台每 EVOLUTION_PERIODIC_INTERVAL 秒检查一次，空闲期
     # 主动补复盘（对标 hermes 定期自我评估）。仅当距上次复盘已达标且存在
     # 未复盘的新对话轮次时才调用 LLM，不重复消费 token。
@@ -467,7 +468,7 @@ def reload_tool_runtime() -> None:
     cfg.TOOL_LOOK_SCREEN_ENABLED = _get_bool("TOOL_LOOK_SCREEN_ENABLED", True)
     cfg.EVOLUTION_ENABLED = _get_bool("EVOLUTION_ENABLED", True)
     cfg.EVOLUTION_MIN_INTERVAL = int(os.getenv("EVOLUTION_MIN_INTERVAL", "600"))
-    cfg.EVOLUTION_MIN_TURNS = int(os.getenv("EVOLUTION_MIN_TURNS", "5"))
+    cfg.EVOLUTION_MIN_TURNS = int(os.getenv("EVOLUTION_MIN_TURNS", "10"))
     cfg.EVOLUTION_EVAL_ENABLED = _get_bool("EVOLUTION_EVAL_ENABLED", True)
     cfg.EVOLUTION_EVAL_CASES = max(
         1, min(int(os.getenv("EVOLUTION_EVAL_CASES", "2")), 3))
