@@ -10,8 +10,12 @@ import logging
 import os
 import random
 from datetime import datetime
+from typing import Optional
 
 from src.utils import config, console
+from src.utils.constants import (
+    ROLE_AI_ALIAS, SOURCE_DANMAKU_INPUT, SOURCE_DANMAKU_REPLY,
+)
 
 # 压制 httpx/openai 客户端的 HTTP 请求 INFO 日志（噪音）
 logging.getLogger("httpx").setLevel(logging.WARNING)
@@ -21,6 +25,7 @@ logging.getLogger("openai").setLevel(logging.WARNING)
 from src.memory import memory
 from src.llm import stream
 from src.utils.content_filter import ProfanityFilter
+from src.utils.safe_text import sanitize_external
 from src.llm.agent import ButlerAgent
 from src.llm.evolution import EvolutionEngine
 from src.mcp.manager import MCPManager
@@ -65,8 +70,8 @@ class Application:
                 await self.evolution.periodic_tick(
                     self.mm.recent_turns if self.mm is not None else [],
                     proactive=self.proactive)
-            except Exception:
-                pass
+            except Exception as e:
+                console.dim(f"[自我进化] 周期任务出错（不影响运行）：{e}")
 
     # ---------- 记忆自动整合蒸馏 ----------
 
@@ -265,6 +270,10 @@ class Application:
         「主动播完立刻又接弹幕」的连续开口。
         """
         cfg = self.cfg
+        # 外部不可信文本（弹幕/昵称）先净化：防 prompt 注入标签与控制字符
+        # 进入 LLM prompt / 记忆库 / 前端展示（见 src/utils/safe_text.py）
+        items = [(uid, sanitize_external(nick) or "匿名", sanitize_external(t))
+                 for uid, nick, t in items]
         # 主弹幕：picker 已按分数降序排列，items[0] 为最高分那条，用于展示/记忆归位
         uid, username, text = items[0]
         extra = len(items) - 1
@@ -346,8 +355,9 @@ class Application:
                 prev_turns = self.mm.recent_turns[:]
                 for nick, t in _turn_pairs:
                     self.mm.add_turn("user", f"[弹幕@{nick}] {t}",
-                                     source="danmaku_input")
-                self.mm.add_turn("muika", reply_text, source="danmaku_reply")
+                                     source=SOURCE_DANMAKU_INPUT)
+                self.mm.add_turn(ROLE_AI_ALIAS, reply_text,
+                                 source=SOURCE_DANMAKU_REPLY)
                 user_msgs = [{"role": "user",
                               "content": f"[弹幕@{nick}] {t}"}
                              for nick, t in _turn_pairs]
@@ -429,13 +439,13 @@ class Application:
                 self.danmaku_picker.stop()
                 from src.danmaku.bili_danmaku import set_danmaku_picker
                 set_danmaku_picker(None)
-            except Exception:
-                pass
+            except Exception as e:
+                console.dim(f"[弹幕] 挑选器停止失败（不影响整体退出）：{e}")
         if self.bili_svc is not None:
             try:
                 self.bili_svc.stop()
-            except Exception:
-                pass
+            except Exception as e:
+                console.dim(f"[弹幕] 服务停止失败（不影响整体退出）：{e}")
         if self.danmaku_reply_task is not None and not self.danmaku_reply_task.done():
             self.danmaku_reply_task.cancel()
             cancel_coro = self.danmaku_reply_task
@@ -671,9 +681,31 @@ class Application:
 
     # ---------- _dispatch 命令注册表 handler ----------
 
+    def _validate_cmd_path(self, raw: str) -> Optional[str]:
+        """控制中心路径命令白名单：解析后必须位于项目根目录内，防目录穿越。
+
+        返回规范化后的安全绝对路径；路径为空、越界（../ 逃逸、跨盘符）
+        或非法时返回 None。项目内模型/TTS 参考音频均在项目目录下，
+        正常用法不受影响。
+        """
+        if not raw or not raw.strip():
+            return None
+        try:
+            base = os.path.abspath(self.cfg.PROJECT_ROOT)
+            target = os.path.abspath(os.path.join(base, raw))
+            if os.path.commonpath([base, target]) == base:
+                return target
+        except ValueError:
+            # 跨盘符（如 base 在 C:、target 在 D:）commonpath 抛异常
+            pass
+        return None
+
     async def _cmd_model(self, cmd: str) -> bool:
         """!model <path> 桌宠模式热切换模型。"""
         new_path = cmd[len("!model "):].strip()
+        if self._validate_cmd_path(new_path) is None:
+            console.error(f"非法模型路径（仅允许项目目录内）：{new_path}")
+            return True
         if self.pet_widget is not None:
             if self.pet_widget.switch_model(new_path):
                 console.ok(f"已热切换桌宠模型：{new_path}")
@@ -811,6 +843,10 @@ class Application:
         if self.tts is None:
             return True
         new_audio = cmd[len("!tts_audio "):].strip()
+        # 空串 = 清空参考音频（合法）；非空须在项目目录内
+        if new_audio and self._validate_cmd_path(new_audio) is None:
+            console.error(f"非法音频路径（仅允许项目目录内）：{new_audio}")
+            return True
         self.tts.apply_ref(new_audio, self.tts.ref_text)
         if new_audio:
             console.ok(f"已热更新 TTS 参考音频：{new_audio}")
@@ -833,6 +869,12 @@ class Application:
         if self.tts is None:
             return True
         new_extras = cmd[len("!tts_audios "):].strip()
+        # 空串 = 清空辅助参考（合法）；非空时逐条校验须在项目目录内
+        if new_extras and any(
+                self._validate_cmd_path(p) is None
+                for p in new_extras.split("|")):
+            console.error("非法辅助音频路径（仅允许项目目录内），已忽略本次更新")
+            return True
         self.tts.apply_ref_extras(new_extras)
         console.ok(f"已热更新 TTS 辅助参考音频：{new_extras}")
         return True
@@ -1249,7 +1291,7 @@ class Application:
                                 return
                             try:
                                 self.mm.add_turn("user", _turn_user, source="user_input")
-                                self.mm.add_turn("muika", reply_text,
+                                self.mm.add_turn(ROLE_AI_ALIAS, reply_text,
                                                  source="main_llm_reply")
                                 await self.butler.submit_extract_and_store(
                                     [{"role": "user", "content": _turn_user},

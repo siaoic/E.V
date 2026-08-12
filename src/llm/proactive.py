@@ -40,6 +40,7 @@ from typing import Dict, List, Optional, Tuple
 import yaml
 
 from src.utils import console
+from src.utils.constants import ROLE_AI_ALIAS, SOURCE_PROACTIVE
 from src.llm import stream
 from src.core.output_lock import (
     STATE_AGENT_THINKING, STATE_AI_SPEAKING, STATE_IDLE,
@@ -390,7 +391,8 @@ class ProactiveEngine:
                             self.mm.recent_turns if self.mm is not None else None,
                         )
                     if self.mm is not None:
-                        self.mm.add_turn("muika", text, source="proactive")
+                        self.mm.add_turn(ROLE_AI_ALIAS, text,
+                                         source=SOURCE_PROACTIVE)
                 except Exception:
                     pass
 

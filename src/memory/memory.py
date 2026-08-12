@@ -75,6 +75,9 @@ def _ensure_memu_path() -> None:
 _ensure_memu_path()
 
 from src.utils import config, console  # noqa: E402
+from src.utils.constants import (
+    ROLE_ASSISTANT, ROLE_AI_ALIAS, SOURCE_DANMAKU_INPUT,
+)
 
 
 # ---------- 进程内加速：内存向量索引 / 文件池 / 嵌入 LRU ----------
@@ -520,7 +523,7 @@ class MemoryManager:
         """
         owner = (
             _USER_SELF
-            if str(role).strip().lower() in ("assistant", "muika")
+            if str(role).strip().lower() in (ROLE_ASSISTANT, ROLE_AI_ALIAS)
             else (user or _USER_DEFAULT)
         )
         with self._turns_lock:
@@ -573,18 +576,18 @@ class MemoryManager:
                 from sqlmodel import Session, select
                 model = service.database._sqla_models.RecallFile
                 with Session(service.database._sessions.engine) as session:
-                    rows = session.exec(select(model)).all()
-                for row in rows:
-                    files.append({
-                        "id": row.id,
-                        "name": row.name or "",
-                        "description": row.description or "",
-                        "content": row.content or "",
-                        "user": getattr(row, "user", None) or _USER_DEFAULT,
-                        "track": row.track or "memory",
-                        "created_at": str(row.created_at) if row.created_at else None,
-                        "updated_at": str(row.updated_at) if row.updated_at else None,
-                    })
+                    # yield_per 分批流式读取：避免记忆库增长后全表实例化进内存
+                    for row in session.exec(select(model)).yield_per(1000):
+                        files.append({
+                            "id": row.id,
+                            "name": row.name or "",
+                            "description": row.description or "",
+                            "content": row.content or "",
+                            "user": getattr(row, "user", None) or _USER_DEFAULT,
+                            "track": row.track or "memory",
+                            "created_at": str(row.created_at) if row.created_at else None,
+                            "updated_at": str(row.updated_at) if row.updated_at else None,
+                        })
             except Exception:
                 for owner in (_USER_DEFAULT, _USER_SELF):
                     rows = service.database.recall_file_repo.list_recall_files(
@@ -1239,9 +1242,9 @@ def format_turns_text(turns: list[dict]) -> str:
         if not content:
             continue
         role = str(t.get("role") or "").strip().lower()
-        if role in ("assistant", "muika"):
+        if role in (ROLE_ASSISTANT, ROLE_AI_ALIAS):
             speaker = "AI"
-        elif t.get("source") == "danmaku_input" or content.startswith("[弹幕@"):
+        elif t.get("source") == SOURCE_DANMAKU_INPUT or content.startswith("[弹幕@"):
             speaker = "观众"
         else:
             speaker = "主播"

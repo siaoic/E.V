@@ -22,6 +22,7 @@ from openai import AsyncOpenAI
 
 from src.memory import memory
 from src.utils import config, console
+from src.utils.constants import ROLE_ASSISTANT, ROLE_AI_ALIAS
 
 # 提取的系统提示（要求纯 JSON 输出 + 五元组结构化，便于图谱按实体着色）。
 # 同时提取双方事实：对方（用户）的信息 + AI 自己表达的观点/承诺/自我认知，
@@ -573,7 +574,7 @@ def _pick_owner(recent_turns: list[dict] | None, new_turns: list[dict] | None) -
     source = new_turns or recent_turns or []
     for turn in reversed(source):
         role = str(turn.get("role") or "").lower()
-        if role not in ("assistant", "muika"):
+        if role not in (ROLE_ASSISTANT, ROLE_AI_ALIAS):
             content = str(turn.get("content") or "")
             m = re.match(r"^\[弹幕@([^\]]+)\]", content)
             if m:
