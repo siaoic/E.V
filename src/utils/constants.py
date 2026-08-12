@@ -6,8 +6,8 @@
 """
 
 # 对话角色标识（写入记忆 recent_turns 的 role 字段）
-ROLE_ASSISTANT = "assistant"  # AI 正式角色名
-ROLE_AI_ALIAS = "muika"       # AI 别名（直播人格名），与 assistant 等价
+ROLE_ASSISTANT = "Neuro"  # AI 正式角色名
+ROLE_AI_ALIAS = "Neuro sama"       # AI 别名（直播人格名），与 assistant 等价
 
 # 记忆轮次来源标记（add_turn 的 source 参数）
 SOURCE_DANMAKU_INPUT = "danmaku_input"  # 弹幕输入（观众发言）

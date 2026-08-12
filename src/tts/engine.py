@@ -1,6 +1,6 @@
 """TTS 引擎：本地加载 GSV-TTS-Lite 模型（进程内推理）+ 无缝播放 + 词级时间戳字幕。
 
-严格参考 GSV-TTS-Lite-main/API/test_async_performance.py 的用法：
+严格参考 gsv-tts/API/test_async_performance.py 的用法：
 - 直接实例化 gsv_tts.TTS（models_dir + gpt_cache + sovits_cache），进程内批量
   推理，不再连接外部 GPT-SoVITS HTTP 服务端（移除官方 api_v2.py 流式客户端）；
 - LLM 产句积攒成批后调用 infer_batched_async 批量合成，返回与输入同序的
@@ -62,7 +62,7 @@ _CUT_MUTE_SCALE_MAP = {
 }
 
 # gsv_tts 包目录 / 默认模型目录（相对项目根；模型目录可被 GPTSOVITS_MODELS_DIR 覆盖）
-_GSV_TTS_DIR = "GSV-TTS-Lite-main"
+_GSV_TTS_DIR = "gsv-tts"
 _MODELS_DIR_REL = os.path.join(_GSV_TTS_DIR, "API", "models")
 
 # 本地播放入队块长（秒）：整段音频按固定时长分块，块间由设备缓冲衔接无缝播放。
@@ -284,7 +284,7 @@ class TTSEngine:
             getattr(_config.cfg, "GPTSOVITS_REF_AUDIOS", "") or "").strip()
         self.ref_text = str(
             getattr(_config.cfg, "GPTSOVITS_PROMPT_TEXT", "") or "").strip()
-        # 本地模型目录：GPTSOVITS_MODELS_DIR 可覆盖，缺省 GSV-TTS-Lite-main/API/models
+        # 本地模型目录：GPTSOVITS_MODELS_DIR 可覆盖，缺省 gsv-tts/API/models
         models_dir = str(
             getattr(_config.cfg, "GPTSOVITS_MODELS_DIR", "") or "").strip()
         if models_dir and not os.path.isabs(models_dir):

@@ -1,7 +1,7 @@
-"""vtuber 记忆层：基于 memU 引擎（src/memory/memU-main）的全新封装。
+"""vtuber 记忆层：基于 memU 引擎（src/memory/memu）的全新封装。
 
 memU 只负责存储与向量检索（三入口：list_all_recall_files /
-progressive_retrieve / commit_results，见 memU-main/AGENTS.md），
+progressive_retrieve / commit_results，见 memu/AGENTS.md），
 本模块在其上补充 vtuber 特有的会话态与记忆维护：
 
 - 会话轮次：add_turn / recent_turns / started_at / new_session
@@ -63,7 +63,7 @@ _GRAPH_DEBOUNCE_MS = 500
 
 # ---------- memU 引擎路径注入（顶层执行，惰性 import 由使用时触发） ----------
 
-_MEMU_SRC = os.path.join(os.path.dirname(os.path.abspath(__file__)), "memU-main", "src")
+_MEMU_SRC = os.path.join(os.path.dirname(os.path.abspath(__file__)), "memu", "src")
 
 
 def _ensure_memu_path() -> None:

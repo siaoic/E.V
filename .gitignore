@@ -1,37 +1,85 @@
-# 敏感配置与运行时产物
+# ================= 敏感配置与运行时产物 =================
 .env
 data/vts_token.json
 data/emotion_embedding_cache.npz
 
-# 运行时记忆库 / 日志 / 本地 venv（runtime 为 python 虚拟环境，6万+文件不入库）
+# ================= 运行时记忆库 / 日志 / 本地 venv =================
+# runtime 为 python 虚拟环境，6万+文件不入库
 data/
 1.txt
 runtime/
+temp/
+probe_result.txt
+*.log
 
-# IDE
+# ================= IDE / 编辑器 =================
 .idea/
+.vscode/
+.trae/
+.vs/
+*.suo
 
-# 大文件与安装包（torch whl、memU 源码压缩包，均不入库）
+# ================= Python 缓存与测试产物 =================
+__pycache__/
+*.py[co]
+*.egg-info/
+.pytest_cache/
+.coverage
+htmlcov/
+
+# ================= 虚拟环境 =================
+venv/
+env/
+.venv/
+
+# ================= 大文件与安装包（torch whl、memU 源码压缩包） =================
 *.whl
 src/memory/memU-main.zip
 
-# TTS 本地模型（体积巨大，不入库，需自行下载/拷贝）
-gsv_tts/API/models/
+# ================= TTS 本地模型（体积巨大，不入库，需自行下载/拷贝） =================
+# 注意：实际模型目录在 gsv-tts/API/models 下（旧条目 gsv_tts/API/models/ 已失效）
+gsv-tts/API/models/
 
-# 临时目录
-temp/
-probe_result.txt
-
-# Python
-__pycache__/
-*.pyc
-
-# 临时 TTS 音频（GPT-SoVITS 为 wav，edge 为 mp3）
+# ================= 临时 TTS 音频（GPT-SoVITS 为 wav，edge 为 mp3） =================
 vtuber_tts_*
 
-# 桌宠模式本地依赖（pip --target 安装，避免污染系统环境）
+# ================= 桌宠模式本地依赖（pip --target 安装，避免污染系统环境） =================
 vendor_pet/
 
-# IDE / 工具
-.trae/
-.vscode/
+# ================= PyInstaller 桌面端打包产物 =================
+build/
+dist/
+ControlCenter.spec
+
+# ================= 本地调试 / 研究垃圾（不入库） =================
+# 临时抓取/研究资料
+/2/
+# 根目录架构审查文档 / 本机路径启动脚本
+/E.V.txt
+/llamacpp启动.bat
+# assets/ 下的调试玩具（图片转 ASCII 脚本及产物；assets/ 目录本身保留，用于字体查找）
+assets/1.py
+assets/ascii_art.txt
+assets/block_pic.txt
+assets/girl_box.png
+assets/preview.html
+assets/IMG_*.png
+# 第三方参考源码与资料（Muice-Chatbot-main、neurosama-perspective 等）
+docs/references/
+
+# ================= 大体积 Live2D 模型（保留本地不入库，需要时 git add -f 强制提交） =================
+live2d/【免费版】悠小喵/
+live2d/阿芙洛狄忒模型文件/
+
+# ================= memU 源码库（仅保留 src/memu 运行包 + LICENSE.txt + AGENTS.md） =================
+# 其余为库本身的开发期文件，防止重新解压/拷贝时再次误提交
+src/memory/memu/*
+!src/memory/memu/src/
+!src/memory/memu/LICENSE.txt
+!src/memory/memu/AGENTS.md
+
+# ================= 通用 =================
+.DS_Store
+*.tmp
+*.bak
+*~

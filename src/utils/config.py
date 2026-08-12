@@ -219,7 +219,7 @@ class Config:
     GPTSOVITS_PROMPT_TEXT: str = os.getenv(
         "GPTSOVITS_PROMPT_TEXT", "")
     GPTSOVITS_TIMEOUT: float = float(os.getenv("GPTSOVITS_TIMEOUT", "120"))
-    # 本地 TTS 模型目录（GSV-TTS-Lite 的 models_dir；留空 = GSV-TTS-Lite-main/API/models）
+    # 本地 TTS 模型目录（GSV-TTS-Lite 的 models_dir；留空 = gsv-tts/API/models）
     GPTSOVITS_MODELS_DIR: str = os.getenv("GPTSOVITS_MODELS_DIR", "")
 
     # ===== 内容过滤 =====
