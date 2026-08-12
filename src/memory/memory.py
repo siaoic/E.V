@@ -106,14 +106,20 @@ class _SegmentIndex:
     储时已 L2 归一化（`cosine = a·b`），search 时 query 也归一化后
     做一次矩阵乘 + argpartition topk，没有 Python 循环。
 
+    并发模型：
+    - 写路径（mark_dirty / rebuild）持 _lock，互斥；
+    - 读路径（search）锁内快照 (matrix, ids, file_ids, users, texts) 后立即
+      释放锁，再做矩阵乘等耗时计算，不阻塞其它 retrieve。
+
     - rebuild(segments, file_user_map): 从 `list_segments()` 重建
     - search(query_vec, k, user_filter) -> [(seg_id, score, file_id, text), ...]
     - mark_dirty() / is_dirty(): 写入路径标脏，下次 retrieve 前重建
     """
 
-    __slots__ = ("_dirty", "_matrix", "_ids", "_file_ids", "_users", "_texts")
+    __slots__ = ("_lock", "_dirty", "_matrix", "_ids", "_file_ids", "_users", "_texts")
 
     def __init__(self) -> None:
+        self._lock = threading.RLock()
         self._dirty = True
         self._matrix = None  # np.ndarray | None
         self._ids: list[str] = []
@@ -122,16 +128,20 @@ class _SegmentIndex:
         self._texts: list[str] = []
 
     def is_dirty(self) -> bool:
-        return self._dirty
+        with self._lock:
+            return self._dirty
 
     def mark_dirty(self) -> None:
-        self._dirty = True
+        with self._lock:
+            self._dirty = True
 
     def is_ready(self) -> bool:
-        return not self._dirty and self._matrix is not None
+        with self._lock:
+            return not self._dirty and self._matrix is not None
 
     def size(self) -> int:
-        return 0 if self._matrix is None else int(self._matrix.shape[0])
+        with self._lock:
+            return 0 if self._matrix is None else int(self._matrix.shape[0])
 
     def rebuild(self, segments: list, file_user_map: dict[str, str]) -> None:
         """从 `list_segments()` 全表结果重建。
@@ -161,14 +171,16 @@ class _SegmentIndex:
             users.append(owner)
             texts.append(seg.text or "")
         if vecs:
-            self._matrix = np.vstack(vecs).astype(np.float32, copy=False)
+            new_matrix = np.vstack(vecs).astype(np.float32, copy=False)
         else:
-            self._matrix = None
-        self._ids = ids
-        self._file_ids = file_ids
-        self._users = users
-        self._texts = texts
-        self._dirty = False
+            new_matrix = None
+        with self._lock:
+            self._matrix = new_matrix
+            self._ids = ids
+            self._file_ids = file_ids
+            self._users = users
+            self._texts = texts
+            self._dirty = False
 
     def search(
         self,
@@ -180,8 +192,17 @@ class _SegmentIndex:
 
         返回 [(seg_id, score, file_id, text), ...]，按 score 降序。
         user_filter 非空时按 segment 的 user 字段过滤（按 file 归属）。
+
+        锁内仅做"快照 5 个列表/矩阵引用"的 O(1) 操作，立刻释放；
+        锁外的 numpy 计算不阻塞其它 retrieve。
         """
-        if k <= 0 or self._matrix is None or self._matrix.shape[0] == 0:
+        with self._lock:
+            matrix = self._matrix
+            ids = self._ids
+            file_ids = self._file_ids
+            users = self._users
+            texts = self._texts
+        if k <= 0 or matrix is None or matrix.shape[0] == 0:
             return []
         try:
             np = _np()
@@ -191,10 +212,10 @@ class _SegmentIndex:
                 return []
             q = q / qn
 
-            n = int(self._matrix.shape[0])
+            n = int(matrix.shape[0])
             if user_filter:
                 mask = np.fromiter(
-                    (u in user_filter for u in self._users),
+                    (u in user_filter for u in users),
                     dtype=bool,
                     count=n,
                 )
@@ -202,7 +223,7 @@ class _SegmentIndex:
                 mask = np.ones(n, dtype=bool)
             if not bool(mask.any()):
                 return []
-            sub = self._matrix[mask]
+            sub = matrix[mask]
             scores = sub @ q
             actual_k = min(k, int(scores.shape[0]))
             # argpartition O(n) 选 topk，再对 topk 做 sort 拿降序
@@ -213,7 +234,7 @@ class _SegmentIndex:
             for i in top:
                 gi = int(global_idx[i])
                 out.append(
-                    (self._ids[gi], float(scores[i]), self._file_ids[gi], self._texts[gi])
+                    (ids[gi], float(scores[i]), file_ids[gi], texts[gi])
                 )
             return out
         except Exception:
@@ -805,9 +826,11 @@ class MemoryManager:
             service.database.resource_repo.clear_resources()
         self._files._files = {}
         self._files._content_by_owner = {}
-        self._index._matrix = None
-        self._index._ids = self._index._file_ids = self._index._users = self._index._texts = []
-        self._index._dirty = False
+        # 持 _index._lock 串行写，避免与 search() 锁内快照读到的旧引用冲突
+        with self._index._lock:
+            self._index._matrix = None
+            self._index._ids = self._index._file_ids = self._index._users = self._index._texts = []
+            self._index._dirty = False
         export_graph_data()
 
     def remember_explicit(self, key: str, value: str) -> None:
@@ -1121,16 +1144,21 @@ def _flush_graph_export() -> str | None:
 # ---------- 内部工具 ----------
 
 def _run_sync(coro):
-    """在同步上下文执行协程（无运行 loop 直接跑；有则放入线程池）。"""
+    """在同步上下文执行协程。
+
+    关键：永远不要在线程里新建 event_loop 后 run_until_complete 一个会
+    跨线程通讯的协程（行为不可预期）。已有 loop 时丢到默认线程池，
+    由 worker 线程里的 asyncio.run 跑。
+    """
     try:
         asyncio.get_running_loop()
     except RuntimeError:
+        # 没有运行 loop → 直接 run（仅主线程同步工具调用路径）
         return asyncio.run(coro)
-    loop = asyncio.new_event_loop()
-    try:
-        return loop.run_until_complete(coro)
-    finally:
-        loop.close()
+    # 已有 loop：把协程丢到默认 executor
+    import concurrent.futures
+    with concurrent.futures.ThreadPoolExecutor(max_workers=1) as ex:
+        return ex.submit(asyncio.run, coro).result(timeout=60)
 
 
 def _to_utc(value) -> datetime:

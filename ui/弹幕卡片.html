@@ -536,7 +536,7 @@
         function setStatus(connected) {
             if (connected) {
                 statusDot.className = 'status-dot ok';
-                statusText.textContent = '已连接直播间';
+                statusText.textContent = '已连接直播间' + (ROOM_ID ? ' ' + ROOM_ID : '');
             } else {
                 statusDot.className = 'status-dot bad';
                 statusText.textContent = '弹幕未连接';
@@ -641,9 +641,12 @@
         }
 
         // ----- SSE 接入 (完全保留) -----
+        // 多房间：页面 URL 带 ?room_id=X 时订阅指定房间，否则默认主房间
+        const ROOM_ID = new URLSearchParams(location.search).get('room_id') || '';
+        const ROOM_QUERY = ROOM_ID ? ('?room_id=' + encodeURIComponent(ROOM_ID)) : '';
         const SSE_URL = (location.protocol === 'file:')
-            ? 'http://127.0.0.1:8766/events'
-            : '/events';
+            ? 'http://127.0.0.1:8766/events' + ROOM_QUERY
+            : '/events' + ROOM_QUERY;
 
         function connectSSE() {
             const es = new EventSource(SSE_URL);

@@ -1,8 +1,13 @@
-"""web_search 工具：Tavily 直调（AI 摘要前置 + 详细结果，可直接朗读中文）。"""
+"""web_search 工具：Tavily 直调（AI 摘要前置 + 详细结果，可直接朗读中文）。
+
+外部内容防御：搜索结果/AI 摘要都会先过 sanitize_external 再回灌 LLM，
+防止被注入 <system> 之类的 prompt-injection 标签污染上下文。
+"""
 
 import httpx
 
 from src.utils import config
+from src.utils.safe_text import sanitize_external
 
 _TAVILY_URL = "https://api.tavily.com/search"
 
@@ -36,20 +41,21 @@ async def _web_search(query: str) -> str:
     parts = []
     ai_answer = data.get("answer")
     if ai_answer:
-        parts.append(f"AI答案摘要：{ai_answer}")
+        # AI 摘要同样来自外部，过一遍 sanitize 防注入
+        parts.append(f"AI答案摘要：{sanitize_external(ai_answer)}")
         parts.append("")
 
     results = data.get("results") or []
     if results:
         parts.append("详细搜索结果：")
         for i, result in enumerate(results, 1):
-            title = result.get("title") or "无标题"
-            content = result.get("content") or "无内容"
+            title = sanitize_external(result.get("title") or "无标题")
+            content = sanitize_external(result.get("content") or "无内容")
             url = result.get("url") or "无来源"
             published = result.get("published_date") or ""
             date_str = f"（发布于 {published}）" if published else ""
             parts.append(f"{i}. 标题：{title}{date_str}")
-            parts.append(f"   内容：{content[:1500]}{'...' if len(content) > 1500 else ''}")
+            parts.append(f"   内容：{content}{'...' if len(content) >= 1500 else ''}")
             parts.append(f"   来源：{url}")
             parts.append("")
     else:

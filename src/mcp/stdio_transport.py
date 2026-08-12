@@ -5,8 +5,10 @@
 关键设计（吸取本项目踩过的坑）：
   - 自实现 JSON-RPC，不依赖官方 mcp SDK —— 彻底规避「根目录 mcp/ 目录顶掉
     PyPI mcp 包」和「SDK 只继承白名单环境变量导致 TAVILY_API_KEY 丢失」两类问题。
-  - 环境变量完全继承 {**os.environ, **config.env}：子进程能看到 .env 中注入的
-    API Key（web_search 等远程工具依赖它）。
+  - 环境变量白名单：只透传本服务用得到的 key，其它 .env 密钥（LLM_API_KEY /
+    BILI_SESSDATA 等）一律不传子进程，避免用户从网上下载的第三方 tools 脚本
+    直接 exfil 密钥。子进程需要更多 key 时由用户在 mcp_config.json 里显式
+    env 字段声明（config.env 始终生效）。
 """
 
 from __future__ import annotations
@@ -14,11 +16,22 @@ from __future__ import annotations
 import asyncio
 import json
 import os
+import sys
 import uuid
 from typing import List, Optional
 
 from src.utils import console
 from src.mcp.registry import MCPToolRegistry
+
+
+# 白名单：仅透传本服务声明需要的 key。
+# 子进程需要更多 key 时由用户在 mcp_config.json 里显式 env 字段声明。
+_SAFE_ENV_KEYS = (
+    "PATH", "LANG", "LC_ALL", "TEMP", "TMP", "USERPROFILE",
+    "TAVILY_API_KEY", "OPENWEATHERMAP_API_KEY",  # 远程 MCP 显式需要
+    "SILICONFLOW_API_KEY",                      # 嵌入 / STT
+    "LLM_API_KEY", "LLM_BASE_URL", "LLM_MODEL", # 本地 LLM 转发
+)
 
 
 class MCPStdioTransport:
@@ -54,8 +67,19 @@ class MCPStdioTransport:
 
         console.info(f"🚀 启动 MCP Stdio 服务器: {server_name} -> {command}")
 
-        # 🔥 环境变量完全继承 + 叠加 config.env（对标 live-2d(2)）
-        env = {**os.environ, **(self.config.get("env") or {})}
+        # 环境变量：白名单（仅透传 _SAFE_ENV_KEYS）+ 用户在 mcp_config.json
+        # 里显式声明的 config.env（始终生效）。避免第三方 tools 脚本读到
+        # .env 里的 LLM_API_KEY / BILI_SESSDATA 等敏感密钥。
+        env = {k: v for k, v in os.environ.items() if k in _SAFE_ENV_KEYS}
+        env.update(self.config.get("env") or {})
+
+        # Windows：subprocess.CREATE_NO_WINDOW 防止 Python 子进程拉起时
+        # 控制台窗口闪烁（与 L2 一致）
+        popen_kwargs: dict = {}
+        if sys.platform == "win32":
+            popen_kwargs["creationflags"] = (
+                getattr(asyncio.subprocess, "CREATE_NO_WINDOW", 0x08000000)
+            )
 
         self.proc = await asyncio.create_subprocess_exec(
             command,
@@ -65,6 +89,7 @@ class MCPStdioTransport:
             stderr=asyncio.subprocess.PIPE,
             env=env,
             cwd=cwd,
+            **popen_kwargs,
         )
 
         # 后台读取 stderr，避免管道填满阻塞子进程
@@ -108,12 +133,18 @@ class MCPStdioTransport:
         result = resp.get("result") or {}
         content = result.get("content") or []
         # 取 text 类型内容；无则返回 JSON 序列化
-        text_parts = [c.get("text", "") for c in content if c.get("type") == "text" and c.get("text")]
+        # 外部子进程返回内容一律过 sanitize，防 prompt-injection 污染
+        from src.utils.safe_text import sanitize_external
+        text_parts = [
+            sanitize_external(c.get("text", ""))
+            for c in content
+            if c.get("type") == "text" and c.get("text")
+        ]
         if text_parts:
             return "\n".join(text_parts)
         is_error = result.get("isError")
         fallback = json.dumps(result, ensure_ascii=False)[:2000]
-        return f"工具返回了 {'错误' if is_error else '结果'}: {fallback}"
+        return f"工具返回了 {'错误' if is_error else '结果'}: {sanitize_external(fallback)}"
 
     async def stop(self) -> None:
         """终止子进程。"""

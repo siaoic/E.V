@@ -5,7 +5,7 @@
 
 import os
 import sys
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Optional
 
 from dotenv import load_dotenv
@@ -150,6 +150,20 @@ def _get_optional_int(key: str) -> Optional[int]:
         return int(val.strip())
     except ValueError:
         return None
+
+
+def _get_room_ids() -> list:
+    """直播间房间号列表：优先 BILI_ROOM_IDS（逗号分隔，多房间）；
+    未配置时回退 BILI_ROOM_ID（单房间，与原行为一致）；都没配返回空列表。"""
+    ids = []
+    for part in (os.getenv("BILI_ROOM_IDS") or "").split(","):
+        part = part.strip()
+        if part.isdigit() and int(part) not in ids:
+            ids.append(int(part))
+    if ids:
+        return ids
+    rid = int(os.getenv("BILI_ROOM_ID") or "0")
+    return [rid] if rid else []
 
 
 # 桌宠模型默认值：只从 live2d 文件夹探测实际存在的 .model3.json（用户指定目录）。
@@ -422,10 +436,13 @@ class Config:
     # ===== B 站直播弹幕（blivedm → SSE 弹幕气泡网页） =====
     # BILI_ENABLED：弹幕服务总开关（false 时弹幕启动.bat 不再启动服务）
     # BILI_ROOM_ID：直播间房间号（必填；0 时服务启动但弹幕不连接）
+    # BILI_ROOM_IDS：多直播间房间号（逗号分隔，如 "123,456"）；
+    #   配置后优先于 BILI_ROOM_ID，每房间独立 blivedm 连接
     # BILI_SESSDATA：建议填上；不填也可连接，但收到弹幕的用户名会打码
     # BILI_SERVER_PORT：弹幕气泡网页端口（默认 8766，与字幕 8765 区分）
     BILI_ENABLED: bool = _get_bool("BILI_ENABLED", True)
     BILI_ROOM_ID: int = int(os.getenv("BILI_ROOM_ID") or "0")
+    BILI_ROOM_IDS: list = field(default_factory=_get_room_ids)
     BILI_SESSDATA: str = os.getenv("BILI_SESSDATA") or ""
     BILI_SERVER_PORT: int = int(os.getenv("BILI_SERVER_PORT") or "8766")
 
@@ -549,5 +566,6 @@ def reload_config() -> None:
     # 直播弹幕（BILI 字段供独立弹幕服务读取，重启弹幕启动.bat 生效）
     cfg.BILI_ENABLED = _get_bool("BILI_ENABLED", True)
     cfg.BILI_ROOM_ID = int(os.getenv("BILI_ROOM_ID") or "0")
+    cfg.BILI_ROOM_IDS = _get_room_ids()
     cfg.BILI_SESSDATA = os.getenv("BILI_SESSDATA") or ""
     cfg.BILI_SERVER_PORT = int(os.getenv("BILI_SERVER_PORT") or "8766")

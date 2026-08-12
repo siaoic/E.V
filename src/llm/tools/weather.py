@@ -1,8 +1,12 @@
-"""get_weather 工具：OpenWeatherMap Geocoding 定位 + One Call 3.0 取天气。"""
+"""get_weather 工具：OpenWeatherMap Geocoding 定位 + One Call 3.0 取天气。
+
+外部内容防御：城市名/天气描述等都先过 sanitize_external 防 prompt 注入。
+"""
 
 import httpx
 
 from src.utils import config
+from src.utils.safe_text import sanitize_external
 
 _WEATHER_GEO_URL = "https://api.openweathermap.org/geo/1.0/direct"
 _WEATHER_ONECALL_URL = "https://api.openweathermap.org/data/3.0/onecall"
@@ -10,6 +14,8 @@ _WEATHER_ONECALL_URL = "https://api.openweathermap.org/data/3.0/onecall"
 
 async def _get_weather(city: str) -> str:
     """OpenWeatherMap：Geocoding 定位 + One Call 3.0 取天气。"""
+    # 城市名同样是外部输入，先 sanitize 再回灌（防用户输入里塞 <system> 等）
+    city = sanitize_external(city)
     key = config.cfg.OPENWEATHERMAP_API_KEY
     if not key:
         return "错误：未配置 OPENWEATHERMAP_API_KEY，无法查询天气。请在 .env 中填入。"
@@ -27,7 +33,9 @@ async def _get_weather(city: str) -> str:
                 return f"错误：未找到城市「{city}」，请检查城市名是否正确。"
             lat = locations[0]["lat"]
             lon = locations[0]["lon"]
-            display_name = locations[0].get("local_names", {}).get("zh", city)
+            display_name = sanitize_external(
+                locations[0].get("local_names", {}).get("zh", city)
+            )
 
             # 2) One Call 3.0
             weather_resp = await client.get(
@@ -51,7 +59,7 @@ async def _get_weather(city: str) -> str:
     feels_like = current.get("feels_like")
     humidity = current.get("humidity")
     wind = (current.get("wind_speed") or 0) * 3.6  # m/s → km/h
-    desc = (current.get("weather") or [{}])[0].get("description", "未知")
+    desc = sanitize_external((current.get("weather") or [{}])[0].get("description", "未知"))
 
     return (
         f"{display_name}当前天气：{desc}，气温 {temp:.1f}℃，体感 {feels_like:.1f}℃，"

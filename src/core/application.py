@@ -32,6 +32,7 @@ from src.tts.engine import TTSEngine
 from src.vts.controller import VTSController
 from src.utils.perf_tracker import PerfTracker
 from src.utils.subtitle_server import SubtitleServer
+from src.core.commands import Command, CommandRegistry
 from src.core.output_lock import (
     STATE_AI_SPEAKING, STATE_IDLE, STATE_USER_TALKING,
     get_output_lock, get_output_owner, set_output_owner, set_global_state,
@@ -248,8 +249,12 @@ class Application:
 
     # ---------- 弹幕回复：_chat_danmaku + 队列循环 + 启停辅助 ----------
 
-    async def _chat_danmaku(self, uid, username, text) -> None:
+    async def _chat_danmaku(self, items) -> None:
         """弹幕精选回复：走完整的 LLM→TTS→字幕→口型→记忆链路。
+
+        items: [(uid, username, text), ...]；单条弹幕 = 1 个元素（与原来完全一致），
+        多条 = 高密度批量聚合回复（"观众 A 说 X，观众 B 说 Y，你怎么看"），
+        走一次完整对话，避免逐条回复刷屏。
 
         注意：到达这里的弹幕已经过 ProfanityFilter（data/profanity.txt）过滤，
         命中词库的弹幕在 _on_danmaku 入口就被丢弃（不显示、不回复）。
@@ -260,6 +265,9 @@ class Application:
         「主动播完立刻又接弹幕」的连续开口。
         """
         cfg = self.cfg
+        # 主弹幕：picker 已按分数降序排列，items[0] 为最高分那条，用于展示/记忆归位
+        uid, username, text = items[0]
+        extra = len(items) - 1
 
         # 正在播报中（锁被占用）：丢弃本条，播放完才接受新弹幕。
         # 注意：_on_pick 已置位「弹幕回复待播报」标记，此处须按情况清除——
@@ -276,24 +284,39 @@ class Application:
         # 通过跳过检查、真正开始回复：左栏「对话」显示本条弹幕（被跳过的
         # 弹幕不显示），同时推 SSE 让前端卡片展示
         # （被跳过/未真正回复的弹幕不上卡片，只留在左侧实时流）
-        console.chat(f"精彩弹幕：{text}")
+        if extra:
+            shown = f"{text}（等{extra}条弹幕）"
+        else:
+            shown = text
+        console.chat(f"精彩弹幕：{shown}")
         if self.bili_svc is not None:
             try:
-                self.bili_svc.broadcaster.push({
+                self.bili_svc.broadcast({
                     "type": "reply",
                     "username": username,
-                    "text": text,
+                    "text": shown,
                     "uid": uid,
                 })
             except Exception:
                 pass
 
-        wrapped = (
-            f"[系统提示] 现在你在直播间，收到观众弹幕请自然地回一句。"
-            f"观众昵称：{username}，弹幕内容：\n{text}\n"
-            f"请用 stream-chat 技能的直播闲聊风格回复（先回应情绪或接话，"
-            f"一句话说完即可，不要连续追问）。"
-        )
+        if extra:
+            # 批量回复：多条弹幕并进一个 prompt，AI 合并回应（不逐条念）
+            danmaku_lines = "\n".join(
+                f"- 观众{nick}：{t}" for _, nick, t in items)
+            wrapped = (
+                f"[系统提示] 现在你在直播间，刚收到几条观众弹幕，请合并回应"
+                f"（不要逐条念，抓住共同话题自然地回一句）。\n{danmaku_lines}\n"
+                f"请用 stream-chat 技能的直播闲聊风格回复（先回应情绪或接话，"
+                f"一句话说完即可，不要连续追问）。"
+            )
+        else:
+            wrapped = (
+                f"[系统提示] 现在你在直播间，收到观众弹幕请自然地回一句。"
+                f"观众昵称：{username}，弹幕内容：\n{text}\n"
+                f"请用 stream-chat 技能的直播闲聊风格回复（先回应情绪或接话，"
+                f"一句话说完即可，不要连续追问）。"
+            )
 
         # 主动引擎：有观众说话也算"有人互动"——清 0 一下孤独/无聊
         if self.proactive is not None:
@@ -306,25 +329,32 @@ class Application:
         turn_tracker = PerfTracker(f"弹幕回复@{username}")
         turn_tracker.begin("端到端")
 
-        # 弹幕内容也推送到字幕网页（打字机气泡）
+        # 弹幕内容也推送到字幕网页（打字机气泡）：多条时合并一行
         try:
-            self.sub.push("user", f"@{username}：{text}")
+            self.sub.push("user", " ｜ ".join(
+                f"@{nick}：{t}" for _, nick, t in items))
         except Exception:
             pass
 
-        _turn_user = text
+        _turn_pairs = [(nick, t) for _, nick, t in items]
 
         async def _on_llm_done(reply_text: str) -> None:
             if not (cfg.MEMORY_ENABLED and self.butler and self.mm):
                 return
             try:
-                self.mm.add_turn("user", f"[弹幕@{username}] {_turn_user}",
-                                 source="danmaku_input")
+                # 先取快照：避免把本次新增的弹幕轮次混进上下文
+                prev_turns = self.mm.recent_turns[:]
+                for nick, t in _turn_pairs:
+                    self.mm.add_turn("user", f"[弹幕@{nick}] {t}",
+                                     source="danmaku_input")
                 self.mm.add_turn("muika", reply_text, source="danmaku_reply")
+                user_msgs = [{"role": "user",
+                              "content": f"[弹幕@{nick}] {t}"}
+                             for nick, t in _turn_pairs]
                 await self.butler.submit_extract_and_store(
-                    [{"role": "user", "content": f"[弹幕@{username}] {_turn_user}"},
-                     {"role": "assistant", "content": reply_text}],
-                    self.mm.recent_turns[:-2],
+                    user_msgs + [{"role": "assistant",
+                                  "content": reply_text}],
+                    prev_turns,
                 )
             except Exception as e:
                 console.dim(f"[ButlerAgent] 弹幕记忆提取出错：{e}")
@@ -381,11 +411,11 @@ class Application:
         turn_tracker.print_report()
 
     async def _danmaku_reply_loop(self, q) -> None:
-        """后台协程：从弹幕队列取精选，走 _chat_danmaku 完整对话链路。"""
+        """后台协程：从弹幕队列取精选（单条或批量），走 _chat_danmaku 完整对话链路。"""
         while True:
             try:
-                uid, username, text = await q.get()
-                await self._chat_danmaku(uid=uid, username=username, text=text)
+                items = await q.get()
+                await self._chat_danmaku(items)
             except asyncio.CancelledError:
                 raise
             except Exception as e:
@@ -412,15 +442,18 @@ class Application:
         return cancel_coro
 
     async def _start_bili(self):
-        """启动 B 站弹幕服务 + DanmakuPicker + 回复协程。"""
+        """启动 B 站弹幕服务（多房间）+ DanmakuPicker + 回复协程。"""
         cfg = self.cfg
-        if not (cfg.BILI_ENABLED and cfg.BILI_ROOM_ID):
-            if cfg.BILI_ENABLED and not cfg.BILI_ROOM_ID:
-                console.dim("[弹幕] BILI_ENABLED=true 但 BILI_ROOM_ID=0，不启用弹幕精选回复")
+        room_ids = cfg.BILI_ROOM_IDS or (
+            [cfg.BILI_ROOM_ID] if cfg.BILI_ROOM_ID else [])
+        if not (cfg.BILI_ENABLED and room_ids):
+            if cfg.BILI_ENABLED and not room_ids:
+                console.dim("[弹幕] BILI_ENABLED=true 但未配置房间号"
+                            "（BILI_ROOM_ID/BILI_ROOM_IDS），不启用弹幕精选回复")
             return None, None, None
         try:
             from src.danmaku.bili_danmaku import (
-                BiliDanmakuService, DanmakuPicker, set_danmaku_picker,
+                BiliServiceManager, DanmakuPicker, set_danmaku_picker,
             )
         except Exception as e:
             console.warn(f"[弹幕] 模块导入失败：{e}")
@@ -428,24 +461,32 @@ class Application:
 
         queue: asyncio.Queue = asyncio.Queue(maxsize=64)
         loop = asyncio.get_running_loop()
-        svc = BiliDanmakuService()
-        svc.start()
+        html_path = os.path.join(cfg.PROJECT_ROOT, "ui", "弹幕卡片.html")
+        mgr = BiliServiceManager(room_ids, cfg.BILI_SERVER_PORT, html_path)
+        mgr.start()
 
-        def _on_pick(uid: int, username: str, text: str) -> None:
+        def _enqueue(items: list) -> None:
+            """把一条/批量精选弹幕送入回复队列。"""
             try:
                 # 弹幕回复已敲定：置标记，主动对话在此期间避让不抢话
                 set_danmaku_pending(True)
-                loop.call_soon_threadsafe(queue.put_nowait, (uid, username, text))
+                loop.call_soon_threadsafe(queue.put_nowait, items)
             except Exception as e:
                 console.error(f"[弹幕] 入队失败：{e}")
 
-        picker = DanmakuPicker(_on_pick)
+        def _on_pick(uid: int, username: str, text: str) -> None:
+            _enqueue([(uid, username, text)])
+
+        def _on_batch_pick(items: list) -> None:
+            _enqueue(items)
+
+        picker = DanmakuPicker(_on_pick, on_batch_reply_callback=_on_batch_pick)
         set_danmaku_picker(picker)
         task = asyncio.create_task(
             self._danmaku_reply_loop(queue),
             name="danmaku_reply_loop",
         )
-        return picker, svc, task
+        return picker, mgr, task
 
     # ---------- 可打断对话：用户自己说话 ----------
 
@@ -628,170 +669,200 @@ class Application:
                     "/memory clear ｜ /memory decay")
         return True
 
-    async def _dispatch(self, cmd: str) -> bool:
-        """命令分发（!model / !config / !stt / !tools / /expr / /memory 等）。
+    # ---------- _dispatch 命令注册表 handler ----------
 
-        消费返回 True（不进入 LLM）。所有热修改直接写 self.* 属性。
-        """
-        # 记忆管理命令（/memory list｜del｜clear｜decay）
-        if cmd.startswith("/memory"):
-            return await self._handle_memory_command(cmd)
-
-        # 桌宠模式热切换模型
-        if cmd.startswith("!model "):
-            new_path = cmd[len("!model "):].strip()
-            if self.pet_widget is not None:
-                if self.pet_widget.switch_model(new_path):
-                    console.ok(f"已热切换桌宠模型：{new_path}")
-                else:
-                    console.error(f"模型切换失败：{new_path}（文件不存在）")
+    async def _cmd_model(self, cmd: str) -> bool:
+        """!model <path> 桌宠模式热切换模型。"""
+        new_path = cmd[len("!model "):].strip()
+        if self.pet_widget is not None:
+            if self.pet_widget.switch_model(new_path):
+                console.ok(f"已热切换桌宠模型：{new_path}")
             else:
-                console.dim("已收到模型切换指令（当前非桌宠模式，忽略）")
-            return True
+                console.error(f"模型切换失败：{new_path}（文件不存在）")
+        else:
+            console.dim("已收到模型切换指令（当前非桌宠模式，忽略）")
+        return True
 
-        # 资源清理
-        if cmd == "!clean":
-            from src.utils import cleaner
-            cleaner.cleanup_runtime_memory(verbose=True)
-            cleaner.cleanup_temp_files(verbose=True)
-            return True
+    async def _cmd_clean(self, cmd: str) -> bool:
+        """!clean 资源清理（运行时内存 + 临时文件）。"""
+        from src.utils import cleaner
+        cleaner.cleanup_runtime_memory(verbose=True)
+        cleaner.cleanup_temp_files(verbose=True)
+        return True
 
-        # 工具热更新
-        if cmd == "!tools":
-            from src.utils import config as cfg_mod
-            cfg_mod.reload_tool_runtime()
-            if cfg_mod.cfg.MCP_ENABLED and cfg_mod.cfg.TOOLS_ENABLED:
-                if self.mcp is not None:
-                    await self.mcp.stop()
-                    self.mcp.is_enabled = True
-                    self.mcp.load_mcp_config()
-                    await self.mcp.start_all_servers()
-                else:
-                    self.mcp = MCPManager()
-                    await self.mcp.initialize()
-                    self.brain.mcp = self.mcp
+    async def _cmd_tools(self, cmd: str) -> bool:
+        """!tools 工具 / MCP 配置热更新。"""
+        from src.utils import config as cfg_mod
+        from src.llm.tools import get_merged_tools
+        cfg_mod.reload_tool_runtime()
+        if cfg_mod.cfg.MCP_ENABLED and cfg_mod.cfg.TOOLS_ENABLED:
+            if self.mcp is not None:
+                await self.mcp.stop()
+                self.mcp.is_enabled = True
+                self.mcp.load_mcp_config()
+                await self.mcp.start_all_servers()
             else:
-                if self.mcp is not None:
-                    await self.mcp.stop()
-                    self.mcp = None
-                    self.brain.mcp = None
-            from src.llm.tools import get_merged_tools
-            merged = get_merged_tools(self.mcp)
-            if merged:
-                names = [t["function"]["name"] for t in merged]
-                console.ok(
-                    f"工具配置已热更新（{len(names)} 个）：{'、'.join(names)}")
-            else:
-                console.warn("工具配置已热更新：当前无可用工具（纯对话模式）")
-            return True
+                self.mcp = MCPManager()
+                await self.mcp.initialize()
+                self.brain.mcp = self.mcp
+        else:
+            if self.mcp is not None:
+                await self.mcp.stop()
+                self.mcp = None
+                self.brain.mcp = None
+        merged = get_merged_tools(self.mcp)
+        if merged:
+            names = [t["function"]["name"] for t in merged]
+            console.ok(
+                f"工具配置已热更新（{len(names)} 个）：{'、'.join(names)}")
+        else:
+            console.warn("工具配置已热更新：当前无可用工具（纯对话模式）")
+        return True
 
-        # 统一配置热更新
-        if cmd == "!config":
-            from src.utils import config as cfg_mod
-            cfg_mod.reload_config()
-            # LLM 客户端重建
-            self.brain.reload_client()
-            # 主动对话热启停
-            if cfg_mod.cfg.PROACTIVE_ENABLED and self.proactive is None:
-                self.proactive = ProactiveEngine(
-                    brain=self.brain, tts=self.tts, face=self.face, sub=self.sub,
-                    cfg=cfg_mod.cfg,
-                    butler=self.butler if cfg_mod.cfg.MEMORY_ENABLED else None,
-                    memory_manager=self.mm if cfg_mod.cfg.MEMORY_ENABLED else None,
-                    profanity_filter=self.pf,
-                    profanity_filter_rate=cfg_mod.cfg.PROFANITY_FILTER_RATE,
-                )
-                console.ok("主动对话已热启用")
-            elif not cfg_mod.cfg.PROACTIVE_ENABLED:
-                self.proactive = None
-                console.ok("主动对话已热关闭")
-            # 内容过滤热重建
-            if cfg_mod.cfg.PROFANITY_FILTER_ENABLED and self.pf is None:
-                self.pf = ProfanityFilter()
-                console.ok("内容过滤已热启用")
-            elif not cfg_mod.cfg.PROFANITY_FILTER_ENABLED:
-                self.pf = None
-                console.ok("内容过滤已热关闭")
-            # 记忆管家热重建
-            if cfg_mod.cfg.MEMORY_ENABLED and self.butler is None:
-                self.butler = ButlerAgent()
-                console.ok("记忆系统已热启用")
-            elif not cfg_mod.cfg.MEMORY_ENABLED:
-                self.butler = None
-                console.ok("记忆系统已热关闭")
-            # B 站弹幕热重建
-            was_on = self.bili_svc is not None
-            want_on = bool(cfg_mod.cfg.BILI_ENABLED and cfg_mod.cfg.BILI_ROOM_ID)
-            if was_on:
-                cancel = self._stop_bili()
-                self.danmaku_picker, self.bili_svc, self.danmaku_reply_task = None, None, None
-                if cancel is not None:
-                    try:
-                        await cancel
-                    except (asyncio.CancelledError, Exception):
-                        pass
-                if not want_on:
-                    console.ok("B 站弹幕服务已热关闭")
-            if want_on:
-                self.danmaku_picker, self.bili_svc, self.danmaku_reply_task = await self._start_bili()
-                if self.bili_svc is not None:
-                    console.ok(
-                        f"B 站弹幕服务已热启用（房间 {cfg_mod.cfg.BILI_ROOM_ID}）")
-            # 桌宠窗口置顶/尺寸/待机动作热应用
-            if self.pet_widget is not None:
-                self.pet_widget.apply_config(cfg_mod.cfg)
-            # 情绪映射热重载（仅桌宠模式生效）：actor 常驻（手动命令/试播始终可用），
-            # 映射文件变化即时生效；自动分类播放由调用点按 EMOTION_ACTOR_ENABLED 控制
-            if self.emotion_actor is not None:
-                self.emotion_actor.load_map()
-            console.ok("配置已全部热更新（立即生效，无需重启）")
-            return True
-
-        # 语音识别热更新
-        if cmd == "!stt":
-            from src.utils import config as cfg_mod
-            cfg_mod.reload_tool_runtime()
-            if cfg_mod.cfg.STT_ENABLED:
-                if self.stt_engine is not None:
-                    self.stt_engine.stop()
-                    self.stt_engine = None
+    async def _cmd_reload_config(self, cmd: str) -> bool:
+        """!config 统一配置热更新（LLM / 主动对话 / 内容过滤 / 记忆 / 弹幕 / 桌宠 / 情绪）。"""
+        from src.utils import config as cfg_mod
+        cfg_mod.reload_config()
+        # LLM 客户端重建
+        self.brain.reload_client()
+        # 主动对话热启停
+        if cfg_mod.cfg.PROACTIVE_ENABLED and self.proactive is None:
+            self.proactive = ProactiveEngine(
+                brain=self.brain, tts=self.tts, face=self.face, sub=self.sub,
+                cfg=cfg_mod.cfg,
+                butler=self.butler if cfg_mod.cfg.MEMORY_ENABLED else None,
+                memory_manager=self.mm if cfg_mod.cfg.MEMORY_ENABLED else None,
+                profanity_filter=self.pf,
+                profanity_filter_rate=cfg_mod.cfg.PROFANITY_FILTER_RATE,
+            )
+            console.ok("主动对话已热启用")
+        elif not cfg_mod.cfg.PROACTIVE_ENABLED:
+            self.proactive = None
+            console.ok("主动对话已热关闭")
+        # 内容过滤热重建
+        if cfg_mod.cfg.PROFANITY_FILTER_ENABLED and self.pf is None:
+            self.pf = ProfanityFilter()
+            console.ok("内容过滤已热启用")
+        elif not cfg_mod.cfg.PROFANITY_FILTER_ENABLED:
+            self.pf = None
+            console.ok("内容过滤已热关闭")
+        # 记忆管家热重建
+        if cfg_mod.cfg.MEMORY_ENABLED and self.butler is None:
+            self.butler = ButlerAgent()
+            console.ok("记忆系统已热启用")
+        elif not cfg_mod.cfg.MEMORY_ENABLED:
+            self.butler = None
+            console.ok("记忆系统已热关闭")
+        # B 站弹幕热重建
+        was_on = self.bili_svc is not None
+        room_ids = cfg_mod.cfg.BILI_ROOM_IDS or (
+            [cfg_mod.cfg.BILI_ROOM_ID] if cfg_mod.cfg.BILI_ROOM_ID else [])
+        want_on = bool(cfg_mod.cfg.BILI_ENABLED and room_ids)
+        if was_on:
+            cancel = self._stop_bili()
+            self.danmaku_picker, self.bili_svc, self.danmaku_reply_task = None, None, None
+            if cancel is not None:
                 try:
-                    from src.asr.stt import STTEngine
-                    self.stt_engine = STTEngine(cfg_mod.cfg)
-                    self.stt_engine.start()
-                    console.ok(
-                        "语音识别已开启：对着麦克风说话即可输入"
-                        f"（{cfg_mod.cfg.STT_MODEL}）")
-                except Exception as e:
-                    console.warn(f"语音识别启动失败：{e}")
-            elif self.stt_engine is not None:
+                    await cancel
+                except (asyncio.CancelledError, Exception):
+                    pass
+            if not want_on:
+                console.ok("B 站弹幕服务已热关闭")
+        if want_on:
+            self.danmaku_picker, self.bili_svc, self.danmaku_reply_task = await self._start_bili()
+            if self.bili_svc is not None:
+                console.ok(
+                    f"B 站弹幕服务已热启用（房间 {'、'.join(str(r) for r in room_ids)}）")
+        # 桌宠窗口置顶/尺寸/待机动作热应用
+        if self.pet_widget is not None:
+            self.pet_widget.apply_config(cfg_mod.cfg)
+        # 情绪映射热重载（仅桌宠模式生效）：actor 常驻（手动命令/试播始终可用），
+        # 映射文件变化即时生效；自动分类播放由调用点按 EMOTION_ACTOR_ENABLED 控制
+        if self.emotion_actor is not None:
+            self.emotion_actor.load_map()
+        console.ok("配置已全部热更新（立即生效，无需重启）")
+        return True
+
+    async def _cmd_stt(self, cmd: str) -> bool:
+        """!stt 语音识别热更新。"""
+        from src.utils import config as cfg_mod
+        cfg_mod.reload_tool_runtime()
+        if cfg_mod.cfg.STT_ENABLED:
+            if self.stt_engine is not None:
                 self.stt_engine.stop()
                 self.stt_engine = None
-                console.ok("语音识别已关闭")
-            return True
+            try:
+                from src.asr.stt import STTEngine
+                self.stt_engine = STTEngine(cfg_mod.cfg)
+                self.stt_engine.start()
+                console.ok(
+                    "语音识别已开启：对着麦克风说话即可输入"
+                    f"（{cfg_mod.cfg.STT_MODEL}）")
+            except Exception as e:
+                console.warn(f"语音识别启动失败：{e}")
+        elif self.stt_engine is not None:
+            self.stt_engine.stop()
+            self.stt_engine = None
+            console.ok("语音识别已关闭")
+        return True
 
-        # TTS 参考音频 / 文本热更新
-        if self.tts is not None and cmd.startswith("!tts_audio "):
-            new_audio = cmd[len("!tts_audio "):].strip()
-            self.tts.apply_ref(new_audio, self.tts.ref_text)
-            if new_audio:
-                console.ok(f"已热更新 TTS 参考音频：{new_audio}")
-            else:
-                console.warn("TTS 参考音频已清空，语音合成已关闭")
+    async def _cmd_tts_audio(self, cmd: str) -> bool:
+        """!tts_audio <path> 主参考音频热更新。"""
+        if self.tts is None:
             return True
-        if self.tts is not None and cmd.startswith("!tts_text "):
-            new_text = cmd[len("!tts_text "):].strip()
-            # 只更新文本：沿用主参考原始串（ref_audio 可能是主+辅助的合成 dict）
-            self.tts.apply_ref(self.tts._ref_main, new_text)
-            console.ok(f"已热更新 TTS 参考音频文本：{new_text}")
-            return True
-        if self.tts is not None and cmd.startswith("!tts_audios "):
-            new_extras = cmd[len("!tts_audios "):].strip()
-            self.tts.apply_ref_extras(new_extras)
-            console.ok(f"已热更新 TTS 辅助参考音频：{new_extras}")
-            return True
+        new_audio = cmd[len("!tts_audio "):].strip()
+        self.tts.apply_ref(new_audio, self.tts.ref_text)
+        if new_audio:
+            console.ok(f"已热更新 TTS 参考音频：{new_audio}")
+        else:
+            console.warn("TTS 参考音频已清空，语音合成已关闭")
+        return True
 
-        # 表情/动作命令（桌宠 / VTS 模式）
+    async def _cmd_tts_text(self, cmd: str) -> bool:
+        """!tts_text <text> 主参考文本热更新。"""
+        if self.tts is None:
+            return True
+        new_text = cmd[len("!tts_text "):].strip()
+        # 只更新文本：沿用主参考原始串（ref_audio 可能是主+辅助的合成 dict）
+        self.tts.apply_ref(self.tts._ref_main, new_text)
+        console.ok(f"已热更新 TTS 参考音频文本：{new_text}")
+        return True
+
+    async def _cmd_tts_audios(self, cmd: str) -> bool:
+        """!tts_audios <path> 辅助参考音频热更新。"""
+        if self.tts is None:
+            return True
+        new_extras = cmd[len("!tts_audios "):].strip()
+        self.tts.apply_ref_extras(new_extras)
+        console.ok(f"已热更新 TTS 辅助参考音频：{new_extras}")
+        return True
+
+    def _build_command_registry(self) -> CommandRegistry:
+        """构建本应用的命令注册表（在 __init__ 调一次缓存到 self）。"""
+        registry = CommandRegistry()
+        registry.register(
+            Command("/memory", self._handle_memory_command, help="记忆管理：list/del/clear/decay"),
+            Command("!model ", self._cmd_model, help="桌宠模式热切换模型"),
+            Command("!clean", self._cmd_clean, exact=True, help="清理运行时内存和临时文件"),
+            Command("!tools", self._cmd_tools, exact=True, help="工具 / MCP 配置热更新"),
+            Command("!config", self._cmd_reload_config, exact=True, help="统一配置热更新"),
+            Command("!stt", self._cmd_stt, exact=True, help="语音识别热启停"),
+            Command("!tts_audio ", self._cmd_tts_audio, help="TTS 主参考音频热更新"),
+            Command("!tts_text ", self._cmd_tts_text, help="TTS 主参考文本热更新"),
+            Command("!tts_audios ", self._cmd_tts_audios, help="TTS 辅助参考音频热更新"),
+        )
+        return registry
+
+    async def _dispatch(self, cmd: str) -> bool:
+        """命令分发（/memory / !config / !tools / !stt / !tts_* / !model 等）。
+
+        走 CommandRegistry 按 prefix 顺序匹配；未匹配时 emotion_actor
+        的 / 开兜底。返回 True 表示已消费（不进入 LLM）。
+        """
+        result = await self._cmd_registry.dispatch(self, cmd)
+        if result is not None:
+            return result
+        # emotion_actor 命令保留在原位置（依赖具体实例）
         if self.emotion_actor is not None and cmd.startswith("/"):
             await self.emotion_actor.handle(cmd)
             return True
@@ -825,6 +896,9 @@ class Application:
         """原 main() 的完整生命周期：初始化 → 主循环 → 资源清理。"""
         self.cfg = config.cfg
         self.cfg.validate()
+
+        # 命令注册表：先建好，run 期间各 handler 内部用 self._cmd_registry.dispatch 派发
+        self._cmd_registry = self._build_command_registry()
 
         # 启动清理上次残留临时文件
         try:
@@ -1015,6 +1089,19 @@ class Application:
             self.mm.load()
             self.mm.new_session()
             if self.cfg.MEMORY_ENABLED:
+                # 上次运行时 remember/forget 失败队列（drain 期间要等 memory service
+                # 就绪，所以放后台任务里）
+                async def _drain_retry_after_load() -> None:
+                    from src.llm.tools import memory_tools
+                    # 等几帧让 mm.load() 完成 service 初始化
+                    await asyncio.sleep(0.5)
+                    try:
+                        n = await asyncio.to_thread(memory_tools.drain_retry_queue)
+                        if n:
+                            console.dim(f"[记忆] 启动重放成功 {n} 条暂存记忆")
+                    except Exception as e:
+                        console.dim(f"[记忆] 重放失败队列失败：{e}")
+                asyncio.create_task(_drain_retry_after_load())
                 asyncio.create_task(memory.warmup())
                 # 记忆时间衰减：后台定时清理长期未更新的非固定记忆
                 asyncio.create_task(memory.decay_loop())

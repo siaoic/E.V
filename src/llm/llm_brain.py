@@ -130,10 +130,13 @@ def _summarize_tool_content(content) -> str:
 
 
 def _format_tool_result(name: str, result) -> str:
-    """工具执行结果的结构化日志：JSON 压缩为一行 + 超长截断。
+    """工具执行结果的结构化日志：JSON 压缩为一行 + 截断到 JSON 边界。
 
     控制中心日志区据此展示「工具名 + 结果摘要」的紧凑块，便于调试；
     截断仅影响日志展示，不裁剪进入工具上下文的结果。
+
+    截断策略：找最近的 '},' / '],' / '}' 边界，避免出现
+    "{"title":...,"content":"（半截）" 的坏 JSON 让排查困惑。
     """
     if result is None:
         return f"  ↳ 「{name}」结果：（无返回）"
@@ -146,8 +149,14 @@ def _format_tool_result(name: str, result) -> str:
         text = str(result)
     text = text.strip()
     if len(text) > _MAX_TOOL_RESULT_LOG:
-        text = (text[:_MAX_TOOL_RESULT_LOG]
-                + f"…（超长已截断至 {_MAX_TOOL_RESULT_LOG} 字符，完整结果保留在工具上下文）")
+        cut = text[:_MAX_TOOL_RESULT_LOG]
+        # 找最近的 JSON 边界（}, 或 ], 或 }）保证不会切到字段中间
+        for sep in ("},", "],", "}"):
+            idx = cut.rfind(sep)
+            if idx > _MAX_TOOL_RESULT_LOG // 2:
+                cut = cut[:idx + len(sep)]
+                break
+        text = cut + f"…（已截断至 {_MAX_TOOL_RESULT_LOG} 字符，完整结果保留在工具上下文）"
     return f"  ↳ 「{name}」结果：{text}"
 
 
@@ -180,6 +189,11 @@ def _parse_retry_after(e) -> float:
 
 # 工具响应内容长度上限（对标 llm-client.js _cleanMessagesForAPI 的 MAX_CONTENT_LENGTH）
 _MAX_TOOL_CONTENT_LENGTH = 8000
+# 本轮内：单工具结果 8000 字符 / 整轮累计 32K 字符。
+# 跨轮：只保留摘要（已有 _summarize_tool_content + _MAX_TOOL_HISTORY_LOG）
+# 防止 30 轮工具调用 × 8000 字符一次性进 LLM 上下文把免费档模型打爆。
+_MAX_TOOL_RESULT_CHARS = 8000
+_MAX_ROUND_TOOL_CHARS = 32000
 # 控制字符（可能导致 JSON 解析失败）：移除不可见字符，保留换行符(\n)和制表符(\t)
 _CONTROL_CHAR_RE = re.compile(r"[\x00-\x08\x0b-\x0c\x0e-\x1f\x7f]")
 
@@ -588,10 +602,14 @@ class LLMBrain:
         """并行执行工具并返回结果消息（对标 NagaAgent agentic_tool_loop：
         一轮多个工具 asyncio.gather 并行执行，显著缩短多工具轮次延迟）。
 
-        gather 保持返回顺序与 tool_calls 一致，tool_call_id 配对不乱；
-        单个工具失败只影响该工具，不拖垮整轮。
+        熔断：单轮累计工具结果超过 _MAX_ROUND_TOOL_CHARS 时，后续工具结果
+        直接截断为 0 并注入提示，避免 30 轮工具调用 × 8000 字符
+        一次性进 LLM 上下文把免费档模型打爆（400/截断/超时）。
         """
         from src.llm.tools import call_tool
+
+        # 共享计数器：本轮已消耗的工具结果字符数
+        state = {"round_chars": 0, "truncated": False}
 
         async def _run(tc: dict) -> dict:
             name = tc["function"]["name"]
@@ -602,6 +620,18 @@ class LLMBrain:
             console.dim(f"  ↳ 执行「{name}」...")
             result = await _call_tool_with_retry(name, args, self.mcp)
             console.dim(_format_tool_result(name, result))
+            # 单轮累计熔断：本轮已超阈值时把后续结果直接截断为 0，
+            # 模型依旧能看到「有工具被熔断」的提示
+            if state["truncated"]:
+                result = (f"[后续工具结果因本轮累计超过 "
+                          f"{_MAX_ROUND_TOOL_CHARS // 1000}K 字符被截断]")
+            else:
+                if isinstance(result, str):
+                    state["round_chars"] += len(result)
+                if state["round_chars"] > _MAX_ROUND_TOOL_CHARS:
+                    state["truncated"] = True
+                    result = (f"[后续工具结果因本轮累计超过 "
+                              f"{_MAX_ROUND_TOOL_CHARS // 1000}K 字符被截断]")
             return {
                 "role": "tool",
                 "name": name,

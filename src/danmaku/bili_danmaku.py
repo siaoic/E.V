@@ -9,6 +9,7 @@ WebSocket 协议，仅需 SESSDATA Cookie（不填也可连接，但用户名会
 """
 
 import asyncio
+import heapq
 import http.cookies
 import json
 import logging
@@ -20,7 +21,7 @@ import time
 import urllib.request
 from collections import OrderedDict
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
-from typing import Callable, List, Optional, Tuple
+from typing import Callable, Dict, List, Optional, Tuple
 from urllib.parse import parse_qs, quote, urlparse
 
 import aiohttp
@@ -43,6 +44,11 @@ _AVATAR_CACHE_MAX = 1000   # 头像缓存条数上限
 _DEDUP_WINDOW_S = 300      # 相同弹幕去重窗口（秒）：窗口内同内容只展示/回复一次
 _RECENT_DANMAKU_MAX = 500  # 相同弹幕去重缓存条数上限（防无限膨胀）
 
+# 头像代理白名单：仅允许 B 站图床（hdslb.com）。
+# 严格 host 校验避免 "https://evil.com/?ref=hdslb.com" 之类的 URL 绕过 → SSRF
+_ALLOWED_AVATAR_HOSTS = {"hdslb.com", "www.hdslb.com", "i0.hdslb.com",
+                         "i1.hdslb.com", "i2.hdslb.com"}
+
 _UA = ("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
        "(KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36")
 
@@ -61,6 +67,21 @@ def _get_profanity_filter() -> ProfanityFilter:
         if _PROFANITY_FILTER.count:
             console.info(f"[弹幕] 脏话词库已加载：{_PROFANITY_FILTER.count} 条，命中即过滤")
     return _PROFANITY_FILTER
+
+
+def _is_allowed_avatar_url(url: str) -> bool:
+    """严格 host 校验：仅允许 B 站图床域。
+
+    原实现 `"hdslb.com" in url` 会被 "https://evil.com/?ref=hdslb.com" 绕过，
+    导致本地 SSE 服务器被当成开放代理（SSRF）。
+    """
+    if not url or not url.startswith("http"):
+        return False
+    try:
+        host = (urlparse(url).hostname or "").lower()
+    except ValueError:
+        return False
+    return host in _ALLOWED_AVATAR_HOSTS
 
 
 class _Broadcaster:
@@ -387,48 +408,90 @@ def _bili_loop(broadcaster: _Broadcaster, room_id: int,
         loop.close()
 
 
-class BiliDanmakuService:
-    """B 站弹幕 → SSE 气泡网页服务（后台线程运行）。"""
+class BiliService:
+    """单直播间弹幕连接：blivedm 客户端线程 + 弹幕广播。
 
-    def __init__(self) -> None:
-        cfg = config.cfg
-        self.room_id = cfg.BILI_ROOM_ID
-        self.port = cfg.BILI_SERVER_PORT
-        self.broadcaster = _Broadcaster()
-        self.avatar_images = _AvatarImageCache()  # HTTP 线程与弹幕线程共享
+    只负责本房间的 blivedm 连接与 SSE 广播数据；
+    HTTP 服务器与头像缓存由 BiliServiceManager 统一管理。
+    """
+
+    def __init__(self, room_id: int, broadcaster: _Broadcaster,
+                 avatar_images: _AvatarImageCache) -> None:
+        self.room_id = room_id
+        self.broadcaster = broadcaster
+        self.avatar_images = avatar_images
+        self._bili_thread: Optional[threading.Thread] = None
+
+    def start(self) -> None:
+        if self._bili_thread is not None and self._bili_thread.is_alive():
+            return
+        self._bili_thread = threading.Thread(
+            target=_bili_loop,
+            args=(self.broadcaster, self.room_id, self.avatar_images),
+            daemon=True)
+        self._bili_thread.start()
+
+    def stop(self) -> None:
+        # blivedm 线程为 daemon，随进程退出自动结束（与原实现一致）
+        self._bili_thread = None
+
+
+class BiliServiceManager:
+    """多直播间弹幕服务：一个 SSE 服务器 + 每房间一个 blivedm 连接。
+
+    - 每个房间一个 BiliService（独立 broadcaster，弹幕互不串流）；
+    - 头像字节缓存全局共享（同一批用户跨房间复用）；
+    - SSE 网页 /events?room_id=X 订阅指定房间；不带 room_id 默认主房间（第一个），
+      单房间用法与原实现完全一致。
+    """
+
+    def __init__(self, room_ids: List[int], port: int, html_path: str) -> None:
+        self.html_path = html_path
+        self.avatar_images = _AvatarImageCache()  # 全局共享，HTTP 线程与弹幕线程共用
+        self._services: List[BiliService] = []
+        self._by_room: Dict[int, BiliService] = {}
+        for room_id in room_ids:
+            svc = BiliService(room_id, _Broadcaster(), self.avatar_images)
+            self._services.append(svc)
+            self._by_room[room_id] = svc
+        self._port = port
         self._httpd: Optional[ThreadingHTTPServer] = None
         self._http_thread: Optional[threading.Thread] = None
-        self._bili_thread: Optional[threading.Thread] = None
         self._running = False
-        # 弹幕气泡网页：统一放在项目 ui/ 目录
-        self._html_path = os.path.join(config.cfg.PROJECT_ROOT, "ui", "弹幕卡片.html")
+
+    @property
+    def broadcaster(self) -> _Broadcaster:
+        """主房间（第一个）广播：单房间调用方无感知。"""
+        return self._services[0].broadcaster
+
+    def broadcaster_for(self, room_id: int) -> Optional[_Broadcaster]:
+        """指定房间的弹幕广播；房间不存在返回 None（由调用方退回主房间）。"""
+        svc = self._by_room.get(room_id)
+        return svc.broadcaster if svc is not None else None
+
+    def broadcast(self, msg: dict) -> None:
+        """推给所有房间（如精选回复卡片跨房间可见）。"""
+        for svc in self._services:
+            svc.broadcaster.push(msg)
 
     def start(self) -> None:
         if self._running:
             return
-        if not config.cfg.BILI_ENABLED:
-            console.warn("[弹幕] BILI_ENABLED=false，弹幕服务已关闭（在 .env 配置）")
+        if not self._services:
             return
         self._running = True
         ThreadingHTTPServer.daemon_threads = True
         self._httpd = ThreadingHTTPServer(
-            ("127.0.0.1", self.port),
+            ("127.0.0.1", self._port),
             lambda *args, **kwargs: _SSEHandler(self, *args, **kwargs))
         self._http_thread = threading.Thread(
             target=self._httpd.serve_forever, daemon=True)
         self._http_thread.start()
 
-        if not self.room_id:
-            console.warn("[弹幕] BILI_ROOM_ID 未配置（=0），仅启动网页，不连接弹幕")
-            self.broadcaster.push({"type": "status", "connected": False})
-        else:
-            if not config.cfg.BILI_SESSDATA:
-                console.warn("[弹幕] 未配置 BILI_SESSDATA，可连接但用户名会打码")
-            self._bili_thread = threading.Thread(
-                target=_bili_loop,
-                args=(self.broadcaster, self.room_id, self.avatar_images),
-                daemon=True)
-            self._bili_thread.start()
+        if not config.cfg.BILI_SESSDATA:
+            console.warn("[弹幕] 未配置 BILI_SESSDATA，可连接但用户名会打码")
+        for svc in self._services:
+            svc.start()
 
     def stop(self) -> None:
         if not self._running:
@@ -445,13 +508,15 @@ class BiliDanmakuService:
                 pass
         if self._http_thread:
             self._http_thread.join(timeout=3)
+        for svc in self._services:
+            svc.stop()
 
 
 class _SSEHandler(BaseHTTPRequestHandler):
-    """气泡网页 + SSE 流。"""
+    """气泡网页 + SSE 流（多房间：/events?room_id=X 订阅指定房间）。"""
 
-    def __init__(self, svc: BiliDanmakuService, *args, **kwargs):
-        self.svc = svc
+    def __init__(self, mgr: BiliServiceManager, *args, **kwargs):
+        self.mgr = mgr
         super().__init__(*args, **kwargs)
 
     def log_message(self, fmt: str, *args) -> None:
@@ -484,10 +549,10 @@ class _SSEHandler(BaseHTTPRequestHandler):
         先查共享字节缓存（预取/上次拉取已写入），命中直接回，秒开头像。
         """
         url = (parse_qs(urlparse(self.path).query).get("u") or [""])[0]
-        if not url.startswith("http") or "hdslb.com" not in url:
+        if not _is_allowed_avatar_url(url):
             self.send_error(400)
             return
-        cached = self.svc.avatar_images.get(url)
+        cached = self.mgr.avatar_images.get(url)
         if cached is not None:
             ctype, data = cached
         else:
@@ -503,7 +568,7 @@ class _SSEHandler(BaseHTTPRequestHandler):
                 self.send_error(502)
                 return
             if data:
-                self.svc.avatar_images.put(url, ctype, data)
+                self.mgr.avatar_images.put(url, ctype, data)
         self.send_response(200)
         self.send_header("Content-Type", ctype)
         self.send_header("Content-Length", str(len(data)))
@@ -513,7 +578,7 @@ class _SSEHandler(BaseHTTPRequestHandler):
 
     def _serve_page(self) -> None:
         try:
-            with open(self.svc._html_path, "rb") as f:
+            with open(self.mgr.html_path, "rb") as f:
                 content = f.read()
         except OSError:
             content = "未找到气泡网页：新建 文本文档.html".encode("utf-8")
@@ -534,8 +599,12 @@ class _SSEHandler(BaseHTTPRequestHandler):
 
         按 seq 取增量：历史截断只影响"从头补发"，不影响增量判定，
         连接长时间打开也不会漏掉新弹幕。
+        多房间：?room_id=X 订阅指定房间，缺省/房间不存在时退回主房间。
         """
-        history, cond = self.svc.broadcaster.consume()
+        room_id = int((parse_qs(urlparse(self.path).query)
+                       .get("room_id") or ["0"])[0] or 0)
+        broadcaster = self.mgr.broadcaster_for(room_id) or self.mgr.broadcaster
+        history, cond = broadcaster.consume()
         self.send_response(200)
         self.send_header("Content-Type", "text/event-stream; charset=utf-8")
         self.send_header("Cache-Control", "no-cache")
@@ -608,9 +677,12 @@ _HAS_CONTENT_RE = re.compile(r"[A-Za-z0-9\u4e00-\u9fff\u3040-\u30ff\uac00-\ud7af
 # （config.RESPONSE_INTERVAL_MIN~MAX，与主动对话同一范围）滚动取值，
 # 避免固定 20s 节奏显得机械。
 _DEFAULT_MIN_GAP_S = 20      # 两次弹幕回复最少间隔（初始/兜底）
-_DEFAULT_MAX_GAP_S = 30       # 最长 70 秒不回就挑当前最好的（保底防冷场）
-_DEFAULT_WINDOW_S = 8       # 窗口 15 秒：弹幕到齐后比较，挑分最高的回
-_DEFAULT_MIN_SCORE = 20       # 低于此分的弹幕直接丢弃（太水不值得回）
+_DEFAULT_MAX_GAP_S = 30      # 最长 30 秒不回就挑当前最好的（保底防冷场）
+_DEFAULT_WINDOW_S = 8        # 窗口 8 秒：弹幕到齐后比较，挑分最高的回
+_DEFAULT_MIN_SCORE = 20      # 低于此分的弹幕直接丢弃（太水不值得回）
+_POOL_CAP = 50               # 候选池上限：溢出时淘汰分数最低的候选
+_BATCH_SCORE_DELTA = 15      # 批量回复：与最高分差 ≤ 此值的候选可合并一次回复
+_BATCH_MAX_ITEMS = 3         # 批量回复最多聚合条数（含最高分那条）
 
 
 class DanmakuPicker:
@@ -618,22 +690,31 @@ class DanmakuPicker:
 
     工作原理：
     1. 每条弹幕进来 → 做「兴趣度评分」（0~100 分），低于 MIN_SCORE 直接丢；
-    2. 高于门槛的进「候选池」；
-    3. 等待 WINDOW 窗口时间（WINDOW_S，默认 15s）：让这一波弹幕都到齐再比；
+    2. 高于门槛的进「候选池」（优先级堆，上限 _POOL_CAP 条）：
+       - 取回复时 heappop 直接拿最高分（O(log n)，替代原来 O(n) 全池 max）；
+       - 池满时踢「分数最低」的候选而非最早的——开播洪峰下高分弹幕
+         不会因为"来得早"被挤出；
+       - 同用户同内容不重复加；同用户不同内容只保留分数更高的那条
+         （旧条目留在堆里作废，弹出时惰性跳过）。
+    3. 等待 WINDOW 窗口时间（WINDOW_S，默认 8s）：让这一波弹幕都到齐再比；
        窗口里新到的高分弹幕能顶替旧的。
-    4. 窗口结束 OR 保底到了最长间隔 MAX_GAP_S → 从候选池里挑分最高的 1 条；
-    5. 调 on_reply_callback(uid, username, text) 让主程序 AI 回复；
+    4. 窗口结束 OR 保底到了最长间隔 MAX_GAP_S → 挑分最高的回复；
+       高密度时把分数相近（≤ _BATCH_SCORE_DELTA）且同窗口内的候选一并取出，
+       走 on_batch_reply_callback 聚合回复（如"观众 A 说 X，观众 B 说 Y"）。
+    5. 调 on_reply_callback / on_batch_reply_callback 让主程序 AI 回复；
     6. 回复后进入冷却（MIN_GAP_S），冷却内新弹幕继续评分入池但不触发回复。
 
     这样效果：
-    - 密集弹幕（开播/爆热）：15s 窗口里挑最好的 1 条，25~70s 间隔，不刷屏；
-    - 稀疏弹幕（冷场）：只要有一条够有趣（≥15 分）就直接等窗口结束回复；
+    - 密集弹幕（开播/爆热）：8s 窗口挑最好的 1~3 条一次回复，20~30s 间隔，不刷屏；
+    - 稀疏弹幕（冷场）：只要有一条够有趣（≥20 分）就直接等窗口结束回复；
     - 水弹幕（"666"、"哈哈哈哈"）：评分 0~5 分被丢，AI 根本不会理。
     """
 
     def __init__(
         self,
         on_reply_callback: Callable[[int, str, str], None],
+        on_batch_reply_callback: Optional[
+            Callable[[List[Tuple[int, str, str]]], None]] = None,
         min_gap_s: int = _DEFAULT_MIN_GAP_S,
         max_gap_s: int = _DEFAULT_MAX_GAP_S,
         window_s: int = _DEFAULT_WINDOW_S,
@@ -642,14 +723,22 @@ class DanmakuPicker:
         if on_reply_callback is None:
             raise ValueError("on_reply_callback 不能为 None")
         self._cb: Callable[[int, str, str], None] = on_reply_callback
+        self._batch_cb: Optional[
+            Callable[[List[Tuple[int, str, str]]], None]] = on_batch_reply_callback
         self._min_gap_s = min_gap_s
         self._max_gap_s = max_gap_s
         self._window_s = window_s
         self._min_score = min_score
 
-        # 候选池：{uid_text_key: (score, uid, username, text, received_at)}
-        # 同用户短时间内连发只保留最高那条
-        self._pool: "OrderedDict[tuple, tuple]" = OrderedDict()
+        # 候选池：双优先级堆 + dict 索引（支持顶替与惰性删除）
+        # _pool: key=(uid, text) → 当前条目 (score, uid, username, text, received_at, seq)
+        # _max_heap: [(-score, -seq, key)]  取回复时 heappop 拿最高分（同分新的优先）
+        # _min_heap: [(score, seq, key)]    池满时 heappop 踢最低分（同分旧的优先）
+        # 顶替语义：同 key 更高分提交 → 新条目入双堆，旧堆元素作废（弹出时按 seq 校验跳过）
+        self._pool: dict = {}
+        self._max_heap: list = []
+        self._min_heap: list = []
+        self._seq = 0
         self._lock = threading.Lock()
 
         self._last_reply_at = 0.0            # 上次真正回复的时间戳
@@ -673,19 +762,25 @@ class DanmakuPicker:
         received_at = time.time()
         key = (uid, stripped)
         with self._lock:
-            # 同用户同内容不重复加；同用户不同内容取分更高的
+            # 同用户同内容不重复加；同用户不同内容只保留分数更高的那条
             old = self._pool.get(key)
             if old is not None and old[0] >= score:
                 return
-            self._pool[key] = (score, uid, username, stripped, received_at)
-            # LRU-like：上限 50 条候选，超了踢最早的
-            if len(self._pool) > 50:
-                self._pool.popitem(last=False)
-            # 启 15s 窗口：等一等后面有没有更有趣的
+            self._seq += 1
+            entry = (score, uid, username, stripped, received_at, self._seq)
+            self._pool[key] = entry
+            heapq.heappush(self._max_heap, (-score, -self._seq, key))
+            heapq.heappush(self._min_heap, (score, self._seq, key))
+            # 被顶替的作废堆元素不主动删（惰性）；作废元素过多时按有效候选重建
+            if len(self._max_heap) > len(self._pool) + _POOL_CAP:
+                self._rebuild_heaps_locked()
+            # 溢出（超过上限）：淘汰分数最低的候选，避免洪峰把高分弹幕挤出
+            self._evict_overflow_locked()
+            # 启 8s 窗口：等一等后面有没有更有趣的
             if self._window_started_at is None:
                 self._window_started_at = received_at
                 self._schedule_window_end(received_at + self._window_s)
-            # 启保底定时器（最长 70s 不回就硬挑一次）；只在没有挂起时才启
+            # 启保底定时器（最长 max_gap 秒不回就硬挑一次）；只在没有挂起时才启
             if self._max_gap_timer is None:
                 self._schedule_max_gap_end(received_at + self._max_gap_s)
 
@@ -747,6 +842,69 @@ class DanmakuPicker:
 
         return max(0, min(100, score))
 
+    # ---- 优先级堆内部操作 ----
+
+    def _rebuild_heaps_locked(self) -> None:
+        """作废堆元素过多时按当前有效候选重建双堆（防惰性删除堆积膨胀）。"""
+        self._max_heap = [(-e[0], -e[5], key) for key, e in self._pool.items()]
+        self._min_heap = [(e[0], e[5], key) for key, e in self._pool.items()]
+        heapq.heapify(self._max_heap)
+        heapq.heapify(self._min_heap)
+
+    def _evict_overflow_locked(self) -> None:
+        """候选池超上限：从最小堆踢掉分数最低的候选（跳过被顶替的作废堆元素）。"""
+        while len(self._pool) > _POOL_CAP and self._min_heap:
+            score, seq, key = heapq.heappop(self._min_heap)
+            entry = self._pool.get(key)
+            # 堆顶可能是被更高分顶替的作废元素（分数/序号对不上），跳过
+            if entry is None or entry[0] != score or entry[5] != seq:
+                continue
+            del self._pool[key]
+
+    def _pop_best_locked(self) -> Optional[tuple]:
+        """从候选池按分数降序取最高分 1 条，取完移走；顺手清理过期候选。"""
+        while self._max_heap:
+            neg_score, neg_seq, key = heapq.heappop(self._max_heap)
+            entry = self._pool.get(key)
+            if entry is None or entry[0] != -neg_score or entry[5] != -neg_seq:
+                continue  # 已被顶替的作废堆元素
+            del self._pool[key]
+            self._cleanup_stale_locked()
+            return entry
+        self._pool.clear()  # 堆空仍有残留（理论上不会）：清空兜底
+        return None
+
+    def _cleanup_stale_locked(self) -> None:
+        """取走后清理超过 max_gap*2 还没被看上的过期候选（堆里对应元素弹出时作废）。"""
+        now = time.time()
+        for key in list(self._pool):
+            if now - self._pool[key][4] > self._max_gap_s * 2:
+                del self._pool[key]
+
+    def _pop_reply_batch_locked(self) -> Optional[List[tuple]]:
+        """取最高分弹幕；高密度时把分数相近（≤ _BATCH_SCORE_DELTA）且
+        同窗口内的候选一并取出，组成一次批量回复（最多 _BATCH_MAX_ITEMS 条）。
+        """
+        best = self._pop_best_locked()
+        if best is None:
+            return None
+        if self._batch_cb is None or not self._pool:
+            return [best]
+        batch = [best]
+        best_score = best[0]
+        now = time.time()
+        # 补充候选：分数与最高分相近、且仍在当前窗口内（同一波弹幕）
+        peers = [
+            v for v in self._pool.values()
+            if v[0] >= best_score - _BATCH_SCORE_DELTA
+            and now - v[4] <= self._window_s
+        ]
+        peers.sort(key=lambda v: v[0], reverse=True)
+        for peer in peers[:_BATCH_MAX_ITEMS - 1]:
+            self._pool.pop((peer[1], peer[3]))
+            batch.append(peer)
+        return batch
+
     # ---- 调度：窗口结束 / 保底超时触发选优回复 ----
 
     def _schedule_window_end(self, fire_at: float) -> None:
@@ -763,6 +921,24 @@ class DanmakuPicker:
         t.start()
         self._max_gap_timer = t
 
+    def _fire_reply(self, batch: List[tuple], label: str) -> None:
+        """把选中的弹幕批次交给回调：单条走 on_reply_callback，多条走 on_batch_reply_callback。
+
+        label：触发来源（窗口结束「精选回复」/ 最长间隔「保底回复」）。
+        """
+        try:
+            if len(batch) == 1:
+                _, uid, username, text, _, _ = batch[0]
+                console.dim(f"[弹幕] {label} {username}")
+                self._cb(uid, username, text)
+            else:
+                names = "、".join(item[2] for item in batch)
+                console.dim(f"[弹幕] 批量回复 {names}")
+                self._batch_cb(
+                    [(item[1], item[2], item[3]) for item in batch])
+        except Exception as e:
+            console.error(f"[弹幕] 回调异常：{type(e).__name__}: {e}")
+
     def _on_window_end(self) -> None:
         """窗口结束：如果冷却已过，就从候选池挑最好的回复。"""
         with self._lock:
@@ -770,8 +946,8 @@ class DanmakuPicker:
             self._window_started_at = None
             if self._in_cooldown_locked():
                 return
-            best = self._pop_best_locked()
-            if best is None:
+            batch = self._pop_reply_batch_locked()
+            if batch is None:
                 return
             # 立刻把两个定时器都关掉（这次要回复了）
             if self._max_gap_timer is not None:
@@ -780,14 +956,9 @@ class DanmakuPicker:
                 except Exception:
                     pass
                 self._max_gap_timer = None
-            _, uid, username, text, _ = best
             self._last_reply_at = time.time()
             self._roll_cooldown()
-        try:
-            console.dim(f"[弹幕] 精选回复 {username}")
-            self._cb(uid, username, text)
-        except Exception as e:
-            console.error(f"[弹幕] 回调异常：{type(e).__name__}: {e}")
+        self._fire_reply(batch, "精选回复")
 
     def _on_max_gap_end(self) -> None:
         """保底：到了最长间隔还没窗口触发，硬挑当前最好的。"""
@@ -797,8 +968,8 @@ class DanmakuPicker:
                 # 冷却中：下次再等一个 max_gap
                 self._schedule_max_gap_end(time.time() + self._max_gap_s)
                 return
-            best = self._pop_best_locked()
-            if best is None:
+            batch = self._pop_reply_batch_locked()
+            if batch is None:
                 return
             if self._window_timer is not None:
                 try:
@@ -807,14 +978,9 @@ class DanmakuPicker:
                     pass
                 self._window_timer = None
                 self._window_started_at = None
-            _, uid, username, text, _ = best
             self._last_reply_at = time.time()
             self._roll_cooldown()
-        try:
-            console.dim(f"[弹幕] 保底回复 {username}")
-            self._cb(uid, username, text)
-        except Exception as e:
-            console.error(f"[弹幕] 回调异常：{type(e).__name__}: {e}")
+        self._fire_reply(batch, "保底回复")
 
     def _roll_cooldown(self) -> None:
         """回复后滚动冷却时长：与主动对话共用随机间隔范围，避免固定节奏。"""
@@ -824,32 +990,19 @@ class DanmakuPicker:
     def _in_cooldown_locked(self) -> bool:
         return (time.time() - self._last_reply_at) < self._min_gap_s
 
-    def _pop_best_locked(self) -> Optional[tuple]:
-        """从候选池按分数降序取 1 条，取完移走。"""
-        if not self._pool:
-            return None
-        best_key = max(
-            self._pool.keys(),
-            key=lambda k: (
-                self._pool[k][0],        # 先按分数
-                -self._pool[k][4],       # 同分取新的
-            ),
-        )
-        best = self._pool.pop(best_key)
-        # 取走后顺手清掉太老（超过 max_gap*2 还没被看上的）候选
-        now = time.time()
-        stale_keys = [k for k, v in self._pool.items()
-                      if now - v[4] > self._max_gap_s * 2]
-        for k in stale_keys:
-            self._pool.pop(k, None)
-        return best
-
 
 if __name__ == "__main__":
-    service = BiliDanmakuService()
-    service.start()
-    try:
-        while True:
-            time.sleep(3600)
-    except KeyboardInterrupt:
-        service.stop()
+    cfg = config.cfg
+    room_ids = cfg.BILI_ROOM_IDS or ([cfg.BILI_ROOM_ID] if cfg.BILI_ROOM_ID else [])
+    if not room_ids:
+        console.warn("[弹幕] 未配置房间号（BILI_ROOM_ID/BILI_ROOM_IDS），服务未启动")
+    else:
+        manager = BiliServiceManager(
+            room_ids, cfg.BILI_SERVER_PORT,
+            os.path.join(cfg.PROJECT_ROOT, "ui", "弹幕卡片.html"))
+        manager.start()
+        try:
+            while True:
+                time.sleep(3600)
+        except KeyboardInterrupt:
+            manager.stop()
