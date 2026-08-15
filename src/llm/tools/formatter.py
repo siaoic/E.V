@@ -4,6 +4,9 @@ import json
 
 from src.llm.constants import _MAX_TOOL_HISTORY_LOG, _MAX_TOOL_RESULT_LOG
 
+# 搜索结果日志最多逐条展示的条数（控制台防刷屏；完整结果仍进工具上下文）
+_MAX_SEARCH_RESULT_SHOW = 5
+
 
 def _summarize_tool_content(content) -> str:
     """工具结果历史摘要化：跨轮次历史中的工具消息只保留结果摘要。
@@ -66,3 +69,28 @@ def _format_tool_calls(tool_calls: list) -> str:
             arg_str = (tc["function"]["arguments"] or "")[:100] or "（无参数）"
         lines.append(f"AI调用了：{name} 工具 输入参数：{arg_str}")
     return "；".join(lines)
+
+
+def _format_search_result(name: str, result) -> str:
+    """搜索类工具结果的友好日志：逐条 标题/链接/摘要，比整段 JSON 直观。
+
+    仅当结果形如 {"results": [...]}（bing-cn-mcp 等搜索工具返回）时使用；
+    其他结构回退 _format_tool_result。截断只影响日志展示，不裁剪进上下文。
+    """
+    if not isinstance(result, dict) or not isinstance(result.get("results"), list):
+        return _format_tool_result(name, result)
+    items = result["results"]
+    if not items:
+        return f"  ↳ 「{name}」搜索无结果"
+    lines = [f"「{name}」搜索到 {len(items)} 条："]
+    for i, item in enumerate(items[:_MAX_SEARCH_RESULT_SHOW], 1):
+        title = str(item.get("title") or "（无标题）")[:80]
+        url = str(item.get("url") or item.get("displayUrl") or "")[:100]
+        snippet = str(item.get("snippet") or "").strip()[:120]
+        lines.append(f"  {i}. {title}")
+        lines.append(f"     {url}")
+        if snippet:
+            lines.append(f"     {snippet}")
+    if len(items) > _MAX_SEARCH_RESULT_SHOW:
+        lines.append(f"  …（共 {len(items)} 条，仅显示前 {_MAX_SEARCH_RESULT_SHOW} 条）")
+    return "\n".join(lines)

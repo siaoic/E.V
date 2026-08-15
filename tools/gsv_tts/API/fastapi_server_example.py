@@ -20,6 +20,8 @@ import uuid
 import os
 import tempfile
 import logging
+import threading
+import time
 
 app = FastAPI(title="GSV-TTS 异步 API", version="1.1")
 
@@ -30,6 +32,34 @@ output_dir.mkdir(exist_ok=True)
 tts: Optional[TTS] = None
 
 temp_dir = tempfile.mkdtemp(prefix="gsv_tts_")
+
+# 未被下载的 wav 超时删除时限与清理扫描间隔（秒）：
+# 正常路径下 wav 在 /audio 响应发送完成后即被删除（BackgroundTask），
+# 客户端中断/下载失败等未下载文件由本守护线程兜底清理，防目录膨胀。
+_OUTPUT_TTL_SECONDS = 600
+_OUTPUT_SWEEP_INTERVAL = 60
+
+
+def _sweep_stale_outputs() -> None:
+    """后台守护：周期性删除 output 目录中超时未被下载的 wav。"""
+    while True:
+        time.sleep(_OUTPUT_SWEEP_INTERVAL)
+        try:
+            now = time.time()
+            for f in os.listdir(output_dir):
+                if not f.endswith(".wav"):
+                    continue
+                p = output_dir / f
+                try:
+                    if now - p.stat().st_mtime > _OUTPUT_TTL_SECONDS:
+                        p.unlink(missing_ok=True)
+                except OSError:
+                    pass
+        except Exception:
+            pass
+
+
+threading.Thread(target=_sweep_stale_outputs, daemon=True).start()
 
 
 def is_url(path: str) -> bool:

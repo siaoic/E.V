@@ -442,11 +442,19 @@ class TTSPlayer:
                 self._queue.clear()
             except Exception:
                 pass
-        try:
-            while not self._play_metas.empty():
-                self._play_metas.get_nowait()
-        except Exception:
-            pass
+        # 丢弃未播块元信息时顺带删除其临时 wav——否则被打断的块文件
+        # 永久残留（_on_block_play 只删「已播放」块的 wav）
+        while not self._play_metas.empty():
+            try:
+                meta = self._play_metas.get_nowait()
+            except Exception:
+                break
+            wav = meta[0]
+            if wav:
+                try:
+                    os.remove(wav)
+                except Exception:
+                    pass
         if self._sub_q is not None:
             try:
                 self._sub_q.clear()

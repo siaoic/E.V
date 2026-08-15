@@ -436,16 +436,19 @@ class Config:
         "emotion_map_vts.json" if RUN_MODE == "vtuber" else "emotion_map.json")
 
     # ===== 语音识别（STT） =====
-    # 开启后主程序监听麦克风：说话 → 能量 VAD 静音分割 → 转写
+    # 开启后主程序监听麦克风：说话 → fsmn-vad 静音分割 → 流式转写
     # （与键盘输入并存，谁先到谁生效）。复用 SILICONFLOW_API_KEY。
-    # STT_ENGINE：local（本地 qwen3_asr 模型，src/asr/qwen3_asr）/
+    # STT_ENGINE：local（本地 FunASR paraformer-zh-streaming 流式服务，
+    #              asr_server.py 加载 src/asr/models 模型）/
     #             cloud（SiliconFlow 云端 SenseVoice，默认）
     STT_ENABLED: bool = _get_bool("STT_ENABLED", False)
     STT_ENGINE: str = os.getenv("STT_ENGINE") or "cloud"
     STT_MODEL: str = os.getenv("STT_MODEL") or "FunAudioLLM/SenseVoiceSmall"
-    # 本地 ASR 模型目录（STT_ENGINE=local 时使用；asr_server.py 读取同一配置）
-    STT_LOCAL_MODEL_PATH: str = os.getenv("STT_LOCAL_MODEL_PATH") or os.path.join(
-        _PROJECT_ROOT, "src", "asr", "qwen3_asr")
+    # 本地 ASR 模型目录（STT_ENGINE=local 时使用；留空则使用 src/asr/models
+    # 下自动下载的 paraformer-zh-streaming 快照，缺失从 ModelScope 下载）
+    STT_LOCAL_MODEL_PATH: str = os.getenv("STT_LOCAL_MODEL_PATH") or ""
+    # 本地 ASR 模型 revision（funasr 自动下载时使用，默认官方流式版本 v2.0.4）
+    STT_LOCAL_MODEL_REVISION: str = os.getenv("STT_LOCAL_MODEL_REVISION") or "v2.0.4"
     # 本地 ASR 服务地址（STT_ENGINE=local 时使用；asr.bat 启动，默认 8487 端口）
     STT_SERVER_URL: str = os.getenv("STT_SERVER_URL") or "http://127.0.0.1:8487"
     # 语音识别独立 API Key（SiliconFlow）：留空回退复用 SILICONFLOW_API_KEY
@@ -453,19 +456,19 @@ class Config:
     # 语音识别服务地址：留空回退共用 SiliconFlow（云端 SenseVoice 转写）
     STT_BASE_URL: str = os.getenv("STT_BASE_URL") or (
         os.getenv("SILICONFLOW_BASE_URL") or "https://api.siliconflow.cn/v1")
-    # 录音参数：语音活动检测以 WebRTC VAD 为主（区分语音/噪声更准），
-    # webrtcvad 依赖缺失时回退 STT_LEVEL_THRESHOLD 能量阈值（RMS）；
-    # STT_VAD_MODE 0-3（0 最保守 3 最激进，默认 2）；STT_SILENCE_SECONDS
-    # 静音持续多久切段上传（越小识别延迟越低，误切段风险越高）；
-    # STT_MAX_SECONDS 单段最长录音时长（说话不停顿也强制切段）。
+    # 录音参数：语音活动检测用 funasr fsmn-vad（模型 src/asr/models 自动下载），
+    # 开始/结束事件驱动切段；STT_SILENCE_SECONDS 静音持续多久判为说话结束
+    # （越小识别延迟越低，误切段风险越高）；STT_MAX_SECONDS 单段最长录音
+    # 时长（说话不停顿也强制切段）。下两项为旧 WebRTC VAD 时代配置，
+    # fsmn-vad 改造后不再读取，仅保留兼容（.env 已有值不报错）。
     STT_LEVEL_THRESHOLD: float = float(os.getenv("STT_LEVEL_THRESHOLD") or "500")
     STT_VAD_MODE: int = int(os.getenv("STT_VAD_MODE") or "2")
     STT_SILENCE_SECONDS: float = float(os.getenv("STT_SILENCE_SECONDS") or "0.6")
     STT_MAX_SECONDS: float = float(os.getenv("STT_MAX_SECONDS") or "10")
     # STT_INTERRUPT_MIN_SECONDS 语音打断阈值（秒）：回复播报期间识别到的
     # 语音段「说话时长」超过该值才打断当前播报；过短语音（嗯/啊/咳嗽/
-    # 环境音）不打断，避免误触发。WebRTC VAD 上线后误触发率已降低，
-    # 默认 1.0s（说 1 秒左右即可打断，过短尾音/单字感叹词仍被过滤）。
+    # 环境音）不打断，避免误触发。默认 1.0s（说 1 秒左右即可打断，
+    # 过短尾音/单字感叹词仍被过滤）。
     STT_INTERRUPT_MIN_SECONDS: float = float(
         os.getenv("STT_INTERRUPT_MIN_SECONDS") or "1.0")
 
@@ -607,8 +610,9 @@ def reload_tool_runtime() -> None:
     cfg.STT_ENABLED = _get_bool("STT_ENABLED", False)
     cfg.STT_ENGINE = os.getenv("STT_ENGINE") or "cloud"
     cfg.STT_MODEL = os.getenv("STT_MODEL") or "FunAudioLLM/SenseVoiceSmall"
-    cfg.STT_LOCAL_MODEL_PATH = os.getenv("STT_LOCAL_MODEL_PATH") or os.path.join(
-        _PROJECT_ROOT, "src", "asr", "qwen3_asr")
+    cfg.STT_LOCAL_MODEL_PATH = os.getenv("STT_LOCAL_MODEL_PATH") or ""
+    cfg.STT_LOCAL_MODEL_REVISION = (
+        os.getenv("STT_LOCAL_MODEL_REVISION") or "v2.0.4")
     cfg.STT_SERVER_URL = os.getenv("STT_SERVER_URL") or "http://127.0.0.1:8487"
     cfg.STT_API_KEY = os.getenv("STT_API_KEY") or ""
     cfg.STT_BASE_URL = os.getenv("STT_BASE_URL") or (

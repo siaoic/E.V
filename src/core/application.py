@@ -227,6 +227,9 @@ class Application:
                     # 用户输入优先：丢弃排队中的主动消息，只保留正在播报的
                     self.proactive.discard_pending()
                 self._input_source = "text"
+                # 键盘监听已消费（input_fut done），清理复用引用；
+                # 语音触发路径存的挂起监听在下方保留，供对话复用
+                self._pending_stdin_fut = None
                 return text
 
             if stt_fut is not None and stt_fut in done:
@@ -241,6 +244,10 @@ class Application:
                 if self.proactive is not None:
                     # 用户输入优先：丢弃排队中的主动消息
                     self.proactive.discard_pending()
+                # 语音先触发：挂起的键盘监听（input() 阻塞线程无法取消）交还
+                # 下轮复用，避免残留 input() 抢占后续键盘输入
+                if input_fut is not None and not input_fut.done():
+                    self._pending_stdin_fut = input_fut
                 print(f"[语音识别] {text}", flush=True)
                 self._input_source = "voice"
                 return text
@@ -549,6 +556,7 @@ class Application:
         async with output_lock:
             set_output_owner("user")
             set_global_state(STATE_AI_SPEAKING)
+            input_fut = None  # 提前初始化：finally 兜底交还引用
             try:
                 if tts is not None:
                     try:
@@ -560,7 +568,15 @@ class Application:
                                     profanity_filter=profanity_filter,
                                     profanity_filter_rate=profanity_filter_rate,
                                     on_llm_done=on_llm_done))
-                input_fut = loop.run_in_executor(None, lambda: input(""))
+                # 优先复用 _wait_input 语音触发时挂起的键盘监听（input() 阻塞
+                # 线程无法取消，任意时刻必须只有一个 input() 在等 stdin，否则
+                # 更早挂起的那只抢占键盘输入）：复用后立即置 None
+                if (self._pending_stdin_fut is not None
+                        and not self._pending_stdin_fut.done()):
+                    input_fut = self._pending_stdin_fut
+                    self._pending_stdin_fut = None
+                else:
+                    input_fut = loop.run_in_executor(None, lambda: input(""))
                 _stdin_eof = False
                 stt_fut = stt.result_future() if stt is not None else None
                 watch = {conv, input_fut}
@@ -631,7 +647,10 @@ class Application:
                         if input_fut is not None and input_fut in done:
                             return True, buzz, None
                         print(f"[语音识别] {buzz}", flush=True)
-                        return True, buzz, None
+                        # 打断来源是语音：挂起的键盘监听（input() 阻塞线程无法
+                        # 真正取消）必须交还主循环复用，否则残留的 input() 会
+                        # 抢占后续键盘输入——表现为语音对话后键盘输入失灵
+                        return True, buzz, input_fut
                     if conv in done:
                         try:
                             await conv
@@ -644,6 +663,11 @@ class Application:
                             return False, "", input_fut
                         return False, "", None
             finally:
+                # 异常/提前退出兜底：交还挂起的键盘监听，杜绝残留 input()
+                # 抢占后续键盘输入（正常返回路径已通过返回值交还，这里只兜
+                # 底异常场景——input() 阻塞线程无法取消，只能复用不能丢弃）
+                if input_fut is not None and not input_fut.done():
+                    self._pending_stdin_fut = input_fut
                 set_output_owner(None)
                 set_global_state(STATE_IDLE)
 
@@ -1446,7 +1470,10 @@ class Application:
                 except (EOFError, KeyboardInterrupt):
                     print()
                     break
-                self._pending_stdin_fut = None
+                # _pending_stdin_fut 的清理在 _wait_input 内部完成：
+                # 键盘触发时监听已消费置 None；语音触发时保留挂起的监听
+                # 供 _interruptible_converse 复用（此处无条件置 None 会泄漏
+                # input() 阻塞线程，导致语音对话后键盘第一行输入被抢占吞掉）
                 show_prompt = True
                 while user_text:
                     user_text = user_text.strip()
@@ -1549,7 +1576,9 @@ class Application:
                             code=ErrorCode.INTERNAL_ERROR.value,
                             code_name="INTERNAL_ERROR",
                             msg=f"对话流程出错：{e}"))
-                        interrupted, buzz, self._pending_stdin_fut = False, "", None
+                        interrupted, buzz = False, ""
+                        # 挂起的键盘监听已由 _interruptible_converse 的 finally
+                        # 交还到 _pending_stdin_fut，此处不要覆盖为 None
                         # 对话未正常结束：兜底复位状态，避免卡在忙碌态抑制 agent
                         set_global_state(STATE_IDLE)
 

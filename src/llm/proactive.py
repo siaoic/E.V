@@ -665,7 +665,10 @@ class ProactiveEngine:
             f"{topic_hint}\n"
         )
         if force:
-            prompt += "规则：你已沉默够久了，和大家说点什么吧，禁止输出 <SILENT>。"
+            prompt += """
+                      现在你不需要迎合谁，只需要回答自己一个问题：
+                     「此时此刻，这个站在麦克风前的我，是真的想开口，还是只是在替直播间填白？」
+                      - 若想开口，说出那句「不吐不快」的话，哪怕冒犯、荒诞、自嘲都行。禁止输出 <SILENT>。"""
         else:
             prompt += "规则：只要开口，必须是「非标品」的句子。无话可说时，请虔诚地输出 <SILENT>。"
         return prompt

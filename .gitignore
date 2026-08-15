@@ -42,6 +42,8 @@ tools/gsv_tts/API/models/
 
 # ================= 本地 ASR 模型（Qwen3-ASR 权重 1.8GB+，不入库） =================
 src/asr/qwen3_asr/
+# ================= 本地 ASR 模型（fsmn-vad / paraformer 流式快照，不入库） =================
+src/asr/models/
 
 # ================= 临时 TTS 音频（GPT-SoVITS 为 wav，edge 为 mp3） =================
 vtuber_tts_*

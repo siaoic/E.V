@@ -1675,3 +1675,75 @@ topics:
   - lifestyle
   - storytime
   cooldown_minutes: 3
+- id: learned_88d251ce
+  category: learned
+  concept: 揭秘蓝色牛奶背后的神秘传说与幕后故事
+  tags:
+  - mystery
+  - storytelling
+  - blue_milk
+  - storytime
+  cooldown_minutes: 3
+- id: learned_16b6bf56
+  category: learned
+  concept: Vedal 的蓝色牛奶：一场关于 AI 与人类注意力的博弈
+  tags:
+  - philosophy
+  - competition
+  - blue_milk
+  - debate
+  cooldown_minutes: 3
+- id: learned_45b7f44c
+  category: learned
+  concept: 揭秘城市传说：从虚构游戏到真实历史，打破次元壁
+  tags:
+  - history
+  - urban_legend
+  - storytelling
+  - reality_vs_fiction
+  cooldown_minutes: 3
+- id: learned_8c20b3b8
+  category: learned
+  concept: 沉浸式悬疑叙事：用反转剧情吊足观众胃口
+  tags:
+  - suspense
+  - narrative
+  - engagement
+  - plot_twist
+  cooldown_minutes: 3
+- id: learned_f9487a0c
+  category: learned
+  concept: Exploring the aesthetic of 'mushroom' in virtual reality landscapes.
+  tags:
+  - aesthetic
+  - vr
+  - visuals
+  - immersion
+  cooldown_minutes: 3
+- id: learned_85572913
+  category: learned
+  concept: Debating the ethics of AI personality maintenance in long-term interactions.
+  tags:
+  - ethics
+  - ai
+  - personality
+  - philosophy
+  cooldown_minutes: 3
+- id: learned_47eccbc7
+  category: learned
+  concept: '2026 tech predictions: What will the graphics card do that we can''t imagine
+    yet?'
+  tags:
+  - future-tech
+  - gaming
+  - ai
+  cooldown_minutes: 3
+- id: learned_8efc1b36
+  category: learned
+  concept: 'The dark side of HDMI: Why your cable might be the bottleneck in your
+    streaming chain.'
+  tags:
+  - hardware
+  - streaming
+  - troubleshooting
+  cooldown_minutes: 3

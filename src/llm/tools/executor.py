@@ -6,7 +6,7 @@ from typing import Any, List
 
 from src.utils import console
 from src.llm.constants import _MAX_ROUND_TOOL_CHARS
-from src.llm.tools.formatter import _format_tool_result
+from src.llm.tools.formatter import _format_search_result, _format_tool_result
 
 
 async def _execute_tool_calls(mcp, tool_calls: list) -> List[dict]:
@@ -30,7 +30,11 @@ async def _execute_tool_calls(mcp, tool_calls: list) -> List[dict]:
             args = {}
         console.dim(f"  ↳ 执行「{name}」...")
         result = await _call_tool_with_retry(name, args, mcp)
-        console.dim(_format_tool_result(name, result))
+        if isinstance(result, dict) and isinstance(result.get("results"), list):
+            # 搜索类结果：逐条醒目展示（标题/链接/摘要），便于直播时直接读取
+            console.accent(_format_search_result(name, result))
+        else:
+            console.dim(_format_tool_result(name, result))
         # 单轮累计熔断：本轮已超阈值时把后续结果直接截断为 0，
         # 模型依旧能看到「有工具被熔断」的提示
         if state["truncated"]:
