@@ -45,14 +45,14 @@ _LOCAL_TOOL_DEFS: List[dict] = [
         "function": {
             "name": "load_skill",
             "description": "加载指定技能的完整指令（SKILL.md 全文，并列出该技能捆绑的"
-                           "细节资源清单）。系统提示的 Available skills 段落只列出技能名"
-                           "与描述，执行该类任务前必须先调用本工具获取完整指令。",
+                           "细节资源清单）。系统提示的「可用技能」段列出各技能的触发时机，"
+                           "情境匹配时先调用本工具获取完整指令再执行。",
             "parameters": {
                 "type": "object",
                 "properties": {
                     "skill_name": {
                         "type": "string",
-                        "description": "技能名，必须是 Available skills 段落中列出的精确名称",
+                        "description": "技能名，必须是系统提示「可用技能」中列出的精确名称",
                     },
                 },
                 "required": ["skill_name"],
@@ -128,6 +128,42 @@ _LOCAL_TOOL_DEFS: List[dict] = [
                 },
                 "required": ["keyword"],
             },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "play_sound_effect",
+            "description": "播放音效来增强对话的趣味性和表现力（如惊讶、爆炸、wow）。"
+                           "想播音效时可先调用 list_sound_effects 查看可用音效，再按编号播放；"
+                           "或直接用编号：01=搞啥情况, 02=突然一惊, 03=巨大爆炸, "
+                           "04=钢管掉落, 05=OMG不可思议, 06=震撼管弦乐, 07=wow效果音。",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "sfx_id": {
+                        "type": "string",
+                        "description": "音效编号（01-07），或逗号分隔的多个音效，如 '01,03'",
+                    },
+                    "repeat": {
+                        "type": "integer",
+                        "description": "连续播放次数（1-10），默认 1 次",
+                        "minimum": 1,
+                        "maximum": 10,
+                        "default": 1,
+                    },
+                },
+                "required": ["sfx_id"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "list_sound_effects",
+            "description": "列出音效库中所有可用的音效编号与含义。"
+                           "需要播放音效但不确定有哪些可选时调用。",
+            "parameters": {"type": "object", "properties": {}},
         },
     },
 ]

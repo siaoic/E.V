@@ -1569,3 +1569,21 @@ topics:
   - audience
   - stream
   cooldown_minutes: 3
+- id: learned_e74c0f86
+  category: learned
+  concept: 深夜直播时用'蓝牛奶'梗和'地下Wi-Fi树木'等奇幻设定制造沉浸式人设
+  tags:
+  - fantasy
+  - humor
+  - late-night
+  - vibe
+  cooldown_minutes: 3
+- id: learned_f2dbe232
+  category: learned
+  concept: 观众分享'重置体验'时用'工作区凌乱=思维混乱'类隐喻建立共鸣
+  tags:
+  - relatability
+  - self-deprecating
+  - relaxation
+  - meta
+  cooldown_minutes: 3

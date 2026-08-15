@@ -9,5 +9,9 @@
 
 from src.mcp.manager import MCPManager, get_mcp_dir
 from src.mcp.registry import MCPToolRegistry
+from src.mcp.llm_bridge import call_mcp_tool, get_mcp_tools_for_llm
 
-__all__ = ["MCPManager", "MCPToolRegistry", "get_mcp_dir"]
+__all__ = [
+    "MCPManager", "MCPToolRegistry", "get_mcp_dir",
+    "get_mcp_tools_for_llm", "call_mcp_tool",
+]

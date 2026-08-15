@@ -492,50 +492,70 @@ class ButlerAgent:
     async def describe_image(self, image_b64: str, prompt: str = "") -> str:
         """把图片（base64）交给视觉模型描述，返回描述文本。
 
-        视觉模型走 VISION_* 配置（默认 glm-4v-flash，免费支持图片输入）；
-        未单独配置时回退 BUTLER_*（智谱，与默认视觉模型同源）再回退主
-        LLM_* 服务。统一在 agent 侧构建客户端与超时兜底，视觉场景无需
-        主对话介入；失败返回空串由调用方兜底。
+        优先用主模型（LLM_* 配置）描述画面；主模型不支持图片输入时依次
+        回退 BUTLER_* 等其他视觉服务（默认 glm-4v-flash，免费支持图片输入）。
+        统一在 agent 侧构建客户端与超时兜底，视觉场景无需主对话介入；
+        全部失败返回空串由调用方兜底。
         """
-        base_url = (config.cfg.VISION_BASE_URL
-                    or config.cfg.BUTLER_BASE_URL
-                    or config.cfg.LLM_BASE_URL or "").strip()
-        api_key = (config.cfg.VISION_API_KEY
-                   or config.cfg.BUTLER_API_KEY
-                   or config.cfg.LLM_API_KEY or "").strip()
-        model = (config.cfg.VISION_MODEL or "").strip()
-        if not (base_url and api_key and model):
+        prompt = prompt or "用简洁自然的中文描述这张图片的内容。"
+        candidates = self._vision_candidates()
+        if not candidates:
             console.warn("[ButlerAgent] 视觉模型未配置，无法描述图片")
             return ""
-        client = AsyncOpenAI(base_url=base_url, api_key=api_key, timeout=60.0)
-        prompt = prompt or "用简洁自然的中文描述这张图片的内容。"
-        try:
-            resp = await asyncio.wait_for(
-                client.chat.completions.create(
-                    model=model,
-                    messages=[
-                        {
-                            "role": "user",
-                            "content": [
-                                {"type": "text", "text": prompt},
-                                {
-                                    "type": "image_url",
-                                    "image_url": {
-                                        "url": f"data:image/jpeg;base64,{image_b64}"
+        # 依次尝试：主模型优先，失败（不支持图片输入等）时回退下一候选
+        for base_url, api_key, model in candidates:
+            client = AsyncOpenAI(base_url=base_url, api_key=api_key, timeout=60.0)
+            try:
+                resp = await asyncio.wait_for(
+                    client.chat.completions.create(
+                        model=model,
+                        messages=[
+                            {
+                                "role": "user",
+                                "content": [
+                                    {"type": "text", "text": prompt},
+                                    {
+                                        "type": "image_url",
+                                        "image_url": {
+                                            "url": f"data:image/jpeg;base64,{image_b64}"
+                                        },
                                     },
-                                },
-                            ],
-                        }
-                    ],
-                    max_tokens=1024,
-                    temperature=0.4,
-                ),
-                timeout=60.0,
-            )
-        except Exception as e:
-            console.warn(f"[ButlerAgent] 视觉模型调用失败：{e}")
-            return ""
-        return (resp.choices[0].message.content or "").strip()
+                                ],
+                            }
+                        ],
+                        max_tokens=1024,
+                        temperature=0.4,
+                    ),
+                    timeout=60.0,
+                )
+            except Exception as e:
+                console.warn(
+                    f"[ButlerAgent] 视觉模型 {model} 调用失败，尝试下一候选：{e}")
+                continue
+            return (resp.choices[0].message.content or "").strip()
+        console.warn("[ButlerAgent] 视觉模型全部调用失败，无法描述图片")
+        return ""
+
+    @staticmethod
+    def _vision_candidates() -> list[tuple[str, str, str]]:
+        """视觉候选服务列表：主模型（LLM_*）优先，主模型不支持图片时
+        依次回退 BUTLER_*（默认 glm-4v-flash），去重相同服务。"""
+        candidates: list[tuple[str, str, str]] = []
+        main = (
+            (config.cfg.LLM_BASE_URL or "").strip(),
+            (config.cfg.LLM_API_KEY or "").strip(),
+            (config.cfg.LLM_MODEL or "").strip(),
+        )
+        if all(main):
+            candidates.append(main)
+        fallback = (
+            (config.cfg.BUTLER_BASE_URL or config.cfg.LLM_BASE_URL or "").strip(),
+            (config.cfg.BUTLER_API_KEY or config.cfg.LLM_API_KEY or "").strip(),
+            (config.cfg.BUTLER_MODEL or "glm-4v-flash").strip(),
+        )
+        if all(fallback) and fallback not in candidates:
+            candidates.append(fallback)
+        return candidates
 
     # ---------- 主动发言构造 ----------
 

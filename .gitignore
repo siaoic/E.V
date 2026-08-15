@@ -37,8 +37,8 @@ env/
 src/memory/memU-main.zip
 
 # ================= TTS 本地模型（体积巨大，不入库，需自行下载/拷贝） =================
-# 注意：实际模型目录在 gsv-tts/API/models 下（旧条目 gsv_tts/API/models/ 已失效）
-gsv-tts/API/models/
+# 注意：实际模型目录在 gsv_tts/API/models 下（旧条目 gsv_tts/API/models/ 已失效）
+gsv_tts/API/models/
 
 # ================= 临时 TTS 音频（GPT-SoVITS 为 wav，edge 为 mp3） =================
 vtuber_tts_*
@@ -83,3 +83,11 @@ src/memory/memu/*
 *.tmp
 *.bak
 *~
+
+# ================= Playwright MCP =================
+# AI 浏览器操作的下载/截图/文件保存目录
+browser_files/
+
+# ================= MCP 本地 node 依赖（npm install --prefix tools/mcp 安装） =================
+# package-lock.json 保留用于复现安装，node_modules 体积大不入库
+tools/mcp/node_modules/

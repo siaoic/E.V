@@ -287,13 +287,23 @@ class VTSController:
             request_id="mouth",
         )
 
-    async def trigger_hotkey(self, hotkey_id: str) -> None:
-        """触发热键（动作 / 表情 / 状态切换）。fire-and-forget。"""
+    async def trigger_hotkey(self, hotkey_id: str,
+                             priority: str = "High") -> None:
+        """触发热键（动作 / 表情 / 状态切换）。fire-and-forget。
+
+        priority：触发动画的播放优先级（Auto/Low/Normal/High）。
+        VTS 中正在播放的动画只能被「同级或更高优先级」打断，同级触发会
+        排队等当前动画播完——表现为「点击预览不立即生效」。默认 High
+        让新动画立即打断当前动画（非动画热键忽略该字段）。
+        """
         if not self.authenticated or not hotkey_id:
             return
+        data: dict = {"hotkeyID": hotkey_id}
+        if priority in ("Auto", "Low", "Normal", "High"):
+            data["triggeringAnimationPriority"] = priority
         await self._send(
             "HotkeyTriggerRequest",
-            {"hotkeyID": hotkey_id},
+            data,
             request_id=f"hotkey_{hotkey_id}",
         )
 

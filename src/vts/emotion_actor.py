@@ -34,6 +34,7 @@ class VtsEmotionActor(BaseEmotionActor):
         self._expr_files: Dict[str, str] = {}      # 表情名 → 表情文件（激活按 file）
         self._motion_hotkeys: Dict[str, Dict] = {}  # 动作名 → 热键 {id, file}
         self._folder_motions: Dict[str, str] = {}   # 动作名 → 模型文件夹内 .motion3.json 绝对路径
+        self._stop_hotkeys: Dict[str, str] = {}     # 停止动画类热键名 → 热键 id（注入播放前停旧动画）
         self._active_expr_file: str = ""            # 当前激活的表情文件（替换语义）
 
     # ---------- 启动扫描 ----------
@@ -46,6 +47,8 @@ class VtsEmotionActor(BaseEmotionActor):
         self._motions = {}
         self._expr_files = {}
         self._motion_hotkeys = {}
+        self._folder_motions = {}
+        self._stop_hotkeys = {}
         self._active_expr_file = ""
         self._model_name = ""
         hotkeys: list = []
@@ -81,6 +84,14 @@ class VtsEmotionActor(BaseEmotionActor):
                 continue
             name = h.get("name", "") or f
             self._motion_hotkeys[name] = {"id": h.get("id", ""), "file": f}
+        # 停止动画类热键（AnimationStop）：注入路径播放文件夹动作前触发，
+        # 停掉正在播放的 VTS 原生动画（见 _trigger_motion）
+        for h in hotkeys:
+            if (h.get("type", "") or "").lower() in (
+                    "animationstop", "stopanimation", "stop animation"):
+                name = h.get("name", "") or h.get("id", "")
+                if name:
+                    self._stop_hotkeys[name] = h.get("id", "")
         self._motions = {name: 1 for name in self._motion_hotkeys}
         # 模型文件夹扫描兜底：VTS 热键需手动注册，未注册的动作/表情
         # 直接从模型文件夹枚举（动作走注入路径播放，表情可直接激活）
@@ -196,6 +207,10 @@ class VtsEmotionActor(BaseEmotionActor):
             # 该名字若已注册热键，scan 时不会进 _folder_motions（以热键为准）。
             path = self._folder_motions.get(name)
             if path and self._face is not None and os.path.isfile(path):
+                # 先停掉正在播放的 VTS 原生动画：注入参数属 P2（面捕通道），
+                # 低于 P3（一次性动画）——当前有动画在播时注入被压制，
+                # 要等动画播完才生效（「点击预览不立即生效」）。停动画后注入立即接管。
+                await self._stop_playing_animation()
                 self._face.set_motion(path)
                 return True
             # 按文件名匹配热键（VTSController.trigger_motion 支持精确/部分匹配）
@@ -209,6 +224,16 @@ class VtsEmotionActor(BaseEmotionActor):
         except Exception as e:
             console.dim(f"VTS 动作播放失败：{e}")
         return False
+
+    async def _stop_playing_animation(self) -> None:
+        """停止当前 VTS 原生动画（尽力而为）。
+
+        VTS API 无「停止动画」消息，只能触发类型为 AnimationStop 的
+        热键；模型未配置此类热键时跳过（注入参数在动画播完后自动接管）。
+        """
+        for stop_id in self._stop_hotkeys.values():
+            if stop_id:
+                await self._vts.trigger_hotkey(stop_id)
 
     async def play_motion(self, group: str, no: int) -> bool:
         # VTS 无「组名 序号」概念，序号忽略（兼容旧映射数据「组名 序号」格式）

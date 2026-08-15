@@ -1,8 +1,8 @@
 """屏幕视觉工具：截图 + 交给 ButlerAgent 描述画面（look_at_screen）。
 
 LLM 判断需要"看"画面时调用本工具：截取当前屏幕 → 压缩转 base64 →
-把图片交给 agent.describe_image（视觉模型，默认智谱 glm-4v-flash）描述 →
-返回画面描述文本给 LLM 继续对话。
+把图片交给 agent.describe_image 描述（优先主模型，主模型不支持图片时
+回退 BUTLER_MODEL）→ 返回画面描述文本给 LLM 继续对话。
 
 设计：
 - 本模块只负责「截图 + 压缩」，图片 → 视觉模型的调用统一在

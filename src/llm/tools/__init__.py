@@ -4,6 +4,7 @@
   - 每个工具 = OpenAI function 定义（defs.py）+ 异步实现（httpx，不阻塞 asyncio 主循环）
   - get_merged_tools(mcp)  合并「本地工具 + MCP 工具」→ OpenAI tools 格式
   - call_tool(name, args)  MCP 优先，本地兜底（对标 tool-executor.js）
+  - MCP 相关编排统一走 src/mcp/llm_bridge.py（本模块只保留本地工具逻辑）
 
 工具（src/llm/tools/ 下各一模块）：
   - web_search(query)    Tavily 直调：AI 摘要前置 + 详细结果（可直接朗读中文）
@@ -17,7 +18,6 @@
 
 from __future__ import annotations
 
-import json
 from typing import List
 
 from src.utils import config, console
@@ -29,6 +29,8 @@ from src.llm.tools.weather import _get_weather
 from src.llm.tools.skill_loader import _load_skill, _read_skill_resource
 from src.llm.tools.memory_tools import _remember_fact, _forget_memory
 from src.llm.tools.screen import _look_at_screen
+from src.llm.tools.sfx import _play_sound_effect, _list_sound_effects
+from src.mcp.llm_bridge import call_mcp_tool, get_mcp_tools_for_llm
 
 __all__ = [
     "get_merged_tools",
@@ -52,6 +54,8 @@ _LOCAL_REGISTRY = {
     "remember_fact": _remember_fact,
     "forget_memory": _forget_memory,
     "look_at_screen": _look_at_screen,
+    "play_sound_effect": _play_sound_effect,
+    "list_sound_effects": _list_sound_effects,
 }
 
 
@@ -71,13 +75,10 @@ def get_merged_tools(mcp=None) -> List[dict]:
     if not config.cfg.TOOLS_ENABLED:
         return tools
 
-    # MCP 工具（外部服务器提供）
-    if mcp is not None:
-        mcp_tools = mcp.get_tools_for_llm()
-        if mcp_tools:
-            tools.extend(mcp_tools)
+    # MCP 工具（外部服务器提供）；MCP 相关编排集中在 src/mcp/llm_bridge.py
+    tools.extend(get_mcp_tools_for_llm(mcp))
 
-    # 本地工具：受 .env 的 TOOL_*_ENABLED 开关控制（控制中心「工具屋」勾选），
+    # 本地工具：受 .env 的 TOOL_*_ENABLED 开关控制（控制中心「插件」页勾选），
     # 无 key 的工具跳过（web_search / get_weather 依赖 key）
     available_names = set()
     if config.cfg.TOOL_WEB_SEARCH_ENABLED and config.cfg.TAVILY_API_KEY:
@@ -98,12 +99,10 @@ def get_merged_tools(mcp=None) -> List[dict]:
     # 屏幕视觉（截屏 + 多模态描述），不依赖外部 key
     if config.cfg.TOOL_LOOK_SCREEN_ENABLED:
         available_names.add("look_at_screen")
-
-    # MCP 已提供 Tavily 官方搜索（tavily-search/tavily-extract）时，
-    # 隐藏本地 web_search，避免两个搜索工具让 LLM 选择混乱（对标 Tavily MCP 文档）
-    mcp_names = {t["function"]["name"] for t in tools}
-    if any("tavily" in n or "search" in n for n in mcp_names):
-        available_names.discard("web_search")
+    # 音效播放（本地 wav，无外部依赖；列表工具随播放开关）
+    if config.cfg.TOOL_PLAY_SFX_ENABLED:
+        available_names.add("play_sound_effect")
+        available_names.add("list_sound_effects")
 
     # 与 MCP 工具重名的本地工具跳过（外部服务器优先，避免 LLM 调用歧义）
     existing_names = {t["function"]["name"] for t in tools}
@@ -120,14 +119,10 @@ async def call_tool(name: str, args: dict, mcp=None) -> str:
     # 工具总开关关闭 → 拒绝调用
     if not config.cfg.TOOLS_ENABLED:
         return "错误：工具系统已关闭（设置页「启动工具」未开启），无法调用工具。"
-    # 1) 优先 MCP
-    if mcp is not None and mcp.is_enabled:
-        mcp_results = await mcp.handle_tool_calls(
-            [{"id": f"local_{name}", "type": "function",
-              "function": {"name": name, "arguments": json.dumps(args or {}, ensure_ascii=False)}}]
-        )
-        if mcp_results:
-            return mcp_results[0]["content"]
+    # 1) 优先 MCP（桥接在 src/mcp/llm_bridge.py，未命中返回 None 走本地兜底）
+    mcp_result = await call_mcp_tool(name, args, mcp)
+    if mcp_result is not None:
+        return mcp_result
 
     # 2) 本地工具兜底
     impl = _LOCAL_REGISTRY.get(name)
@@ -156,4 +151,7 @@ def get_local_tool_names() -> List[str]:
         names.add("forget_memory")
     if config.cfg.TOOL_LOOK_SCREEN_ENABLED:
         names.add("look_at_screen")
+    if config.cfg.TOOL_PLAY_SFX_ENABLED:
+        names.add("play_sound_effect")
+        names.add("list_sound_effects")
     return sorted(names)

@@ -5,7 +5,8 @@
 
 字段：
   - prefix: 匹配前缀（如 "!model " 后面带空格；exact=True 时整行匹配）
-  - handler: async 回调，签名 (app, cmd) -> bool，True 表示已消费
+  - handler: async 回调，签名 (cmd) -> bool（注册的是已绑定 self 的方法），
+             True 表示已消费
   - exact: True 表示 prefix 须整行匹配（用于 !config 这种独立命令）
   - exclusive: 是否独占（True 时命中后不再尝试其它匹配；本版本未启用，
                保留扩展位）
@@ -16,8 +17,9 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Awaitable, Callable, List, Optional
 
-# handler 签名：app 是 Application 实例，cmd 是用户输入整行；返回 True 表示已消费
-CommandHandler = Callable[["object", str], Awaitable[bool]]
+# handler 签名：cmd 是用户输入整行（handler 为绑定方法，self 已绑定）；
+# 返回 True 表示已消费
+CommandHandler = Callable[[str], Awaitable[bool]]
 
 
 @dataclass(frozen=True)
@@ -39,15 +41,15 @@ class CommandRegistry:
         """注册若干命令。重复 prefix 不去重，由 dispatch 顺序决定命中。"""
         self._cmds.extend(cmds)
 
-    async def dispatch(self, app: "object", cmd: str) -> Optional[bool]:
+    async def dispatch(self, cmd: str) -> Optional[bool]:
         """按注册顺序尝试匹配：返回 handler 结果 / 命中后没 handler 返 True / 全不匹配返 None。"""
         for c in self._cmds:
             if c.exact:
                 if cmd == c.prefix:
-                    return await c.handler(app, cmd)
+                    return await c.handler(cmd)
                 continue
             if cmd.startswith(c.prefix):
-                return await c.handler(app, cmd)
+                return await c.handler(cmd)
         return None
 
     def help_text(self) -> str:

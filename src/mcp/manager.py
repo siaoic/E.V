@@ -212,9 +212,14 @@ class MCPManager:
                 console.warn(f"⚠️ MCP 服务器 {name} 启动失败: {res}")
 
     async def start_server(self, name: str, server_config: dict) -> None:
-        """启动单个服务器（stdio 或 HTTP）。"""
+        """启动单个服务器（stdio 或 HTTP）。
+
+        超时取服务器配置的 timeout 字段（如 npx 首次下载 npm 包较慢），
+        未配置时回退到全局 startup_timeout。
+        """
         try:
             cfg = _expand_env(dict(server_config))  # 展开 ${ENV_VAR}（如 Tavily key）
+            timeout = float(cfg.get("timeout") or self.startup_timeout)
             # 相对路径命令（./tools/...）默认以 MCP 配置目录为 cwd
             args = cfg.get("args") or []
             if (args and isinstance(args[0], str) and args[0].startswith("./")
@@ -222,13 +227,13 @@ class MCPManager:
                 cfg.setdefault("cwd", self._config_dir)
 
             if cfg.get("type") == "streamable_http" or cfg.get("url"):
-                transport = MCPHttpTransport(cfg, self.tool_registry, self.startup_timeout)
+                transport = MCPHttpTransport(cfg, self.tool_registry, timeout)
             else:
-                transport = MCPStdioTransport(cfg, self.tool_registry, self.startup_timeout)
-            await asyncio.wait_for(transport.start(name), timeout=self.startup_timeout)
+                transport = MCPStdioTransport(cfg, self.tool_registry, timeout)
+            await asyncio.wait_for(transport.start(name), timeout=timeout)
             self.transports[name] = transport
         except asyncio.TimeoutError:
-            raise RuntimeError(f"服务器 {name} 启动超时（{self.startup_timeout}s）")
+            raise RuntimeError(f"服务器 {name} 启动超时（{timeout}s）")
 
     # ------------------------------------------------------------------
     # 工具调用

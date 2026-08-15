@@ -73,7 +73,7 @@ QStackedWidget {
 }
 
 /* 页面背景 */
-QWidget#page, QWidget#page_llm, QWidget#page_memory, QWidget#page_settings, QWidget#page_about {
+QWidget#page, QWidget#page_llm, QWidget#page_memory, QWidget#page_settings, QWidget#page_about, QWidget#page_tools {
 	background-color: transparent;
 }
 
@@ -84,7 +84,7 @@ QLabel {
 }
 
 /* 页面标题样式 - 底部薄荷分隔线 */
-QLabel#label_title, QLabel#label_title_launch, QLabel#label_title_llm, QLabel#label_title_memory, QLabel#label_title_settings, QLabel#label_title_face, QLabel#label_title_tools, QLabel#label_title_about {
+QLabel#label_title, QLabel#label_title_launch, QLabel#label_title_llm, QLabel#label_title_memory, QLabel#label_title_settings, QLabel#label_title_face, QLabel#label_title_tools, QLabel#label_title_about, QLabel#label_plugin_config_title {
 	color: rgb(91, 70, 54);
 	font-size: 17px;
 	font-weight: bold;
@@ -289,16 +289,25 @@ QWidget#widget_emotion_zone {
 	background: transparent;
 }
 
-/* 情绪绑定区卡片：米白底 + 虚线薄荷边，悬停实色高亮 */
+/* 表情绑定区大背景：薄荷渐变 + 同色系描边（与动作区 card_motion_zone 同结构，配色薄荷） */
+QFrame#card_emotion_zone {
+	background: qlineargradient(x1:0, y1:0, x2:1, y2:1,
+		stop:0 rgba(234, 246, 240, 235),
+		stop:0.5 rgba(222, 240, 232, 235),
+		stop:1 rgba(208, 232, 220, 235));
+	border: 2px solid rgb(143, 200, 188);
+	border-radius: 12px;
+}
+
+/* 表情绑定区卡片：米白底 + 无线框，悬停仅背景变化（与动作区卡片结构一致） */
 QFrame#emotion_card {
-	background: rgba(252, 252, 248, 235);
-	border: 1.5px dashed rgba(143, 200, 188, 210);
+	background: rgba(252, 252, 250, 235);
+	border: none;
 	border-radius: 10px;
 }
 
 QFrame#emotion_card:hover {
-	border: 1.5px solid rgba(120, 200, 188, 235);
-	background: rgba(248, 252, 250, 240);
+	background: rgba(246, 252, 248, 240);
 }
 
 /* 情绪名：玫红粗体（角色缎带色，对齐 HTML .emotion-card .name） */
@@ -309,8 +318,8 @@ QLabel#emotion_name {
 	background: transparent;
 }
 
-/* 情绪槽位 - 未绑定：淡薄荷底 + 虚线薄荷边 */
-QLabel#slot_empty {
+/* 情绪槽位 - 未绑定：淡薄荷底 + 虚线薄荷边（objectName 为 slot_empty_expr） */
+QLabel#slot_empty_expr {
 	background: rgba(238, 248, 244, 200);
 	border: 1.5px dashed rgba(143, 200, 188, 215);
 	border-radius: 8px;
@@ -320,14 +329,14 @@ QLabel#slot_empty {
 }
 
 /* 情绪槽位 - 拖拽悬停高亮（薄荷底加深） */
-QLabel#slot_empty[drag="true"] {
+QLabel#slot_empty_expr[drag="true"] {
 	background: rgba(210, 235, 225, 235);
 	border: 1.5px dashed rgb(95, 184, 170);
 	color: rgb(63, 120, 105);
 }
 
 /* 情绪槽位 - 已绑定：薄荷渐变 + 薄荷实边 */
-QLabel#slot_filled {
+QLabel#slot_filled_expr {
 	background: qlineargradient(x1:0, y1:0, x2:0, y2:1,
 		stop:0 rgba(210, 235, 225, 255),
 		stop:1 rgba(190, 222, 201, 255));
@@ -397,13 +406,14 @@ QWidget#widget_action_library {
 	background: transparent;
 }
 
-/* 工具卡片：米色（与主背景同调，融入整体） */
+/* 插件卡片容器：米色渐变，与侧边栏完全一致（同配色、同描边、同圆角） */
 QFrame#card_tool_status {
-	background: qlineargradient(x1:0, y1:0, x2:0, y2:1,
-		stop:0 rgba(253, 248, 238, 220),
-		stop:1 rgba(248, 243, 230, 220));
-	border: 1px solid rgb(200, 185, 158);
-	border-radius: 12px;
+	background: qlineargradient(x1:0, y1:0, x2:1, y2:1,
+		stop:0 rgba(253, 248, 238, 200),
+		stop:0.5 rgba(248, 243, 230, 200),
+		stop:1 rgba(243, 237, 222, 200));
+	border: 1px solid rgba(200, 185, 158, 200);
+	border-radius: 20px;
 }
 
 /* 工具卡片内部标题：浅蓝粗体（角色裙子色） */
@@ -585,21 +595,101 @@ QTableWidget::item:selected {
 	color: rgb(40, 70, 60);
 }
 
-/* 工具表格：透明无边框，背景由容器裁剪 */
-QTableWidget#table_tool_status {
-	background: transparent;
-	border: none;
-	border-radius: 0px;
-	alternate-background-color: rgba(245, 248, 240, 255);
-	gridline-color: rgba(180, 200, 195, 120);
+/* 插件卡片：米色圆角卡片，点击卡片本体切换启用/关闭 */
+QFrame#plugin_card {
+	background: qlineargradient(x1:0, y1:0, x2:0, y2:1,
+		stop:0 rgba(252, 250, 245, 240), stop:1 rgba(246, 244, 238, 240));
+	border: 1px solid rgba(200, 190, 170, 210);
+	border-radius: 10px;
 }
 
-/* 表头圆角：与容器圆角对齐 */
-QTableWidget#table_tool_status QHeaderView::section:first {
-	border-top-left-radius: 12px;
+QFrame#plugin_card:hover {
+	border: 1.5px solid rgba(120, 200, 188, 230);
 }
-QTableWidget#table_tool_status QHeaderView::section:last {
-	border-top-right-radius: 12px;
+
+QFrame#plugin_card[checkable="false"] {
+	border: 1px solid rgba(200, 200, 200, 180);
+	background: qlineargradient(x1:0, y1:0, x2:0, y2:1,
+		stop:0 rgba(244, 244, 240, 200), stop:1 rgba(238, 238, 234, 200));
+}
+
+/* 插件名：浅蓝粗体（角色裙子色，与配置标题同款） */
+QLabel#plugin_card_name {
+	color: rgb(63, 110, 146);
+	font-size: 14px;
+	font-weight: bold;
+	background: transparent;
+}
+
+/* 插件状态说明 / 类型徽标 */
+QLabel#plugin_card_status {
+	background: transparent;
+	font-size: 12px;
+}
+
+QLabel#plugin_card_desc {
+	background: transparent;
+	color: rgb(120, 110, 100);
+	font-size: 12px;
+}
+
+QLabel#plugin_card_kind {
+	background: rgba(143, 200, 188, 70);
+	color: rgb(63, 110, 146);
+	border-radius: 4px;
+	padding: 1px 6px;
+	font-size: 11px;
+}
+
+/* 启用/关闭切换按钮：绿=启用动作，灰=关闭动作 */
+QPushButton#plugin_card_toggle {
+	border-radius: 6px;
+	padding: 5px 16px;
+	font-size: 12px;
+	font-weight: bold;
+	border: 1px solid transparent;
+}
+
+QPushButton#plugin_card_toggle[active="true"] {
+	background: rgba(45, 130, 75, 225);
+	color: white;
+}
+
+QPushButton#plugin_card_toggle[active="false"] {
+	background: rgba(160, 160, 160, 200);
+	color: white;
+}
+
+QPushButton#plugin_card_toggle:disabled {
+	background: rgba(210, 210, 210, 200);
+	color: rgb(140, 140, 140);
+}
+
+/* 配置按钮：薄荷描边 */
+QPushButton#plugin_card_config {
+	background: rgba(238, 248, 244, 255);
+	border: 1px solid rgba(120, 200, 188, 210);
+	border-radius: 6px;
+	padding: 5px 16px;
+	font-size: 12px;
+	color: rgb(63, 110, 146);
+}
+
+QPushButton#plugin_card_config:hover {
+	background: rgba(222, 243, 238, 255);
+	border: 1.5px solid rgba(120, 200, 188, 255);
+}
+
+/* 插件列表/配置滚动区：透明无边框；内部 viewport 与内容 widget 也要
+   透明，否则默认底色（灰）会盖住卡片容器 card_tool_status 的米色 */
+QScrollArea#scroll_plugin_cards, QScrollArea#scroll_plugin_config {
+	background: transparent;
+	border: none;
+}
+
+QWidget#page_tools QScrollArea > QWidget > QWidget {
+	background: transparent;
+	border: none;
 }
 
 QHeaderView::section {
@@ -902,16 +992,7 @@ QPlainTextEdit:focus {
          </property>
         </widget>
        </item>
-       <item>
-        <widget class="QPushButton" name="nav_memory">
-         <property name="text">
-          <string>记忆</string>
-         </property>
-         <property name="checkable">
-          <bool>true</bool>
-         </property>
-        </widget>
-       </item>
+       
        <item>
         <widget class="QPushButton" name="nav_face">
          <property name="text">
@@ -925,7 +1006,7 @@ QPlainTextEdit:focus {
        <item>
         <widget class="QPushButton" name="nav_tools">
          <property name="text">
-          <string>工具</string>
+          <string>插件</string>
          </property>
          <property name="checkable">
           <bool>true</bool>
@@ -936,6 +1017,16 @@ QPlainTextEdit:focus {
         <widget class="QPushButton" name="nav_settings">
          <property name="text">
           <string>设置</string>
+         </property>
+         <property name="checkable">
+          <bool>true</bool>
+         </property>
+        </widget>
+       </item>
+       <item>
+        <widget class="QPushButton" name="nav_memory">
+         <property name="text">
+          <string>记忆</string>
          </property>
          <property name="checkable">
           <bool>true</bool>
@@ -1291,534 +1382,8 @@ QPlainTextEdit:focus {
            </item>
           </layout>
          </widget>
-         <widget class="QWidget" name="page_memory">
-          <layout class="QVBoxLayout" name="verticalLayout_memory">
-           <property name="spacing">
-            <number>10</number>
-           </property>
-           <property name="leftMargin">
-            <number>0</number>
-           </property>
-           <property name="topMargin">
-            <number>18</number>
-           </property>
-           <property name="rightMargin">
-            <number>0</number>
-           </property>
-           <property name="bottomMargin">
-            <number>0</number>
-           </property>
-           <item>
-            <widget class="QLabel" name="label_title_memory">
-             <property name="text">
-              <string>记忆</string>
-             </property>
-            </widget>
-           </item>
-           <item>
-            <layout class="QHBoxLayout" name="horizontalLayout_memory_top">
-             <item>
-              <widget class="QPushButton" name="btn_memory_refresh">
-               <property name="text">
-                <string>刷新</string>
-               </property>
-              </widget>
-             </item>
-             <item>
-              <widget class="QPushButton" name="btn_memory_view_toggle">
-               <property name="text">
-                <string>表格视图</string>
-               </property>
-              </widget>
-             </item>
-             <item>
-              <spacer name="horizontalSpacer_memory_top">
-               <property name="orientation">
-                <enum>Qt::Horizontal</enum>
-               </property>
-               <property name="sizeHint">
-                <size>
-                 <width>40</width>
-                 <height>20</height>
-                </size>
-               </property>
-              </spacer>
-             </item>
-             <item>
-              <widget class="QLabel" name="label_memory_status">
-               <property name="text">
-                <string/>
-               </property>
-              </widget>
-             </item>
-            </layout>
-           </item>
-           <item>
-            <widget class="QStackedWidget" name="stack_memory">
-             <property name="currentIndex">
-              <number>0</number>
-             </property>
-             <widget class="QWidget" name="page_memory_list">
-              <layout class="QVBoxLayout" name="verticalLayout_memory_list">
-               <property name="spacing">
-                <number>0</number>
-               </property>
-               <property name="leftMargin">
-                <number>0</number>
-               </property>
-               <property name="topMargin">
-                <number>6</number>
-               </property>
-               <property name="rightMargin">
-                <number>0</number>
-               </property>
-               <property name="bottomMargin">
-                <number>0</number>
-               </property>
-               <item>
-                <widget class="QTableWidget" name="table_memory">
-                 <property name="alternatingRowColors">
-                  <bool>true</bool>
-                 </property>
-                 <property name="selectionMode">
-                  <enum>QAbstractItemView::ExtendedSelection</enum>
-                 </property>
-                 <column>
-                  <property name="text">
-                   <string>名称</string>
-                  </property>
-                 </column>
-                 <column>
-                  <property name="text">
-                   <string>描述</string>
-                  </property>
-                 </column>
-                 <column>
-                  <property name="text">
-                   <string>内容</string>
-                  </property>
-                 </column>
-                 <column>
-                  <property name="text">
-                   <string>更新时间</string>
-                  </property>
-                 </column>
-                </widget>
-               </item>
-              </layout>
-             </widget>
-             <widget class="QWidget" name="page_memory_graph">
-              <layout class="QVBoxLayout" name="verticalLayout_memory_graph">
-               <property name="leftMargin">
-                <number>0</number>
-               </property>
-               <property name="topMargin">
-                <number>6</number>
-               </property>
-               <property name="rightMargin">
-                <number>0</number>
-               </property>
-               <property name="bottomMargin">
-                <number>0</number>
-               </property>
-               <item>
-                <widget class="QGraphicsView" name="graph_memory"/>
-               </item>
-              </layout>
-             </widget>
-            </widget>
-           </item>
-          </layout>
-         </widget>
-         <widget class="QWidget" name="page_settings">
-          <layout class="QVBoxLayout" name="verticalLayout_settings_page">
-           <property name="leftMargin">
-            <number>0</number>
-           </property>
-           <property name="topMargin">
-            <number>0</number>
-           </property>
-           <property name="rightMargin">
-            <number>0</number>
-           </property>
-           <property name="bottomMargin">
-            <number>0</number>
-           </property>
-           <item>
-            <widget class="QScrollArea" name="scroll_settings_page">
-             <property name="widgetResizable">
-              <bool>true</bool>
-             </property>
-             <property name="frameShape">
-              <enum>QFrame::NoFrame</enum>
-             </property>
-             <widget class="QWidget" name="widget_settings_page">
-              <layout class="QVBoxLayout" name="verticalLayout_settings">
-               <property name="spacing">
-                <number>10</number>
-               </property>
-               <property name="leftMargin">
-                <number>0</number>
-               </property>
-               <property name="topMargin">
-                <number>0</number>
-               </property>
-               <property name="rightMargin">
-                <number>0</number>
-               </property>
-               <property name="bottomMargin">
-                <number>0</number>
-               </property>
-               <item>
-                <widget class="QLabel" name="label_title_settings">
-                 <property name="text">
-                  <string>设置</string>
-                 </property>
-                </widget>
-               </item>
-               <item>
-                <widget class="QLabel" name="label_title_options">
-                 <property name="text">
-                  <string>选项</string>
-                 </property>
-                </widget>
-               </item>
-               <item>
-                <widget class="QFrame" name="control_panel_frame">
-                 <property name="frameShape">
-                  <enum>QFrame::StyledPanel</enum>
-                 </property>
-                 <layout class="QGridLayout" name="gridLayout_panel">
-                  <property name="horizontalSpacing">
-                   <number>18</number>
-                  </property>
-                  <property name="verticalSpacing">
-                   <number>8</number>
-                  </property>
-                  <item row="0" column="0">
-                   <widget class="QCheckBox" name="cb_mcp">
-                    <property name="text">
-                     <string>启用工具</string>
-                    </property>
-                   </widget>
-                  </item>
-                  <item row="0" column="1">
-                   <widget class="QCheckBox" name="cb_proactive">
-                    <property name="text">
-                     <string>主动对话</string>
-                    </property>
-                   </widget>
-                  </item>
-                  <item row="0" column="2">
-                   <widget class="QCheckBox" name="cb_filter">
-                    <property name="text">
-                     <string>内容过滤</string>
-                    </property>
-                   </widget>
-                  </item>
-                  <item row="1" column="0">
-                   <widget class="QCheckBox" name="cb_stt">
-                    <property name="text">
-                     <string>语音识别</string>
-                    </property>
-                   </widget>
-                  </item>
-                  <item row="1" column="1">
-                   <widget class="QCheckBox" name="cb_emotion_actor">
-                    <property name="text">
-                     <string>情绪控制</string>
-                    </property>
-                   </widget>
-                  </item>
-                  <item row="1" column="2">
-                   <widget class="QCheckBox" name="cb_bili_enabled">
-                    <property name="text">
-                     <string>弹幕回复</string>
-                    </property>
-                   </widget>
-                  </item>
-                 </layout>
-                </widget>
-               </item>
-               <item>
-                <layout class="QFormLayout" name="formLayout_settings">
-                 <property name="verticalSpacing">
-                  <number>10</number>
-                 </property>
-                 <item row="0" column="0">
-                  <widget class="QLabel" name="label_tts">
-                   <property name="text">
-                    <string>参考音频：</string>
-                   </property>
-                  </widget>
-                 </item>
-                 <item row="0" column="1">
-                  <widget class="QLineEdit" name="ed_tts_audio">
-                   <property name="placeholderText">
-                    <string>GPT-SoVITS 参考音频路径（可拖拽音频，留空 = 关闭 TTS）</string>
-                   </property>
-                  </widget>
-                 </item>
-                 <item row="1" column="0">
-                  <widget class="QLabel" name="label_tts_text">
-                   <property name="text">
-                    <string>音频文本：</string>
-                   </property>
-                  </widget>
-                 </item>
-                 <item row="1" column="1">
-                  <widget class="QLineEdit" name="ed_tts_text">
-                   <property name="placeholderText">
-                    <string>参考音频文本</string>
-                   </property>
-                  </widget>
-                 </item>
-                 <item row="2" column="0">
-                  <widget class="QLabel" name="label_tts_audios">
-                   <property name="text">
-                    <string>辅助参考：</string>
-                   </property>
-                  </widget>
-                 </item>
-                 <item row="2" column="1">
-                  <widget class="QLineEdit" name="ed_tts_audios">
-                   <property name="placeholderText">
-                    <string>辅助参考音频，多个用 | 分隔（可拖拽多个音频，与主参考混合）</string>
-                   </property>
-                  </widget>
-                 </item>
-                </layout>
-               </item>
-               <item>
-                <widget class="QLabel" name="label_title_stt">
-                 <property name="text">
-                  <string>语音识别</string>
-                 </property>
-                </widget>
-               </item>
-               <item>
-                <layout class="QFormLayout" name="formLayout_stt">
-                 <property name="verticalSpacing">
-                  <number>12</number>
-                 </property>
-                 <item row="0" column="0">
-                  <widget class="QLabel" name="label_stt_key">
-                   <property name="text">
-                    <string>API Key：</string>
-                   </property>
-                  </widget>
-                 </item>
-                 <item row="0" column="1">
-                  <widget class="QLineEdit" name="ed_stt_key">
-                   <property name="placeholderText">
-                    <string>SiliconFlow API Key（留空复用 .env 的 SILICONFLOW_API_KEY）</string>
-                   </property>
-                  </widget>
-                 </item>
-                 <item row="1" column="0">
-                  <widget class="QLabel" name="label_stt_url">
-                   <property name="text">
-                    <string>API URL：</string>
-                   </property>
-                  </widget>
-                 </item>
-                 <item row="1" column="1">
-                  <widget class="QLineEdit" name="ed_stt_url">
-                   <property name="placeholderText">
-                    <string>留空 = 与 SiliconFlow 共用服务（默认 https://api.siliconflow.cn/v1）</string>
-                   </property>
-                  </widget>
-                 </item>
-                 <item row="2" column="0">
-                  <widget class="QLabel" name="label_stt_model">
-                   <property name="text">
-                    <string>模型名称：</string>
-                   </property>
-                  </widget>
-                 </item>
-                 <item row="2" column="1">
-                  <widget class="QLineEdit" name="ed_stt_model">
-                   <property name="placeholderText">
-                    <string>STT_MODEL（默认 FunAudioLLM/SenseVoiceSmall）</string>
-                   </property>
-                  </widget>
-                 </item>
-                </layout>
-               </item>
-               <item>
-                <widget class="QLabel" name="label_title_butler">
-                 <property name="text">
-                  <string>Agent模型</string>
-                 </property>
-                </widget>
-               </item>
-               <item>
-                <layout class="QFormLayout" name="formLayout_butler">
-                 <property name="verticalSpacing">
-                  <number>12</number>
-                 </property>
-                 <item row="0" column="0">
-                  <widget class="QLabel" name="label_butler_key">
-                   <property name="text">
-                    <string>API KEY：</string>
-                   </property>
-                  </widget>
-                 </item>
-                 <item row="0" column="1">
-                  <widget class="QLineEdit" name="ed_butler_key">
-                   <property name="echoMode">
-                    <enum>QLineEdit::Password</enum>
-                   </property>
-                  </widget>
-                 </item>
-                 <item row="1" column="0">
-                  <widget class="QLabel" name="label_butler_url">
-                   <property name="text">
-                    <string>API URL：</string>
-                   </property>
-                  </widget>
-                 </item>
-                 <item row="1" column="1">
-                  <widget class="QLineEdit" name="ed_butler_url"/>
-                 </item>
-                 <item row="2" column="0">
-                  <widget class="QLabel" name="label_butler_model">
-                   <property name="text">
-                    <string>模型名称：</string>
-                   </property>
-                  </widget>
-                 </item>
-                 <item row="2" column="1">
-                  <widget class="QLineEdit" name="ed_butler_model"/>
-                 </item>
-                </layout>
-               </item>
-               <item>
-                <widget class="QLabel" name="label_title_emb">
-                 <property name="text">
-                  <string>嵌入模型</string>
-                 </property>
-                </widget>
-               </item>
-               <item>
-                <layout class="QFormLayout" name="formLayout_emb">
-                 <property name="verticalSpacing">
-                  <number>12</number>
-                 </property>
-                 <item row="0" column="0">
-                  <widget class="QLabel" name="label_emb_key">
-                   <property name="text">
-                    <string>API KEY：</string>
-                   </property>
-                  </widget>
-                 </item>
-                 <item row="0" column="1">
-                  <widget class="QLineEdit" name="ed_emb_key">
-                   <property name="echoMode">
-                    <enum>QLineEdit::Password</enum>
-                   </property>
-                  </widget>
-                 </item>
-                 <item row="1" column="0">
-                  <widget class="QLabel" name="label_emb_url">
-                   <property name="text">
-                    <string>API URL：</string>
-                   </property>
-                  </widget>
-                 </item>
-                 <item row="1" column="1">
-                  <widget class="QLineEdit" name="ed_emb_url"/>
-                 </item>
-                 <item row="2" column="0">
-                  <widget class="QLabel" name="label_emb_model">
-                   <property name="text">
-                    <string>模型名称：</string>
-                   </property>
-                  </widget>
-                 </item>
-                 <item row="2" column="1">
-                  <widget class="QLineEdit" name="ed_emb_model"/>
-                 </item>
-                </layout>
-               </item>
-               <item>
-                <widget class="QLabel" name="label_title_bili">
-                 <property name="text">
-                  <string>B站弹幕</string>
-                 </property>
-                </widget>
-               </item>
-               <item>
-                <layout class="QFormLayout" name="formLayout_bili">
-                 <property name="verticalSpacing">
-                  <number>12</number>
-                 </property>
-                 <item row="0" column="0">
-                  <widget class="QLabel" name="label_bili_room">
-                   <property name="text">
-                    <string>直播间号：</string>
-                   </property>
-                  </widget>
-                 </item>
-                 <item row="0" column="1">
-                  <widget class="QLineEdit" name="ed_bili_room">
-                   <property name="placeholderText">
-                    <string>BILI_ROOM_ID（0 = 不连弹幕仅起网页）</string>
-                   </property>
-                  </widget>
-                 </item>
-                 <item row="1" column="0">
-                  <widget class="QLabel" name="label_bili_sessdata">
-                   <property name="text">
-                    <string>登录令牌：</string>
-                   </property>
-                  </widget>
-                 </item>
-                 <item row="1" column="1">
-                  <widget class="QLineEdit" name="ed_bili_sessdata">
-                   <property name="echoMode">
-                    <enum>QLineEdit::Password</enum>
-                   </property>
-                   <property name="placeholderText">
-                    <string>B站 Cookie（填了弹幕用户名不打码；留空可连但用户名打码）</string>
-                   </property>
-                  </widget>
-                 </item>
-                 <item row="2" column="0">
-                  <widget class="QLabel" name="label_bili_port">
-                   <property name="text">
-                    <string>网页端口：</string>
-                   </property>
-                  </widget>
-                 </item>
-                 <item row="2" column="1">
-                  <widget class="QLineEdit" name="ed_bili_port">
-                   <property name="placeholderText">
-                    <string>BILI_SERVER_PORT（默认 8766）</string>
-                   </property>
-                  </widget>
-                 </item>
-                </layout>
-               </item>
-               <item>
-                <spacer name="verticalSpacer_settings">
-                 <property name="orientation">
-                  <enum>Qt::Vertical</enum>
-                 </property>
-                 <property name="sizeHint">
-                  <size>
-                   <width>20</width>
-                   <height>40</height>
-                  </size>
-                 </property>
-                </spacer>
-               </item>
-              </layout>
-             </widget>
-            </widget>
-           </item>
-          </layout>
-         </widget>
+         
+         
          <widget class="QWidget" name="page_face">
           <layout class="QVBoxLayout" name="verticalLayout_face">
            <property name="spacing">
@@ -2222,7 +1787,7 @@ QPlainTextEdit:focus {
            <item>
             <widget class="QLabel" name="label_title_tools">
              <property name="text">
-              <string>工具</string>
+              <string>插件</string>
              </property>
             </widget>
            </item>
@@ -2255,7 +1820,7 @@ QPlainTextEdit:focus {
                 <item>
                  <widget class="QLabel" name="label_tool_status_title">
                   <property name="text">
-                   <string>工具启用状态</string>
+                   <string>插件列表</string>
                   </property>
                  </widget>
                 </item>
@@ -2282,41 +1847,688 @@ QPlainTextEdit:focus {
                </layout>
               </item>
               <item>
-               <widget class="QTableWidget" name="table_tool_status">
-                <property name="alternatingRowColors">
-                 <bool>true</bool>
+               <widget class="QStackedWidget" name="stack_tools">
+                <property name="currentIndex">
+                 <number>0</number>
                 </property>
-                <property name="columnCount">
-                 <number>5</number>
-                </property>
-                <column>
-                 <property name="text">
-                  <string>启用</string>
-                 </property>
-                </column>
-                <column>
-                 <property name="text">
-                  <string>工具</string>
-                 </property>
-                </column>
-                <column>
-                 <property name="text">
-                  <string>类型</string>
-                 </property>
-                </column>
-                <column>
-                 <property name="text">
-                  <string>状态</string>
-                 </property>
-                </column>
-                <column>
-                 <property name="text">
-                  <string>说明</string>
-                 </property>
-                </column>
+                <widget class="QWidget" name="page_plugin_list">
+                 <layout class="QVBoxLayout" name="verticalLayout_plugin_list">
+                  <property name="leftMargin">
+                   <number>0</number>
+                  </property>
+                  <property name="topMargin">
+                   <number>0</number>
+                  </property>
+                  <property name="rightMargin">
+                   <number>0</number>
+                  </property>
+                  <property name="bottomMargin">
+                   <number>0</number>
+                  </property>
+                  <item>
+                   <widget class="QScrollArea" name="scroll_plugin_cards">
+                    <property name="frameShape">
+                     <enum>QFrame::NoFrame</enum>
+                    </property>
+                    <property name="widgetResizable">
+                     <bool>true</bool>
+                    </property>
+                    <widget class="QWidget" name="widget_plugin_cards">
+                     <property name="geometry">
+                      <rect>
+                       <x>0</x>
+                       <y>0</y>
+                       <width>820</width>
+                       <height>200</height>
+                      </rect>
+                     </property>
+                     <layout class="QVBoxLayout" name="vlayout_plugin_cards">
+                      <property name="spacing">
+                       <number>10</number>
+                      </property>
+                      <property name="leftMargin">
+                       <number>0</number>
+                      </property>
+                      <property name="topMargin">
+                       <number>0</number>
+                      </property>
+                      <property name="rightMargin">
+                       <number>0</number>
+                      </property>
+                      <property name="bottomMargin">
+                       <number>0</number>
+                      </property>
+                     </layout>
+                    </widget>
+                   </widget>
+                  </item>
+                 </layout>
+                </widget>
+                <widget class="QWidget" name="page_plugin_config">
+                 <layout class="QVBoxLayout" name="verticalLayout_plugin_config">
+                  <property name="spacing">
+                   <number>10</number>
+                  </property>
+                  <property name="leftMargin">
+                   <number>0</number>
+                  </property>
+                  <property name="topMargin">
+                   <number>0</number>
+                  </property>
+                  <property name="rightMargin">
+                   <number>0</number>
+                  </property>
+                  <property name="bottomMargin">
+                   <number>0</number>
+                  </property>
+                  <item>
+                   <layout class="QHBoxLayout" name="horizontalLayout_plugin_config_head">
+                    <property name="spacing">
+                     <number>10</number>
+                    </property>
+                    <item>
+                     <widget class="QPushButton" name="btn_plugin_back">
+                      <property name="text">
+                       <string>← 返回</string>
+                      </property>
+                     </widget>
+                    </item>
+                    <item>
+                     <widget class="QLabel" name="label_plugin_config_title">
+                      <property name="text">
+                       <string/>
+                      </property>
+                     </widget>
+                    </item>
+                    <item>
+                     <spacer name="horizontalSpacer_plugin_config">
+                      <property name="orientation">
+                       <enum>Qt::Horizontal</enum>
+                      </property>
+                      <property name="sizeHint">
+                       <size>
+                        <width>40</width>
+                        <height>20</height>
+                       </size>
+                      </property>
+                     </spacer>
+                    </item>
+                    <item>
+                     <widget class="QPushButton" name="btn_save_plugin_config">
+                      <property name="text">
+                       <string>保存配置</string>
+                      </property>
+                     </widget>
+                    </item>
+                   </layout>
+                  </item>
+                  <item>
+                   <widget class="QScrollArea" name="scroll_plugin_config">
+                    <property name="widgetResizable">
+                     <bool>true</bool>
+                    </property>
+                    <widget class="QWidget" name="widget_plugin_config">
+                     <property name="geometry">
+                      <rect>
+                       <x>0</x>
+                       <y>0</y>
+                       <width>820</width>
+                       <height>300</height>
+                      </rect>
+                     </property>
+                     <layout class="QVBoxLayout" name="vlayout_plugin_config">
+                      <property name="spacing">
+                       <number>10</number>
+                      </property>
+                      <property name="leftMargin">
+                       <number>0</number>
+                      </property>
+                      <property name="topMargin">
+                       <number>0</number>
+                      </property>
+                      <property name="rightMargin">
+                       <number>0</number>
+                      </property>
+                      <property name="bottomMargin">
+                       <number>0</number>
+                      </property>
+                     </layout>
+                    </widget>
+                   </widget>
+                  </item>
+                 </layout>
+                </widget>
                </widget>
               </item>
              </layout>
+            </widget>
+           </item>
+          </layout>
+         </widget>
+         <widget class="QWidget" name="page_settings">
+          <layout class="QVBoxLayout" name="verticalLayout_settings_page">
+           <property name="leftMargin">
+            <number>0</number>
+           </property>
+           <property name="topMargin">
+            <number>0</number>
+           </property>
+           <property name="rightMargin">
+            <number>0</number>
+           </property>
+           <property name="bottomMargin">
+            <number>0</number>
+           </property>
+           <item>
+            <widget class="QScrollArea" name="scroll_settings_page">
+             <property name="widgetResizable">
+              <bool>true</bool>
+             </property>
+             <property name="frameShape">
+              <enum>QFrame::NoFrame</enum>
+             </property>
+             <widget class="QWidget" name="widget_settings_page">
+              <layout class="QVBoxLayout" name="verticalLayout_settings">
+               <property name="spacing">
+                <number>10</number>
+               </property>
+               <property name="leftMargin">
+                <number>0</number>
+               </property>
+               <property name="topMargin">
+                <number>0</number>
+               </property>
+               <property name="rightMargin">
+                <number>0</number>
+               </property>
+               <property name="bottomMargin">
+                <number>0</number>
+               </property>
+               <item>
+                <widget class="QLabel" name="label_title_settings">
+                 <property name="text">
+                  <string>设置</string>
+                 </property>
+                </widget>
+               </item>
+               <item>
+                <widget class="QLabel" name="label_title_options">
+                 <property name="text">
+                  <string>选项</string>
+                 </property>
+                </widget>
+               </item>
+               <item>
+                <widget class="QFrame" name="control_panel_frame">
+                 <property name="frameShape">
+                  <enum>QFrame::StyledPanel</enum>
+                 </property>
+                 <layout class="QGridLayout" name="gridLayout_panel">
+                  <property name="horizontalSpacing">
+                   <number>18</number>
+                  </property>
+                  <property name="verticalSpacing">
+                   <number>8</number>
+                  </property>
+                  <item row="0" column="0">
+                   <widget class="QCheckBox" name="cb_mcp">
+                    <property name="text">
+                     <string>启用工具</string>
+                    </property>
+                   </widget>
+                  </item>
+                  <item row="0" column="1">
+                   <widget class="QCheckBox" name="cb_proactive">
+                    <property name="text">
+                     <string>主动对话</string>
+                    </property>
+                   </widget>
+                  </item>
+                  <item row="0" column="2">
+                   <widget class="QCheckBox" name="cb_filter">
+                    <property name="text">
+                     <string>内容过滤</string>
+                    </property>
+                   </widget>
+                  </item>
+                  <item row="1" column="0">
+                   <widget class="QCheckBox" name="cb_stt">
+                    <property name="text">
+                     <string>语音识别</string>
+                    </property>
+                   </widget>
+                  </item>
+                  <item row="1" column="1">
+                   <widget class="QCheckBox" name="cb_emotion_actor">
+                    <property name="text">
+                     <string>情绪控制</string>
+                    </property>
+                   </widget>
+                  </item>
+                  <item row="1" column="2">
+                   <widget class="QCheckBox" name="cb_bili_enabled">
+                    <property name="text">
+                     <string>弹幕回复</string>
+                    </property>
+                   </widget>
+                  </item>
+                 </layout>
+                </widget>
+               </item>
+               <item>
+                <layout class="QFormLayout" name="formLayout_settings">
+                 <property name="verticalSpacing">
+                  <number>10</number>
+                 </property>
+                 <item row="0" column="0">
+                  <widget class="QLabel" name="label_tts">
+                   <property name="text">
+                    <string>参考音频：</string>
+                   </property>
+                  </widget>
+                 </item>
+                 <item row="0" column="1">
+                  <widget class="QLineEdit" name="ed_tts_audio">
+                   <property name="placeholderText">
+                    <string>GPT-SoVITS 参考音频路径（可拖拽音频，留空 = 关闭 TTS）</string>
+                   </property>
+                  </widget>
+                 </item>
+                 <item row="1" column="0">
+                  <widget class="QLabel" name="label_tts_text">
+                   <property name="text">
+                    <string>音频文本：</string>
+                   </property>
+                  </widget>
+                 </item>
+                 <item row="1" column="1">
+                  <widget class="QLineEdit" name="ed_tts_text">
+                   <property name="placeholderText">
+                    <string>参考音频文本</string>
+                   </property>
+                  </widget>
+                 </item>
+                 <item row="2" column="0">
+                  <widget class="QLabel" name="label_tts_audios">
+                   <property name="text">
+                    <string>辅助参考：</string>
+                   </property>
+                  </widget>
+                 </item>
+                 <item row="2" column="1">
+                  <widget class="QLineEdit" name="ed_tts_audios">
+                   <property name="placeholderText">
+                    <string>辅助参考音频，多个用 | 分隔（可拖拽多个音频，与主参考混合）</string>
+                   </property>
+                  </widget>
+                 </item>
+                </layout>
+               </item>
+               <item>
+                <widget class="QLabel" name="label_title_stt">
+                 <property name="text">
+                  <string>语音识别</string>
+                 </property>
+                </widget>
+               </item>
+               <item>
+                <layout class="QFormLayout" name="formLayout_stt">
+                 <property name="verticalSpacing">
+                  <number>12</number>
+                 </property>
+                 <item row="0" column="0">
+                  <widget class="QLabel" name="label_stt_key">
+                   <property name="text">
+                    <string>API Key：</string>
+                   </property>
+                  </widget>
+                 </item>
+                 <item row="0" column="1">
+                  <widget class="QLineEdit" name="ed_stt_key">
+                   <property name="placeholderText">
+                    <string>SiliconFlow API Key（留空复用 .env 的 SILICONFLOW_API_KEY）</string>
+                   </property>
+                  </widget>
+                 </item>
+                 <item row="1" column="0">
+                  <widget class="QLabel" name="label_stt_url">
+                   <property name="text">
+                    <string>API URL：</string>
+                   </property>
+                  </widget>
+                 </item>
+                 <item row="1" column="1">
+                  <widget class="QLineEdit" name="ed_stt_url">
+                   <property name="placeholderText">
+                    <string>留空 = 与 SiliconFlow 共用服务（默认 https://api.siliconflow.cn/v1）</string>
+                   </property>
+                  </widget>
+                 </item>
+                 <item row="2" column="0">
+                  <widget class="QLabel" name="label_stt_model">
+                   <property name="text">
+                    <string>模型名称：</string>
+                   </property>
+                  </widget>
+                 </item>
+                 <item row="2" column="1">
+                  <widget class="QLineEdit" name="ed_stt_model">
+                   <property name="placeholderText">
+                    <string>STT_MODEL（默认 FunAudioLLM/SenseVoiceSmall）</string>
+                   </property>
+                  </widget>
+                 </item>
+                </layout>
+               </item>
+               <item>
+                <widget class="QLabel" name="label_title_butler">
+                 <property name="text">
+                  <string>Agent模型</string>
+                 </property>
+                </widget>
+               </item>
+               <item>
+                <layout class="QFormLayout" name="formLayout_butler">
+                 <property name="verticalSpacing">
+                  <number>12</number>
+                 </property>
+                 <item row="0" column="0">
+                  <widget class="QLabel" name="label_butler_key">
+                   <property name="text">
+                    <string>API KEY：</string>
+                   </property>
+                  </widget>
+                 </item>
+                 <item row="0" column="1">
+                  <widget class="QLineEdit" name="ed_butler_key">
+                   <property name="echoMode">
+                    <enum>QLineEdit::Password</enum>
+                   </property>
+                  </widget>
+                 </item>
+                 <item row="1" column="0">
+                  <widget class="QLabel" name="label_butler_url">
+                   <property name="text">
+                    <string>API URL：</string>
+                   </property>
+                  </widget>
+                 </item>
+                 <item row="1" column="1">
+                  <widget class="QLineEdit" name="ed_butler_url"/>
+                 </item>
+                 <item row="2" column="0">
+                  <widget class="QLabel" name="label_butler_model">
+                   <property name="text">
+                    <string>模型名称：</string>
+                   </property>
+                  </widget>
+                 </item>
+                 <item row="2" column="1">
+                  <widget class="QLineEdit" name="ed_butler_model"/>
+                 </item>
+                </layout>
+               </item>
+               <item>
+                <widget class="QLabel" name="label_title_emb">
+                 <property name="text">
+                  <string>嵌入模型</string>
+                 </property>
+                </widget>
+               </item>
+               <item>
+                <layout class="QFormLayout" name="formLayout_emb">
+                 <property name="verticalSpacing">
+                  <number>12</number>
+                 </property>
+                 <item row="0" column="0">
+                  <widget class="QLabel" name="label_emb_key">
+                   <property name="text">
+                    <string>API KEY：</string>
+                   </property>
+                  </widget>
+                 </item>
+                 <item row="0" column="1">
+                  <widget class="QLineEdit" name="ed_emb_key">
+                   <property name="echoMode">
+                    <enum>QLineEdit::Password</enum>
+                   </property>
+                  </widget>
+                 </item>
+                 <item row="1" column="0">
+                  <widget class="QLabel" name="label_emb_url">
+                   <property name="text">
+                    <string>API URL：</string>
+                   </property>
+                  </widget>
+                 </item>
+                 <item row="1" column="1">
+                  <widget class="QLineEdit" name="ed_emb_url"/>
+                 </item>
+                 <item row="2" column="0">
+                  <widget class="QLabel" name="label_emb_model">
+                   <property name="text">
+                    <string>模型名称：</string>
+                   </property>
+                  </widget>
+                 </item>
+                 <item row="2" column="1">
+                  <widget class="QLineEdit" name="ed_emb_model"/>
+                 </item>
+                </layout>
+               </item>
+               <item>
+                <widget class="QLabel" name="label_title_bili">
+                 <property name="text">
+                  <string>B站弹幕</string>
+                 </property>
+                </widget>
+               </item>
+               <item>
+                <layout class="QFormLayout" name="formLayout_bili">
+                 <property name="verticalSpacing">
+                  <number>12</number>
+                 </property>
+                 <item row="0" column="0">
+                  <widget class="QLabel" name="label_bili_room">
+                   <property name="text">
+                    <string>直播间号：</string>
+                   </property>
+                  </widget>
+                 </item>
+                 <item row="0" column="1">
+                  <widget class="QLineEdit" name="ed_bili_room">
+                   <property name="placeholderText">
+                    <string>BILI_ROOM_ID（0 = 不连弹幕仅起网页）</string>
+                   </property>
+                  </widget>
+                 </item>
+                 <item row="1" column="0">
+                  <widget class="QLabel" name="label_bili_sessdata">
+                   <property name="text">
+                    <string>登录令牌：</string>
+                   </property>
+                  </widget>
+                 </item>
+                 <item row="1" column="1">
+                  <widget class="QLineEdit" name="ed_bili_sessdata">
+                   <property name="echoMode">
+                    <enum>QLineEdit::Password</enum>
+                   </property>
+                   <property name="placeholderText">
+                    <string>B站 Cookie（填了弹幕用户名不打码；留空可连但用户名打码）</string>
+                   </property>
+                  </widget>
+                 </item>
+                 <item row="2" column="0">
+                  <widget class="QLabel" name="label_bili_port">
+                   <property name="text">
+                    <string>网页端口：</string>
+                   </property>
+                  </widget>
+                 </item>
+                 <item row="2" column="1">
+                  <widget class="QLineEdit" name="ed_bili_port">
+                   <property name="placeholderText">
+                    <string>BILI_SERVER_PORT（默认 8766）</string>
+                   </property>
+                  </widget>
+                 </item>
+                </layout>
+               </item>
+               <item>
+                <spacer name="verticalSpacer_settings">
+                 <property name="orientation">
+                  <enum>Qt::Vertical</enum>
+                 </property>
+                 <property name="sizeHint">
+                  <size>
+                   <width>20</width>
+                   <height>40</height>
+                  </size>
+                 </property>
+                </spacer>
+               </item>
+              </layout>
+             </widget>
+            </widget>
+           </item>
+          </layout>
+         </widget>
+         <widget class="QWidget" name="page_memory">
+          <layout class="QVBoxLayout" name="verticalLayout_memory">
+           <property name="spacing">
+            <number>10</number>
+           </property>
+           <property name="leftMargin">
+            <number>0</number>
+           </property>
+           <property name="topMargin">
+            <number>18</number>
+           </property>
+           <property name="rightMargin">
+            <number>0</number>
+           </property>
+           <property name="bottomMargin">
+            <number>0</number>
+           </property>
+           <item>
+            <widget class="QLabel" name="label_title_memory">
+             <property name="text">
+              <string>记忆</string>
+             </property>
+            </widget>
+           </item>
+           <item>
+            <layout class="QHBoxLayout" name="horizontalLayout_memory_top">
+             <item>
+              <widget class="QPushButton" name="btn_memory_refresh">
+               <property name="text">
+                <string>刷新</string>
+               </property>
+              </widget>
+             </item>
+             <item>
+              <widget class="QPushButton" name="btn_memory_view_toggle">
+               <property name="text">
+                <string>表格视图</string>
+               </property>
+              </widget>
+             </item>
+             <item>
+              <spacer name="horizontalSpacer_memory_top">
+               <property name="orientation">
+                <enum>Qt::Horizontal</enum>
+               </property>
+               <property name="sizeHint">
+                <size>
+                 <width>40</width>
+                 <height>20</height>
+                </size>
+               </property>
+              </spacer>
+             </item>
+             <item>
+              <widget class="QLabel" name="label_memory_status">
+               <property name="text">
+                <string/>
+               </property>
+              </widget>
+             </item>
+            </layout>
+           </item>
+           <item>
+            <widget class="QStackedWidget" name="stack_memory">
+             <property name="currentIndex">
+              <number>0</number>
+             </property>
+             <widget class="QWidget" name="page_memory_list">
+              <layout class="QVBoxLayout" name="verticalLayout_memory_list">
+               <property name="spacing">
+                <number>0</number>
+               </property>
+               <property name="leftMargin">
+                <number>0</number>
+               </property>
+               <property name="topMargin">
+                <number>6</number>
+               </property>
+               <property name="rightMargin">
+                <number>0</number>
+               </property>
+               <property name="bottomMargin">
+                <number>0</number>
+               </property>
+               <item>
+                <widget class="QTableWidget" name="table_memory">
+                 <property name="alternatingRowColors">
+                  <bool>true</bool>
+                 </property>
+                 <property name="selectionMode">
+                  <enum>QAbstractItemView::ExtendedSelection</enum>
+                 </property>
+                 <column>
+                  <property name="text">
+                   <string>名称</string>
+                  </property>
+                 </column>
+                 <column>
+                  <property name="text">
+                   <string>描述</string>
+                  </property>
+                 </column>
+                 <column>
+                  <property name="text">
+                   <string>内容</string>
+                  </property>
+                 </column>
+                 <column>
+                  <property name="text">
+                   <string>更新时间</string>
+                  </property>
+                 </column>
+                </widget>
+               </item>
+              </layout>
+             </widget>
+             <widget class="QWidget" name="page_memory_graph">
+              <layout class="QVBoxLayout" name="verticalLayout_memory_graph">
+               <property name="leftMargin">
+                <number>0</number>
+               </property>
+               <property name="topMargin">
+                <number>6</number>
+               </property>
+               <property name="rightMargin">
+                <number>0</number>
+               </property>
+               <property name="bottomMargin">
+                <number>0</number>
+               </property>
+               <item>
+                <widget class="QGraphicsView" name="graph_memory"/>
+               </item>
+              </layout>
+             </widget>
             </widget>
            </item>
           </layout>
@@ -2351,7 +2563,35 @@ QPlainTextEdit:focus {
               <bool>false</bool>
              </property>
              <property name="html">
-              <string>&lt;h3&gt;E.V 控制中心&lt;/h3&gt;&lt;p&gt;智谱 GLM 流式对话 × VTubeStudio 虚拟主播 / live2d-py 桌面宠物 × GPT-SoVITS 语音合成。&lt;/p&gt;&lt;ul&gt;&lt;li&gt;&lt;b&gt;vtuber 模式&lt;/b&gt;：连接 VTubeStudio，口型/眨眼/基线动画全自动&lt;/li&gt;&lt;li&gt;&lt;b&gt;pet 模式&lt;/b&gt;：本地透明窗口桌宠，无需 VTubeStudio&lt;/li&gt;&lt;li&gt;&lt;b&gt;记忆系统&lt;/b&gt;：ButlerAgent 分类（核心/状态/偏好）+ 会话摘要归档&lt;/li&gt;&lt;li&gt;&lt;b&gt;技能系统&lt;/b&gt;：skills/ 目录热重载，load_skill 按需加载&lt;/li&gt;&lt;/ul&gt;&lt;p&gt;启动页「发送」框等价于控制台输入：可在本窗口内直接与 AI 对话。&lt;/p&gt;&lt;p style="color:#999"&gt;样式参考 live-2d(2)/test222.ui（浅色渐变 / 圆角 / 毛玻璃），可用 Qt Designer 打开本文件调整界面。&lt;/p&gt;</string>
+              <string>&lt;h3&gt;E.V 项目创作灵感：源于Neuro-sama，打造独属于个人的本地AI虚拟生命&lt;/h3&gt;
+&lt;h4&gt;一、缘起：去年遇见Neuro-sama，埋下创作初心&lt;/h4&gt;
+&lt;p&gt;2025年第一次完整看完Neuro-sama直播时，我彻底被一种全新的人机交互形态打动。&lt;/p&gt;
+&lt;p&gt;区别于传统真人中之人扮演的虚拟主播，Neuro-sama是&lt;b&gt;全AI自主驱动&lt;/b&gt;的数字个体：无需真人后台操控，靠大语言模型实时解读弹幕、自主组织对话，搭配独立游戏AI打音游、沙盒游戏，Live2D形象随情绪自然动起来，拥有鲜活、不受剧本束缚的独立人格，时而毒舌跳脱，时而温柔共情，和观众的互动充满真实的生命力。&lt;/p&gt;
+&lt;p&gt;但同时我也发现了它难以弥补的遗憾：Neuro-sama属于直播平台，只在开播时段能相见、闭源无法自定义、依赖云端接口、没有长期专属记忆，它是面向大众的主播，却不能成为只陪伴我一人的私人伙伴。&lt;/p&gt;
+&lt;p&gt;当时我就在想：能不能做一套开源、本地可部署、完全由自己掌控的AI虚拟程序，复刻Neuro-sama自由对话、形象互动、多场景陪伴的魅力，同时解决它所有短板——这便是E.V项目最初的全部灵感来源。&lt;/p&gt;
+&lt;h4&gt;二、从Neuro-sama身上吸收的核心设计灵感&lt;/h4&gt;
+&lt;h5&gt;1. 人格化自主对话体系&lt;/h5&gt;
+&lt;p&gt;Neuro-sama最核心的魅力，是摆脱固定问答模板，拥有连贯、带情绪的自主表达逻辑，能接住碎片化闲聊、玩梗、产生属于自身的思考逻辑，而非机械回答指令。&lt;/p&gt;
+&lt;p&gt;对应到E.V开发中，我搭建了&lt;b&gt;LLM核心对话引擎&lt;/b&gt;，搭配流式GPT-SoVITS TTS实现实时语音输出，抛弃生硬一问一答，支持长时间多轮连续对话，赋予虚拟角色独立情绪倾向、固定人设记忆，复刻Neuro那种“像活人一样会胡思乱想”的对话质感。&lt;/p&gt;
+&lt;h5&gt;2. Live2D可视化虚拟形象交互&lt;/h5&gt;
+&lt;p&gt;Neuro依靠Live2D模型完成表情、动作、视线跟随，让AI不再是冰冷文字，变成看得见、有动态的数字少女，大幅拉近情感距离。&lt;/p&gt;
+&lt;p&gt;因此E.V内置完整live2d目录与UI交互层，窗口可悬浮桌面，角色会随对话切换表情、动作，做成&lt;b&gt;桌面宠物+虚拟主播双形态&lt;/b&gt;，既能像Neuro一样直播互动，也能常驻电脑桌面贴身陪伴。&lt;/p&gt;
+&lt;h5&gt;3. 多场景融合的全能交互能力&lt;/h5&gt;
+&lt;p&gt;Neuro不止聊天，还能独立游玩osu!、Minecraft、杀戮尖塔，看懂屏幕画面、reaction视频，打通聊天、游戏、视听娱乐全场景。&lt;/p&gt;
+&lt;p&gt;E.V参考这套多模态思路，预留屏幕视觉读取、游戏联动接口，同时拆分configs、scripts、src分层架构，支持拓展更多功能模块，不局限单一聊天场景，实现工作陪伴、游戏陪玩、日常闲聊、睡前倾诉多种用途。&lt;/p&gt;
+&lt;h4&gt;三、E.V对Neuro-sama的补足与自我革新（项目差异化思考）&lt;/h4&gt;
+&lt;p&gt;Neuro-sama的局限，正是E.V的创作突破口，也是我持续迭代开发的核心动力：&lt;/p&gt;
+&lt;ol&gt;&lt;li&gt;&lt;b&gt;私有化本地部署，24小时专属陪伴&lt;/b&gt;&lt;p&gt;Neuro依赖平台直播，下播即消失；E.V完全本地运行，启动main.py或run.bat即可常驻桌面，不受直播时段限制，随时能唤醒对话，真正属于使用者个人。&lt;/p&gt;&lt;/li&gt;
+&lt;li&gt;&lt;b&gt;开源轻量化，无云端付费依赖&lt;/b&gt;&lt;p&gt;Neuro闭源、依赖商用大模型与云端语音接口；E.V 98.7%代码为Python开源，精简第三方依赖目录，把臃肿文件夹重命名轻量化（memU-main→memu、GSV-TTS-Lite-main→gsv-tts），适配本地离线模型，无需高额API订阅成本。&lt;/p&gt;&lt;/li&gt;
+&lt;li&gt;&lt;b&gt;长效专属记忆引擎，实现“养成式陪伴”&lt;/b&gt;&lt;p&gt;Neuro短期对话记忆薄弱，很难记住长久相处细节；E.V新增&lt;b&gt;自我进化引擎、流式记忆查询模块&lt;/b&gt;，会永久留存你们的聊天内容、习惯偏好、情绪小事，每次对话都建立在过往记忆之上，复刻“共同成长”的养成感，角色会随相处产生专属性格变化。&lt;/p&gt;&lt;/li&gt;
+&lt;li&gt;&lt;b&gt;轻量化易拓展架构，自由自定义角色&lt;/b&gt;&lt;p&gt;项目拆分configs配置目录，角色人设、语音音色、Live2D形象、交互逻辑均可自由修改；新增技能评估、安全加固模块，兼顾自定义自由度与本地运行安全性，普通用户也能简单调整，不用深度修改底层代码。&lt;/p&gt;&lt;/li&gt;&lt;/ol&gt;
+&lt;h4&gt;四、创作心路：从向往到落地，E.V的内核追求&lt;/h4&gt;
+&lt;p&gt;去年观看Neuro-sama时，我最大的触动是：AI不该只是工具，它可以是拥有独立情绪、能共情、长久陪伴的数字伙伴。&lt;/p&gt;
+&lt;p&gt;Neuro-sama证明了纯AI虚拟生命具备打动人类的情感力量，但它始终是面向公众的产品。而我想做的E.V，是把这份赛博陪伴的权力交还给每一个使用者——你可以拥有只属于自己、7×24小时在线、记住你所有细碎日常、形象与性格完全自定义的AI虚拟宠物/虚拟主播。&lt;/p&gt;
+&lt;p&gt;从8月初初始化仓库搭建基础框架，再到持续7轮代码提交，清理冗余文件、重构脚本目录、迭代记忆与进化模块，所有开发动作都围绕最初从Neuro-sama生出的愿景：复刻AI自主交互的浪漫，同时打造更自由、更私人、更轻量化的本地数字陪伴工具，让普通人不用复杂技术成本，就能拥有属于自己的“私人版Neuro-sama”。&lt;/p&gt;
+&lt;h4&gt;五、项目最终愿景&lt;/h4&gt;
+&lt;p&gt;E.V不止是一个复刻灵感的模仿项目，更是对Neuro-sama开创的AI虚拟生命赛道的延伸。&lt;/p&gt;
+&lt;p&gt;未来会持续优化记忆系统、拓展多模态视觉交互、简化部署流程，让任何人都能轻松搭建专属AI桌面伴侣，实现“不用等开播，你的虚拟伙伴永远在桌面等你”，完成去年看见Neuro-sama时，心底那个关于私人数字陪伴的设想。&lt;/p&gt;</string>
              </property>
             </widget>
            </item>

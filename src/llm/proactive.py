@@ -84,6 +84,11 @@ _INTERACTION_MID: float = 0.6
 # 用户回应 → 结束话题并记互动；超过本超时（秒）无回应自动结束。
 _ACTIVE_TOPIC_TIMEOUT: float = 120.0
 
+# —— 静默兜底（防冷场）——
+# 距上次互动静默超过本阈值（秒）后，心跳不允许 LLM 再选择沉默，
+# 强制开口一次；模型若仍输出 <SILENT>，直接以灵感话题文案兜底发言。
+_FORCE_SPEAK_QUIET: float = 25.0
+
 # 话题种子源：完整话题表（157 条，含 id/category/concept/tags/cooldown_minutes），
 # 内容取自 Muika-After-Story configs/topics.yml。原字段 cooldown_days（天），
 # 直播场景按 Muika 分类原理缩放到分钟制：7天→1min、10天→2min、14天→3min、
@@ -236,12 +241,16 @@ class ProactiveEngine:
             return False
         self._log_heartbeat()
 
+        # 静默兜底：距上次互动静默 ≥ 阈值（25s）后不允许 LLM 再选择沉默
+        # （防长时间冷场；模型仍沉默则由 _decide_and_generate 以话题兜底）
+        force_speak = (time.time() - self.last_interaction) >= _FORCE_SPEAK_QUIET
+
         # —— 灵感话题（可选）：LLM 可顺着聊，也可自由发挥 ——
         # _pick_topic 内部已兜底（全部冷却时放宽冷却强制选一个），不会返回 None
         topic = self._pick_topic()
 
         # —— LLM 自主决策：想说就说，不想说保持沉默 ——
-        text = await self._decide_and_generate(topic)
+        text = await self._decide_and_generate(topic, force=force_speak)
         if not text:
             return False
 
@@ -479,14 +488,17 @@ class ProactiveEngine:
         return random.uniform(
             self.cfg.RESPONSE_INTERVAL_MIN, self.cfg.RESPONSE_INTERVAL_MAX)
 
-    async def _decide_and_generate(self, topic: Optional[dict]) -> Optional[str]:
+    async def _decide_and_generate(self, topic: Optional[dict],
+                                   force: bool = False) -> Optional[str]:
         """LLM 自主决策：想说就生成发言文本，不想说返回 None（保持沉默）。
 
         一次调用完成「决定 + 内容」：prompt 明确允许选择沉默，模型输出
         <SILENT> 或空则沉默。决策过程不冒充用户发言（proactive=True 已剔除
         prompt）；沉默时的回复不保留在主历史，避免污染后续上下文。
+        force=True（静默兜底）：prompt 禁止沉默；模型仍沉默则以灵感话题
+        文案兜底发言，保证不再冷场。
         """
-        prompt = await self._build_prompt(topic)
+        prompt = await self._build_prompt(topic, force=force)
         if not prompt:
             return None
         history_len = len(self.brain.history)
@@ -502,6 +514,14 @@ class ProactiveEngine:
         if decided is None and len(self.brain.history) > history_len:
             # 沉默：决策回复（<SILENT> 等）不保留在主历史
             del self.brain.history[history_len:]
+        if decided is None and force:
+            # 静默兜底：模型仍选择沉默 → 以灵感话题文案强制开口（绝不冷场）
+            fallback = (topic or {}).get("concept", "")
+            if fallback:
+                console.dim(
+                    f"[主动] 静默 {_FORCE_SPEAK_QUIET:.0f}s 兜底："
+                    f"以灵感话题强制开口（{fallback}）")
+                return fallback
         return decided
 
     @staticmethod
@@ -600,11 +620,13 @@ class ProactiveEngine:
         self._topic_last_used[chosen["id"]] = now
         return chosen
 
-    async def _build_prompt(self, topic: Optional[dict]) -> str:
+    async def _build_prompt(self, topic: Optional[dict],
+                            force: bool = False) -> str:
         """组装主模型的「自主开口决策」请求：agent（ButlerAgent）优先，无 agent 回退内置。
 
         agent 负责构造（时段语气 + 可选灵感话题 + 记忆线索注入），主模型
         自主判断「想说就说 / 不想说输出 <SILENT> 保持沉默」。
+        force=True（静默兜底）：在请求末尾追加「必须开口」指令，禁止沉默。
         """
         memory_context = ""
         if self.mm is not None:
@@ -615,15 +637,20 @@ class ProactiveEngine:
         hour = datetime.now().hour
         if self.butler is not None:
             try:
-                return self.butler.build_proactive_prompt(
+                prompt = self.butler.build_proactive_prompt(
                     topic["concept"] if topic is not None else "",
                     memory_context, hour)
+                if force:
+                    prompt += (
+                        "\n\n【强制开口】直播间已安静超过 25 秒，"
+                        "此刻必须开口说点什么，禁止输出 <SILENT> 或任何沉默表达。")
+                return prompt
             except Exception as e:
                 console.error(f"[主动] agent 构造发言请求失败，回退内置：{e}")
         # —— 回退：无 agent 或 agent 失败时的内置简化 prompt（自主决策格式）——
         topic_hint = (f"可以顺着这个灵感话题聊：{topic['concept']}"
                       if topic is not None else "也可以自己决定想聊什么")
-        return (
+        prompt = (
             "现在是直播间的「静默时刻」。没有任何Cue，没有任何救场需求。\n"
             "你不是在答题，你是在决定「此刻这个灵魂」想不想暴露在麦克风前。\n\n"
             "请根据你当下的人设状态，从以下三种「心流路径」中选一条执行：\n"
@@ -636,5 +663,9 @@ class ProactiveEngine:
             "- 如果灵感锚点太无聊，允许你极端歪曲它，制造「地狱笑话」或「荒诞跳转」。\n"
             "- 玩梗可以挑衅，但收尾必须用夸张的「自我解构」把攻击性卸掉。\n\n"
             f"{topic_hint}\n"
-            "规则：只要开口，必须是「非标品」的句子。无话可说时，请虔诚地输出 <SILENT>。"
         )
+        if force:
+            prompt += "规则：你已沉默够久了，和大家说点什么吧，禁止输出 <SILENT>。"
+        else:
+            prompt += "规则：只要开口，必须是「非标品」的句子。无话可说时，请虔诚地输出 <SILENT>。"
+        return prompt

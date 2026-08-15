@@ -255,15 +255,18 @@ class SkillManager:
 
     def render_prompt_section(self) -> str:
         """
-        生成注入系统提示的技能元数据段落（仅 name + description）。
+        生成注入系统提示的技能元数据段落：使用指引 + 各技能的触发时机。
         无可用技能时返回空字符串。
         """
         skills = self.skills
         if not skills:
             return ""
         lines = [
-            "Available skills (use the load_skill tool with the exact skill name "
-            "to load full instructions before attempting the task):"
+            "技能使用指引（按需加载、情境匹配才用）：",
+            "1. 对话情境与某个技能的触发时机匹配时，先用 load_skill 加载该技能完整指令，再按它执行；技能名须与下方完全一致",
+            "2. 技能涉及细节资源时，再用 read_skill_resource 按相对路径按需读取",
+            "3. 没有任何技能匹配时正常对话，不要强行套用技能",
+            "可用技能（技能名 + 触发时机）：",
         ]
         lines.extend(f"- {s.name}: {s.description}" for s in skills)
         return "\n".join(lines)

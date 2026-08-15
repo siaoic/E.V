@@ -20,7 +20,6 @@ else:
     _PROJECT_ROOT = os.path.dirname(
         os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-# 加载 .env（若不存在则用环境变量 / 默认值）
 load_dotenv(os.path.join(_PROJECT_ROOT, ".env"))
 
 
@@ -50,7 +49,6 @@ def _read_text_file(path: str) -> str:
                 return f.read()
         except UnicodeDecodeError:
             continue
-    # 全部失败：用 gbk + 替换符兜底，保证不抛异常
     with open(path, "r", encoding="gbk", errors="replace") as f:
         return f.read()
 
@@ -114,7 +112,6 @@ def _load_system_prompt() -> str:
         _safe_print(
             f"[config] [警告] SYSTEM_PROMPT_FILE 路径未找到任何文本文件，"
             f"回退到 UI 人设 / SYSTEM_PROMPT: {base}")
-    # SYSTEM_PROMPT_FILE 未配置 → 自动使用控制中心 UI 人设
     try:
         if os.path.isfile(_UI_SYSTEM_PROMPT_FILE):
             # 与 skill 文件一致：剥离 YAML frontmatter（--- name/description ---
@@ -125,7 +122,6 @@ def _load_system_prompt() -> str:
                 return text
     except OSError:
         pass
-    # 兼容旧配置：.env SYSTEM_PROMPT
     prompt = os.getenv("SYSTEM_PROMPT") or ""
     if prompt.strip():
         return prompt.strip()
@@ -219,8 +215,12 @@ class Config:
     GPTSOVITS_PROMPT_TEXT: str = os.getenv(
         "GPTSOVITS_PROMPT_TEXT", "")
     GPTSOVITS_TIMEOUT: float = float(os.getenv("GPTSOVITS_TIMEOUT", "120"))
-    # 本地 TTS 模型目录（GSV-TTS-Lite 的 models_dir；留空 = gsv-tts/API/models）
+    # 本地 TTS 模型目录（GSV-TTS-Lite 的 models_dir；留空 = gsv_tts/API/models）
     GPTSOVITS_MODELS_DIR: str = os.getenv("GPTSOVITS_MODELS_DIR", "")
+    # 外部 TTS 合成服务地址（tts.bat 启动的 fastapi_server_example.py，
+    # 监听 0.0.0.0:8000；留空 = http://127.0.0.1:8000）
+    TTS_SERVER_URL: str = os.getenv(
+        "TTS_SERVER_URL", "http://127.0.0.1:8000")
 
     # ===== 内容过滤 =====
     PROFANITY_FILTER_ENABLED: bool = _get_bool(
@@ -246,8 +246,8 @@ class Config:
     BUTLER_THINKING: bool = _get_bool("BUTLER_THINKING", False)
 
     # ===== 人设 =====
-    # SYSTEM_PROMPT_FILE 非空时，直接加载整个 skill 文件夹（递归收集 .md/.txt）
-    # 作为人设；否则回退到 .env 的 SYSTEM_PROMPT 文本。
+    # SYSTEM_PROMPT_FILE 非空时加载整个 skill 文件夹作为人设；
+    # 否则回退 UI 人设 / .env SYSTEM_PROMPT（详见 _load_system_prompt）。
     SYSTEM_PROMPT_FILE: str = os.getenv("SYSTEM_PROMPT_FILE") or ""
     SYSTEM_PROMPT: str = _load_system_prompt()
 
@@ -255,12 +255,10 @@ class Config:
     # 搜索 / 天气 key 留空时对应工具自动隐藏（对标 live-2d(2) web-search 插件）
     TAVILY_API_KEY: str = os.getenv("TAVILY_API_KEY") or ""
     OPENWEATHERMAP_API_KEY: str = os.getenv("OPENWEATHERMAP_API_KEY") or ""
-    # 工具总开关（设置页「启动工具」勾选框，.env TOOLS_ENABLED）：
-    # 关闭后本地工具与 MCP 服务器全部停用（纯对话模式），再逐个开关才生效。
+    # 工具总开关：关闭后本地工具与 MCP 全部停用（纯对话模式）
     TOOLS_ENABLED: bool = _get_bool("TOOLS_ENABLED", True)
-    # 本地工具启用开关（控制中心「工具屋」勾选，写入 .env 后发 !tools 命令
-    # 即可热生效，无需重启；默认全部启用）。web_search/get_weather 还需要
-    # 对应 API Key 才能真正可用（没 key 时即使开关打开也会自动隐藏）。
+    # 各工具开关供控制中心「工具屋」勾选（写 .env 后发 !tools 热生效）；
+    # web_search/get_weather 还需 API Key，没 key 时开关打开也自动隐藏。
     TOOL_WEB_SEARCH_ENABLED: bool = _get_bool("TOOL_WEB_SEARCH_ENABLED", True)
     TOOL_GET_CURRENT_TIME_ENABLED: bool = _get_bool(
         "TOOL_GET_CURRENT_TIME_ENABLED", True)
@@ -268,6 +266,7 @@ class Config:
         "TOOL_GET_WEATHER_ENABLED", True)
     TOOL_LOAD_SKILL_ENABLED: bool = _get_bool("TOOL_LOAD_SKILL_ENABLED", True)
     TOOL_LOOK_SCREEN_ENABLED: bool = _get_bool("TOOL_LOOK_SCREEN_ENABLED", True)
+    TOOL_PLAY_SFX_ENABLED: bool = _get_bool("TOOL_PLAY_SFX_ENABLED", True)
 
     # ===== 自我进化（对话后后台复盘：技能沉淀/话题进化/行为反思/话术建议） =====
     EVOLUTION_ENABLED: bool = _get_bool("EVOLUTION_ENABLED", True)
@@ -304,19 +303,41 @@ class Config:
     LLM_ROUTER_EPSILON: float = float(os.getenv("LLM_ROUTER_EPSILON", "0.1"))
 
     # ===== 屏幕视觉（look_at_screen 工具用） =====
-    # 截图交给多模态模型描述画面。默认跟随 BUTLER_MODEL（智谱 glm-4v-flash，
-    # 免费支持图片输入）；可用 VISION_* 单独指定其他视觉服务。
-    VISION_MODEL: str = os.getenv("VISION_MODEL") or BUTLER_MODEL or "glm-4v-flash"
-    VISION_BASE_URL: str = os.getenv("VISION_BASE_URL") or ""
-    VISION_API_KEY: str = os.getenv("VISION_API_KEY") or ""
+    # 截图交给多模态模型描述画面。优先用主模型（LLM_*）；主模型不支持图片
+    # 输入时回退 BUTLER_MODEL（需多模态 VLM，默认 glm-4v-flash）。
 
     # ===== MCP（外部工具服务器） =====
     # 对标 live-2d(2)：MCP 服务器配置从外部 JSON 读取，tools 文件夹自动同步。
-    # 配置统一放 configs/（mcp_config.json + configs/tools/ 自动同步工具）。
+    # 配置随 mcp 模块（src/mcp/mcp_config.json），可在 .env 用 MCP_CONFIG_PATH 覆盖。
     MCP_ENABLED: bool = _get_bool("MCP_ENABLED", False)
     MCP_CONFIG_PATH: str = os.getenv("MCP_CONFIG_PATH") or os.path.join(
-        _PROJECT_ROOT, "configs", "mcp_config.json"
+        _PROJECT_ROOT, "src", "mcp", "mcp_config.json"
     )
+
+    # ===== 外部服务（插件页进程托管：mindcraft） =====
+    # mindcraft = LLM 驱动的 Minecraft bot（tools/mindcraft，Node + Mineflayer）。
+    # 复用本项目 LLM（LLM_BASE_URL / LLM_MODEL / LLM_API_KEY）作为 bot 大脑，
+    # 插件页负责进程启停；未 clone / 未 npm install 时卡片提示未安装。
+    MINDCRAFT_PATH: str = os.getenv("MINDCRAFT_PATH") or os.path.join(
+        _PROJECT_ROOT, "tools", "mindcraft")
+    MINDCRAFT_LLM_BASE_URL: str = os.getenv(
+        "MINDCRAFT_LLM_BASE_URL") or os.getenv("LLM_BASE_URL", "")
+    MINDCRAFT_LLM_MODEL: str = os.getenv(
+        "MINDCRAFT_LLM_MODEL") or os.getenv(
+        "LLM_MODEL", "") or "glm-4-flash-250414"
+    MINDCRAFT_BOT_NAME: str = os.getenv("MINDCRAFT_BOT_NAME") or "vtuber"
+    MINDCRAFT_HOST: str = os.getenv("MINDCRAFT_HOST") or "127.0.0.1"
+    MINDCRAFT_PORT: int = int(os.getenv("MINDCRAFT_PORT") or "55916")
+    MINDCRAFT_AUTH: str = os.getenv("MINDCRAFT_AUTH") or "offline"
+    # MindServer（socket.io）端口：Node 引擎与控制中心/Python 桥共用。
+    MINDCRAFT_MINDSERVER_PORT: int = int(
+        os.getenv("MINDCRAFT_MINDSERVER_PORT") or "8080")
+    # 双向桥开关：true 时主播程序作为 socket.io 客户端连入 MindServer，
+    # 用户输入转发给 MC bot、bot 回复由主播 TTS 朗读。
+    MINDCRAFT_BRIDGE_ENABLED: bool = _get_bool(
+        "MINDCRAFT_BRIDGE_ENABLED", False)
+    # bot 人设（andy.json 的 conversing 提示词）；留空用内置默认。
+    MINDCRAFT_BOT_PERSONA: str = os.getenv("MINDCRAFT_BOT_PERSONA") or ""
 
     # ===== 运行参数 =====
     HISTORY_ROUNDS: int = int(os.getenv("HISTORY_ROUNDS", "10"))
@@ -477,12 +498,29 @@ def reload_tool_runtime() -> None:
     cfg.TAVILY_API_KEY = os.getenv("TAVILY_API_KEY") or ""
     cfg.OPENWEATHERMAP_API_KEY = os.getenv("OPENWEATHERMAP_API_KEY") or ""
     cfg.MCP_ENABLED = _get_bool("MCP_ENABLED", False)
+    cfg.MINDCRAFT_PATH = os.getenv("MINDCRAFT_PATH") or os.path.join(
+        _PROJECT_ROOT, "tools", "mindcraft")
+    cfg.MINDCRAFT_LLM_BASE_URL = os.getenv(
+        "MINDCRAFT_LLM_BASE_URL") or os.getenv("LLM_BASE_URL", "")
+    cfg.MINDCRAFT_LLM_MODEL = os.getenv(
+        "MINDCRAFT_LLM_MODEL") or os.getenv(
+        "LLM_MODEL", "") or "glm-4-flash-250414"
+    cfg.MINDCRAFT_BOT_NAME = os.getenv("MINDCRAFT_BOT_NAME") or "vtuber"
+    cfg.MINDCRAFT_HOST = os.getenv("MINDCRAFT_HOST") or "127.0.0.1"
+    cfg.MINDCRAFT_PORT = int(os.getenv("MINDCRAFT_PORT") or "55916")
+    cfg.MINDCRAFT_AUTH = os.getenv("MINDCRAFT_AUTH") or "offline"
+    cfg.MINDCRAFT_MINDSERVER_PORT = int(
+        os.getenv("MINDCRAFT_MINDSERVER_PORT") or "8080")
+    cfg.MINDCRAFT_BRIDGE_ENABLED = _get_bool(
+        "MINDCRAFT_BRIDGE_ENABLED", False)
+    cfg.MINDCRAFT_BOT_PERSONA = os.getenv("MINDCRAFT_BOT_PERSONA") or ""
     cfg.TOOL_WEB_SEARCH_ENABLED = _get_bool("TOOL_WEB_SEARCH_ENABLED", True)
     cfg.TOOL_GET_CURRENT_TIME_ENABLED = _get_bool(
         "TOOL_GET_CURRENT_TIME_ENABLED", True)
     cfg.TOOL_GET_WEATHER_ENABLED = _get_bool("TOOL_GET_WEATHER_ENABLED", True)
     cfg.TOOL_LOAD_SKILL_ENABLED = _get_bool("TOOL_LOAD_SKILL_ENABLED", True)
     cfg.TOOL_LOOK_SCREEN_ENABLED = _get_bool("TOOL_LOOK_SCREEN_ENABLED", True)
+    cfg.TOOL_PLAY_SFX_ENABLED = _get_bool("TOOL_PLAY_SFX_ENABLED", True)
     cfg.EVOLUTION_ENABLED = _get_bool("EVOLUTION_ENABLED", True)
     cfg.EVOLUTION_MIN_INTERVAL = int(os.getenv("EVOLUTION_MIN_INTERVAL", "600"))
     cfg.EVOLUTION_MIN_TURNS = int(os.getenv("EVOLUTION_MIN_TURNS", "10"))
@@ -496,10 +534,6 @@ def reload_tool_runtime() -> None:
     cfg.LLM_SERVERS = os.getenv("LLM_SERVERS") or ""
     cfg.LLM_ROUTER_ENABLED = _get_bool("LLM_ROUTER_ENABLED", True)
     cfg.LLM_ROUTER_EPSILON = float(os.getenv("LLM_ROUTER_EPSILON", "0.1"))
-    cfg.VISION_MODEL = (os.getenv("VISION_MODEL")
-                        or cfg.BUTLER_MODEL or "glm-4v-flash")
-    cfg.VISION_BASE_URL = os.getenv("VISION_BASE_URL") or ""
-    cfg.VISION_API_KEY = os.getenv("VISION_API_KEY") or ""
     cfg.STT_ENABLED = _get_bool("STT_ENABLED", False)
     cfg.STT_MODEL = os.getenv("STT_MODEL") or "FunAudioLLM/SenseVoiceSmall"
     cfg.STT_API_KEY = os.getenv("STT_API_KEY") or ""
@@ -525,19 +559,19 @@ def reload_config() -> None:
         "ZHIPU_MODEL", "glm-4.7-flash")
     cfg.LLM_THINKING = _get_bool(
         "LLM_THINKING", _get_bool("THINKING_ENABLED", True))
-    # 管家模型思考开关（!config 热更新会重建 ButlerAgent，需同步刷新）
+    # 管家模型思考开关（热更新会重建 ButlerAgent，需同步刷新）
     cfg.BUTLER_THINKING = _get_bool("BUTLER_THINKING", False)
     # 人设（SYSTEM_PROMPT_FILE 优先，否则 UI 人设 / SYSTEM_PROMPT）
     cfg.SYSTEM_PROMPT_FILE = os.getenv("SYSTEM_PROMPT_FILE") or ""
     cfg.SYSTEM_PROMPT = _load_system_prompt()
-    # 主动对话（LLM 自主决定，!config 热更新生效）
+    # 主动对话
     cfg.PROACTIVE_ENABLED = _get_bool("PROACTIVE_ENABLED", True)
-    # 主动开口 / 弹幕回复共用随机间隔范围（!config 热更新生效）
+    # 主动开口 / 弹幕回复共用随机间隔范围
     cfg.RESPONSE_INTERVAL_MIN = float(
         os.getenv("RESPONSE_INTERVAL_MIN") or "5")
     cfg.RESPONSE_INTERVAL_MAX = float(
         os.getenv("RESPONSE_INTERVAL_MAX") or "10")
-    # 并发控制（热更新生效，无需重启）
+    # 并发控制
     cfg.LLM_MAX_CONCURRENCY = int(os.getenv("LLM_MAX_CONCURRENCY") or "2")
     cfg.PROACTIVE_QUEUE_MAX = int(os.getenv("PROACTIVE_QUEUE_MAX") or "4")
     cfg.AGENT_AVOID_MAIN_LLM = _get_bool("AGENT_AVOID_MAIN_LLM", True)

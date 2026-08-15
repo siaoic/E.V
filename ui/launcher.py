@@ -32,49 +32,7 @@ from PySide6.QtWidgets import (
 )
 
 from src.utils import config
-
-
-def _format_env_value(value: str) -> str:
-    """把值序列化为 .env 行内可解析的形式。
-
-    含换行/引号/反斜杠的值必须用双引号包裹并转义，否则 python-dotenv
-    会把后续每行都当成非法语句（曾因 SYSTEM_PROMPT 写入整段人设导致
-    .env 被撑成 5000+ 行、启动刷几百条 could not parse statement）。
-    """
-    if "\n" in value or '"' in value or "\\" in value:
-        escaped = (value.replace("\\", "\\\\")
-                   .replace('"', '\\"')
-                   .replace("\n", "\\n"))
-        return f'"{escaped}"'
-    return value
-
-
-def _update_env(key: str, value: str, root: str = "") -> None:
-    """把 .env 中 key 的值改为 value（保留注释；不存在则追加在末尾）。
-
-    root 指定 .env 所在目录；留空用 config.cfg.PROJECT_ROOT。
-    打包后的 UI（sys.frozen）PROJECT_ROOT 是 exe 目录，而主程序读的是
-    项目根的 .env——启动主程序时必须显式传项目根，见 control_center._start。
-    """
-    path = os.path.join(root or config.cfg.PROJECT_ROOT, ".env")
-    value = _format_env_value(value)
-    try:
-        with open(path, "r", encoding="utf-8") as f:
-            lines = f.read().splitlines(keepends=True)
-    except OSError:
-        lines = []
-    found = False
-    for i, line in enumerate(lines):
-        if line.strip().startswith(key + "="):
-            lines[i] = f"{key}={value}\n"
-            found = True
-            break
-    if not found:
-        if lines and not lines[-1].endswith("\n"):
-            lines.append("\n")
-        lines.append(f"{key}={value}\n")
-    with open(path, "w", encoding="utf-8") as f:
-        f.writelines(lines)
+from ui.utils.env_helpers import _update_env
 
 
 class Launcher(QWidget):

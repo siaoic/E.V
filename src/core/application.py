@@ -35,6 +35,7 @@ from src.llm.llm_brain import LLMBrain
 from src.vts.model_scanner import scan_model
 from src.tts.engine import TTSEngine
 from src.vts.controller import VTSController
+from src.mindcraft.bridge import MindcraftBridge
 from src.utils.perf_tracker import PerfTracker
 from src.utils.subtitle_server import SubtitleServer
 from src.core.commands import Command, CommandRegistry
@@ -643,6 +644,64 @@ class Application:
                 if self.sub is not None:
                     self.sub.push("clear", "")
 
+    # ---------- Mindcraft 双向桥（socket.io 连接 MindServer） ----------
+
+    async def _mindcraft_loop(self) -> None:
+        """后台循环：保持与 MindServer 的连接，失败自动重试（引擎可能后启动）。"""
+        bridge = self.mindcraft_bridge
+        if bridge is None:
+            return
+        while True:
+            if not bridge.connected:
+                try:
+                    await bridge.connect()
+                    console.ok(
+                        f"[Mindcraft] 已连接 MindServer（{bridge.server_url}，"
+                        f"bot={bridge.agent_name}）")
+                except Exception as e:
+                    console.dim(f"[Mindcraft] 连接 MindServer 失败：{e}（稍后重试）")
+            await asyncio.sleep(5)
+
+    async def _on_mindcraft_bot_output(self, message: str) -> None:
+        """MC bot 回复到达：走全局输出锁朗读（不打断 AI 说话）。"""
+        await self._speak_bot_reply(message)
+
+    async def _speak_bot_reply(self, text: str) -> None:
+        """朗读 MC bot 的回复：输出锁互斥，播报期间通知 bot 暂停自说自话。"""
+        text = (text or "").strip()
+        if not text:
+            return
+        bridge = self.mindcraft_bridge
+        output_lock = get_output_lock()
+        async with output_lock:
+            set_output_owner("mindcraft")
+            set_global_state(STATE_AI_SPEAKING)
+            try:
+                if bridge is not None and bridge.connected:
+                    try:
+                        await bridge.set_tts_playing(True)
+                    except Exception:
+                        pass
+                console.ok(f"[MC机器人] {text}")
+                if self.tts is not None:
+                    self.tts.clear_interrupt()
+                    await self.tts.speak(text)
+                    await self.tts.drain()
+                elif self.sub is not None:
+                    # 无 TTS：直接推整句字幕
+                    self.sub.push("text", text)
+            finally:
+                if bridge is not None and bridge.connected:
+                    try:
+                        await bridge.set_tts_playing(False)
+                    except Exception:
+                        pass
+                set_output_owner(None)
+                set_global_state(STATE_IDLE)
+                # 说完后清字幕（前端据此 3 秒后淡出）
+                if self.sub is not None:
+                    self.sub.push("clear", "")
+
     async def _handle_memory_command(self, cmd: str) -> bool:
         """/memory 子命令：list 列出｜del <id>... 删除｜clear 清空｜decay 衰减。"""
         parts = cmd.split()
@@ -901,7 +960,7 @@ class Application:
         走 CommandRegistry 按 prefix 顺序匹配；未匹配时 emotion_actor
         的 / 开兜底。返回 True 表示已消费（不进入 LLM）。
         """
-        result = await self._cmd_registry.dispatch(self, cmd)
+        result = await self._cmd_registry.dispatch(cmd)
         if result is not None:
             return result
         # emotion_actor 命令保留在原位置（依赖具体实例）
@@ -909,6 +968,38 @@ class Application:
             await self.emotion_actor.handle(cmd)
             return True
         return False
+
+    async def _init_tts_async(self) -> None:
+        """后台初始化 TTS 引擎（本地模型 + 参考音频预编码约 20s），不阻塞启动流程。
+
+        run() 中创建 TTS 引擎后立即后台启动加载（asyncio.create_task）；
+        就绪前 speak/drain/stop 由引擎内部守卫静默处理，就绪后自动可用。
+        """
+        try:
+            tts_ok = await self.tts.start()
+        except Exception as e:
+            console.warn(f"TTS 后台初始化异常：{e}")
+            tts_ok = False
+        if not tts_ok:
+            self.tts = None
+            return
+        # 预热：合成一句短文本让服务端 CUDA graph / 缓存提前就绪，
+        # 降低主播第一次真实说话时的首字延迟（失败不影响使用）
+        try:
+            await self.tts.warmup()
+        except Exception:
+            pass  # warmup 内部已捕获，这里仅兜底
+        # 口型回调只在有脸部驱动器时注册：纯对话模式（无 VTS/桌宠）下
+        # self.face 为 None，注册了会每块音频都报
+        # 'NoneType' object has no attribute 'load_speech_curve'
+        if self.face is not None:
+            def _on_tts_play(wav: str, text: str, dur_s: float) -> None:
+                if not self.face.load_speech_curve(wav):
+                    self.face.start_speaking(dur_s)
+
+            self.tts.set_on_play_callback(_on_tts_play)
+        if self.sub:
+            self.tts.set_subtitle_callback(lambda t: self.sub.push("text", t))
 
     async def _archive_session(self) -> None:
         """退出前会话归档：摘要写入档案 + 蒸馏记忆写回记忆库。
@@ -1100,25 +1191,24 @@ class Application:
                 else:
                     console.dim("表情/动作：自动情绪控制未启用（/expr /motion /face list 手动控制仍可用）")
 
-            # TTS 引擎
+            # TTS 引擎：后台并行加载（本地模型 + 参考音频预编码约 20s），
+            # 不阻塞 LLM / 记忆等后续初始化，启动即开始加载；
+            # 未就绪时 speak/drain/stop 由引擎内部守卫静默处理，就绪后自动可用
             self.tts = None
             if self.cfg.GPTSOVITS_REF_AUDIO:
                 self.tts = TTSEngine()
-                tts_ok = await self.tts.start()
-                if not tts_ok:
-                    self.tts = None
-                else:
-                    # 口型回调只在有脸部驱动器时注册：纯对话模式（无 VTS/桌宠）
-                    # 下 self.face 为 None，注册了会每块音频都报
-                    # 'NoneType' object has no attribute 'load_speech_curve'
-                    if self.face is not None:
-                        def _on_tts_play(wav: str, text: str, dur_s: float) -> None:
-                            if not self.face.load_speech_curve(wav):
-                                self.face.start_speaking(dur_s)
+                asyncio.create_task(self._init_tts_async())
 
-                        self.tts.set_on_play_callback(_on_tts_play)
-                    if self.sub:
-                        self.tts.set_subtitle_callback(lambda t: self.sub.push("text", t))
+            # Mindcraft 双向桥（socket.io 连接 MindServer）：开关开启才创建，
+            # 由后台循环负责连接/重连（引擎可能晚于主程序启动）。
+            self.mindcraft_bridge = None
+            if self.cfg.MINDCRAFT_BRIDGE_ENABLED:
+                self.mindcraft_bridge = MindcraftBridge(
+                    server_url=f"http://127.0.0.1:{self.cfg.MINDCRAFT_MINDSERVER_PORT}",
+                    agent_name=self.cfg.MINDCRAFT_BOT_NAME,
+                    on_bot_output=self._on_mindcraft_bot_output,
+                )
+                asyncio.create_task(self._mindcraft_loop())
 
             # 内容过滤（弹幕回复 / 主动对话 / 用户对话共用，需在引擎创建前就绪）
             self.pf = ProfanityFilter() if self.cfg.PROFANITY_FILTER_ENABLED else None
@@ -1268,6 +1358,19 @@ class Application:
                     # 全局状态：用户输入已到达，agent 触发被抑制（忙碌避让）
                     set_global_state(STATE_USER_TALKING)
 
+                    # Mindcraft 双向桥：已连接时把用户输入转发给 MC bot，
+                    # bot 回复由桥回调朗读；本机不再走本地 LLM 对话（避免双重回答）
+                    if (self.mindcraft_bridge is not None
+                            and self.mindcraft_bridge.connected):
+                        try:
+                            await self.mindcraft_bridge.send_message(user_text)
+                        except Exception as e:
+                            console.dim(f"[Mindcraft] 转发用户输入失败，回退本地对话：{e}")
+                        else:
+                            self.sub.push("user", user_text)
+                            console.dim(f"[Mindcraft] 已转发给 MC 机器人：{user_text}")
+                            break
+
                     # 用户消息分类情绪 → 后台播放表情/动作（桌宠/VTS 模式，仅开关开启时）
                     if (self.emotion_actor is not None
                             and config.cfg.EMOTION_ACTOR_ENABLED):
@@ -1352,6 +1455,12 @@ class Application:
                 except (asyncio.CancelledError, Exception):
                     pass
             self.sub.stop()
+            if self.mindcraft_bridge is not None:
+                try:
+                    await asyncio.wait_for(
+                        self.mindcraft_bridge.disconnect(), timeout=5)
+                except Exception:
+                    pass
             if self.stt_engine is not None:
                 self.stt_engine.stop()
             if self.mcp is not None:
