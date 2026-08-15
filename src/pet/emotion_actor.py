@@ -101,3 +101,12 @@ class PetEmotionActor(BaseEmotionActor):
 
     async def play_motion_by_name(self, name: str) -> bool:
         return self._widget.play_motion_by_name(name)
+
+    async def restore(self) -> None:
+        """说话结束复原：重置表情回默认（动作由 live2d 播完自动回待机）。"""
+        try:
+            model = self._widget.model
+            if model is not None:
+                model.ResetExpression()
+        except Exception:
+            pass

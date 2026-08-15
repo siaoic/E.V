@@ -3,12 +3,14 @@
         "bing-cn-mcp": {
             "command": "npx",
             "args": ["-y", "bing-cn-mcp"],
-            "timeout": 120
+            "timeout": 120,
+            "description": "必应中文搜索：bing_search（联网搜索）、crawl_webpage（抓取网页内容），用于获取实时信息、新闻、资料。"
         },
-        "playwright": {
+        "playwright_disabled": {
             "command": "npx",
             "args": ["-y", "@playwright/mcp@latest"],
-            "timeout": 120
+            "timeout": 120,
+            "description": "浏览器自动化：打开网页、点击元素、填写表单、截图、读取页面内容，可代替联网搜索浏览任意网站。（需本机安装 Chrome，暂时禁用）"
         }
     }
 }

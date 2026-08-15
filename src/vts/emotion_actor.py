@@ -241,3 +241,19 @@ class VtsEmotionActor(BaseEmotionActor):
 
     async def play_motion_by_name(self, name: str) -> bool:
         return await self._trigger_motion(name)
+
+    async def restore(self) -> None:
+        """说话结束复原：停用当前表情 + 停止动作，回到模型默认姿态。"""
+        try:
+            if self._active_expr_file:
+                await self._vts.activate_expression(
+                    self._active_expr_file, active=False)
+                self._active_expr_file = ""
+        except Exception as e:
+            console.dim(f"VTS 表情复原失败：{e}")
+        try:
+            await self._stop_playing_animation()
+            if self._face is not None:
+                self._face.stop_motion()
+        except Exception as e:
+            console.dim(f"VTS 动作复原失败：{e}")

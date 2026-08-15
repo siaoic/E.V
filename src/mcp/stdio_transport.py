@@ -14,6 +14,8 @@ config.env。LLM_API_KEY 仅在子进程确实需要时才透传，BILI_SESSDATA
 from __future__ import annotations
 
 import os
+import shutil
+import sys
 
 from src.utils import console
 from src.core.exceptions import EVBaseException, ErrorCode
@@ -46,6 +48,15 @@ class MCPStdioTransport(MCPClientTransportBase):
         cwd = self.config.get("cwd") or os.getcwd()
 
         console.info(f"🚀 启动 MCP Stdio 服务器: {self.server_name} -> {command}")
+
+        # Windows 上 npx/npm 等 npm 脚本是 .cmd/.bat 或无扩展名脚本文件（如
+        # nodejs 的 npx 无扩展名），CreateProcess 无法直接拉起（WinError 193）；
+        # 解析结果非 .exe/.com 时统一包装为 cmd /c，由 cmd 按 PATHEXT 查找执行。
+        if sys.platform == "win32":
+            resolved = shutil.which(command)
+            if resolved and os.path.splitext(resolved)[1].lower() not in (".exe", ".com"):
+                args = ["/c", command] + args
+                command = "cmd"
 
         # 环境变量：官方 SDK 白名单（系统路径类）+ 本项目需要透传的 key + 配置显式声明
         env = {k: v for k, v in os.environ.items() if k in _SAFE_ENV_KEYS}

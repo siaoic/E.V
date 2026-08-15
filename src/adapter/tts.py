@@ -46,6 +46,10 @@ class BaseTTSAdapter(BaseAdapter):
         """设置音频播放回调（口型同步用）。"""
 
     @abstractmethod
+    def set_on_play_done_callback(self, cb: Optional[Callable]) -> None:
+        """设置整段播放结束回调（队列排空/打断清空后触发）——说话结束复原用。"""
+
+    @abstractmethod
     def set_subtitle_callback(self, cb: Optional[Callable]) -> None:
         """设置字幕推送回调。"""
 

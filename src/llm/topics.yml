@@ -1587,3 +1587,91 @@ topics:
   - relaxation
   - meta
   cooldown_minutes: 3
+- id: learned_53ba7c35
+  category: learned
+  concept: 当观众催促开播时，用带点自嘲的语气回应能拉近距离，比如‘我饭都快吃完了’这种生活化梗。
+  tags:
+  - casual
+  - relatable
+  - interactive
+  cooldown_minutes: 3
+- id: learned_8724a50b
+  category: learned
+  concept: 观众问‘会不会卡’时，主播可以顺势抛出‘今天是奇迹日’的期待感，制造悬念。
+  tags:
+  - curiosity
+  - anticipation
+  - engagement
+  cooldown_minutes: 3
+- id: learned_633ad25a
+  category: learned
+  concept: 揭秘主播与 AI 的‘极限’对话边界，测试底线在哪里
+  tags:
+  - 边界测试
+  - 互动
+  - AI 伦理
+  - 直播
+  cooldown_minutes: 3
+- id: learned_a38d3cd5
+  category: learned
+  concept: 当观众发疯时，如何用‘温柔’的 AI 逻辑化解冲突
+  tags:
+  - 危机公关
+  - 情绪价值
+  - 话术
+  - 直播技巧
+  cooldown_minutes: 3
+- id: learned_960b746e
+  category: learned
+  concept: 当观众抛出无厘头或剧情类梗时，如何用 Neuro-sama 式的混乱逻辑接住并反杀
+  tags:
+  - chaos
+  - roleplay
+  - interaction
+  - neuro-sama
+  cooldown_minutes: 3
+- id: learned_2ec9f2c8
+  category: learned
+  concept: 如何在不破坏人设的前提下，优雅地处理观众关于隐私或虚构剧情的模糊提问
+  tags:
+  - privacy
+  - mystery
+  - boundaries
+  - chat
+  cooldown_minutes: 3
+- id: learned_5a743d3a
+  category: learned
+  concept: 揭秘主播房卡背后的真实故事，从“会走不集合”到神秘黑房，层层剥茧
+  tags:
+  - mystery
+  - storytelling
+  - fan-curiosity
+  - interactive-narrative
+  cooldown_minutes: 3
+- id: learned_d848aeca
+  category: learned
+  concept: 深夜电台：聊聊那些让人“熄火”的深夜心事，用黑色幽默化解孤独
+  tags:
+  - late-night-chat
+  - emotional-support
+  - humor
+  - relatability
+  cooldown_minutes: 3
+- id: learned_7b79fe0e
+  category: learned
+  concept: 深夜游戏实况：当队友救起你后，人群突然涌现的紧张与狂欢
+  tags:
+  - gaming
+  - teamwork
+  - tension
+  - community
+  cooldown_minutes: 3
+- id: learned_81ab8c2a
+  category: learned
+  concept: 车内改装日记：揭秘通风管道改造背后的故事与小心思
+  tags:
+  - diy
+  - car-mod
+  - lifestyle
+  - storytime
+  cooldown_minutes: 3

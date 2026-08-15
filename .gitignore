@@ -40,6 +40,9 @@ tools/memory/memU-main.zip
 # 注意：实际模型目录在 tools/gsv_tts/API/models 下（旧条目 gsv_tts/API/models/ 已失效）
 tools/gsv_tts/API/models/
 
+# ================= 本地 ASR 模型（Qwen3-ASR 权重 1.8GB+，不入库） =================
+src/asr/qwen3_asr/
+
 # ================= 临时 TTS 音频（GPT-SoVITS 为 wav，edge 为 mp3） =================
 vtuber_tts_*
 

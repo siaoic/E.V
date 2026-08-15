@@ -1,0 +1,53 @@
+"""API 消息清洗：确保 OpenAI 协议兼容（对标 llm-client.js _cleanMessagesForAPI）。"""
+
+import json
+import re
+from typing import List
+
+from src.llm.constants import _MAX_TOOL_CONTENT_LENGTH
+from src.llm.tool_message_utils import sanitize_tool_message_sequence
+
+# 控制字符（可能导致 JSON 解析失败）：移除不可见字符，保留换行符(\n)和制表符(\t)
+_CONTROL_CHAR_RE = re.compile(r"[\x00-\x08\x0b-\x0c\x0e-\x1f\x7f]")
+
+
+def _clean_messages_for_api(messages: List[dict]) -> List[dict]:
+    """清理消息格式，确保 API 兼容（对标 llm-client.js _cleanMessagesForAPI）。
+
+    - assistant 有 tool_calls 但 content 为 null → 设为 ''（部分 API 要求 content 非 null）
+    - tool 消息：content 对象→JSON 字符串、移除控制字符、超过 8000 截断
+    - 最后用 sanitize_tool_message_sequence 兜底，保证 tool_calls 与 tool 响应严格配对
+    """
+    normalized: List[dict] = []
+    for msg in messages:
+        msg = dict(msg)
+        if msg.get("role") == "assistant":
+            # 有 tool_calls 但 content 为 null 时，某些 API 要求 content 不能为 null
+            if msg.get("content") is None and msg.get("tool_calls"):
+                msg["content"] = ""
+        elif msg.get("role") == "tool":
+            content = msg.get("content")
+            # content 是对象/数组 → 转 JSON 字符串
+            if isinstance(content, (dict, list)):
+                try:
+                    content = json.dumps(content, ensure_ascii=False)
+                except (TypeError, ValueError):
+                    content = str(content)
+            # 确保 content 是字符串
+            if not isinstance(content, str):
+                content = str(content or "")
+            # 移除控制字符（可能导致 JSON 解析失败），保留 \n 和 \t
+            content = _CONTROL_CHAR_RE.sub("", content)
+            # 超长内容截断，避免超大响应
+            if len(content) > _MAX_TOOL_CONTENT_LENGTH:
+                content = content[:_MAX_TOOL_CONTENT_LENGTH] + "...(内容过长已截断)"
+            msg = {
+                "role": "tool",
+                "name": msg.get("name") or "unknown_tool",
+                "content": content,
+                "tool_call_id": msg.get("tool_call_id"),
+            }
+        normalized.append(msg)
+
+    # 最后一道防线：清理 assistant.tool_calls 与 tool 响应不配对的序列
+    return sanitize_tool_message_sequence(normalized)

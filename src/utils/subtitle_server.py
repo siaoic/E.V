@@ -4,7 +4,7 @@
 - 浏览器打开 http://127.0.0.1:{port}/ 即可看到透明字幕层
 - push("text", text) 推送字幕累积文本（打字机效果）
 - push("clear", "") 清除字幕并触发淡出
-- push("user", text) 用户/观众发言（弹幕、键盘输入），单独一行展示并自动淡出
+- push("user", text) 用户/观众发言（弹幕、键盘输入）——按需求隐藏，字幕页只显示 AI 播报
 - 字幕持续显示，直到 push("clear", "") 触发淡出（回复结束才隐藏，句间不闪烁）
 
 字体：
@@ -275,7 +275,7 @@ class SubtitleServer:
 
         kind:
           - "text": 累积字幕文本（打字机效果），sent = 新显示的整句
-          - "user": 用户/观众发言（弹幕、键盘输入），单独一行展示并自动淡出
+          - "user": 用户/观众发言（弹幕、键盘输入）——字幕页不显示，忽略
           - "clear": 清除（对话结束，浏览器端淡出隐藏）
         """
         if kind == "clear":
@@ -284,10 +284,8 @@ class SubtitleServer:
             self._last_text = ""
             return
         if kind == "user":
-            # 观众弹幕 / 键盘输入：浏览器端单独一行展示（不干扰 AI 字幕行）
-            t = str(text or "")
-            if t:
-                self._broker.broadcast(t, event="user")
+            # 用户/观众发言（弹幕、键盘输入、语音识别）不在字幕页显示，
+            # 字幕页只呈现 AI 播报内容（按需求隐藏，接口保留）
             return
         if kind == "text":
             t = str(text or "")

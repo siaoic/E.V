@@ -492,6 +492,7 @@ class Application:
             from src.danmaku.bili_danmaku import (
                 BiliServiceManager, DanmakuPicker, set_danmaku_picker,
             )
+            from src.danmaku.client import bili_loop
         except Exception as e:
             console.warn(f"[弹幕] 模块导入失败：{e}")
             return None, None, None
@@ -500,6 +501,9 @@ class Application:
         loop = asyncio.get_running_loop()
         html_path = os.path.join(cfg.PROJECT_ROOT, "ui", "弹幕卡片.html")
         mgr = BiliServiceManager(room_ids, cfg.BILI_SERVER_PORT, html_path)
+        # 注入 client.py 的线程启动函数：缺失会导致 BiliService.start()
+        # 抛 "BiliService.set_client_starter 未调用"（多房间改造遗漏的注入点）
+        mgr.attach_client_starter(bili_loop)
         mgr.start()
 
         def _enqueue(items: list) -> None:
@@ -1064,8 +1068,25 @@ class Application:
                     self.face.start_speaking(dur_s)
 
             self.tts.set_on_play_callback(_on_tts_play)
+        # 说话结束复原：表情/动作只在说话期间显示，播完（含打断）恢复默认
+        if self.emotion_actor is not None:
+            self.tts.set_on_play_done_callback(self._restore_emotion_after_speech)
         if self.sub:
             self.tts.set_subtitle_callback(lambda t: self.sub.push("text", t))
+
+    def _restore_emotion_after_speech(self) -> None:
+        """整段说话结束（播完或打断）→ 表情/动作复原。
+
+        回调在播放线程触发，经主事件循环调度 actor.restore()（async 方法），
+        保证与 TTS/情绪分类等主循环任务互斥。
+        """
+        actor, loop = self.emotion_actor, self._loop
+        if actor is None or loop is None:
+            return
+        try:
+            asyncio.run_coroutine_threadsafe(actor.restore(), loop)
+        except Exception as e:
+            console.dim(f"表情/动作复原调度失败：{e}")
 
     async def _archive_session(self) -> None:
         """退出前会话归档：摘要写入档案 + 蒸馏记忆写回记忆库。
@@ -1095,6 +1116,8 @@ class Application:
         """原 main() 的完整生命周期：初始化 → 主循环 → 资源清理。"""
         self.cfg = config.cfg
         self.cfg.validate()
+        # 主事件循环引用：播放线程回调（说话结束复原）需经它调度回主循环
+        self._loop = asyncio.get_running_loop()
 
         # 命令注册表：先建好，run 期间各 handler 内部用 self._cmd_registry.dispatch 派发
         self._cmd_registry = self._build_command_registry()
@@ -1117,7 +1140,6 @@ class Application:
             from src.pet.widget import PetWidget, BubbleSub
             from src.pet.driver import PetFaceDriver
 
-            console.header("E.V")
             console.kv("模型", f"{self.cfg.LLM_MODEL}（深度思考 {'开' if self.cfg.LLM_THINKING else '关'}）")
             console.kv("桌宠", os.path.basename(self.cfg.PET_MODEL_PATH))
             console.dim("拖动模型移动位置 | 点击模型播放动作 | 输入 /quit 退出")
@@ -1172,7 +1194,6 @@ class Application:
 
             asyncio.create_task(_watch_pet_model_change())
         else:
-            console.header("E.V")
             console.kv("模型", f"{self.cfg.LLM_MODEL}（深度思考 {'开' if self.cfg.LLM_THINKING else '关'}）")
             console.kv("VTS", f"端口 {self.cfg.VTS_PORT}")
             console.dim("AI 全权接管：自动眨眼 / 呼吸 / 身体摇摆 | 基线动画由 .motion3.json 驱动")
@@ -1308,6 +1329,10 @@ class Application:
                 asyncio.create_task(self._memory_integration_loop())
 
             self.brain = LLMBrain(mcp=self.mcp)
+
+            # 连接预热：启动空闲期发一个最小请求，把 TLS 握手冷启动挪到后台，
+            # 用户第一次提问即命中热连接（首轮 TTFT 实测 2565ms → 热连接 ~1s）
+            asyncio.create_task(self.brain.warmup())
 
             if self.cfg.MEMORY_ENABLED:
                 console.dim(f"记忆系统：已启用（{memory.count()} 个记忆文件）")

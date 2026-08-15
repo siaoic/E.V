@@ -13,6 +13,11 @@
 兼容任意 OpenAI 协议的服务：OpenAI 官方 / 智谱 GLM / DeepSeek / 本地 vLLM 等。
 通过 .env 配置 LLM_API_KEY / LLM_BASE_URL / LLM_MODEL 切换服务，无需改代码。
 
+本文件是瘦身后的协调者：职责按子包拆分（见 src/llm/__init__.py）——
+常量、内容清洗、工具解析/格式化/执行、历史注入/摘要、429 重试均已外置；
+保留流式工具循环本体（_run/_create/_drain 闭包依赖本轮大量局部状态）与
+client 创建 / 缓存态方法。
+
 调用范式：
     client.chat.completions.create(
         model=cfg.LLM_MODEL,
@@ -35,385 +40,37 @@ content 增量传回主事件循环，按句切分后 yield，实现「边思考
 """
 
 import asyncio
-import json
-import os
-import re
 import time
-from typing import Any, AsyncGenerator, List, Optional
+from typing import AsyncGenerator, List, Optional
 
 from src.utils import config, console
 from tools.memory import memory
 from src.adapter.llm import BaseLLMAdapter
 from plugins.tools.skills import get_skill_manager
-from src.llm.tool_message_utils import (
-    sanitize_tool_message_sequence,
-    trim_messages_preserving_tool_rounds,
+from src.llm.cleaners.api import _clean_messages_for_api
+from src.llm.cleaners.content import (
+    _clean_sentence,
+    _filter_thinking_content,
+    _remove_tool_calls_from_content,
 )
+from src.llm.cleaners.sentence import _find_sentence_end_from, _split_sentences
+from src.llm.client.retry import _parse_retry_after
+from src.llm.constants import (
+    _MAX_429_WAIT,
+    _MAX_TOOL_ITERATIONS,
+    _SUMMARIZE_MIN_TURNS,
+)
+from src.llm.history.inject import _InjectionMixin
+from src.llm.history.summary import _SummaryMixin
+from src.llm.tools.executor import _execute_tool_calls
+from src.llm.tools.formatter import _format_tool_calls, _summarize_tool_content
+from src.llm.tools.parser import _parse_qwen_tool_calls
+from src.llm.utils.content_check import has_content
+from src.llm.tool_message_utils import trim_messages_preserving_tool_rounds
 from src.utils.perf_tracker import PerfTracker
 
-# 句子边界：遇符号立即切分。
-# 中文：。！？…换行；英文：句号 '.' 仅在后跟空格/结尾时算边界（避开 '...'、小数）。
-_SENTENCE_ENDS = "。！？!?\n…，,；;"
 
-# 多轮工具调用上限（对标 live-2d(2) llm-handler.js 的 maxIterations=30）
-_MAX_TOOL_ITERATIONS = 30
-
-# 429 限流自动等待重试：总等待封顶（秒）。免费档服务端 1 并发限流，
-# 高峰期常触发 429——按服务端头信息等待限流窗口结束后自动重试，
-# 而不是直接中断对话；封顶后仍 429 才放弃。
-_MAX_429_WAIT = 60.0
-
-# 长对话摘要压缩：被裁剪的早期对话至少这么多条消息才值得压缩成摘要
-_SUMMARIZE_MIN_TURNS = 4
-
-# 工具执行结果日志截断长度（防刷屏；完整结果仍保留在工具上下文供模型使用）
-_MAX_TOOL_RESULT_LOG = 300
-
-# 跨轮历史中工具结果保留的最大长度（防 token 污染；本轮内仍用完整结果）
-_MAX_TOOL_HISTORY_LOG = 500
-
-# 生效话术建议文件：进化引擎写入（data/evolution_advice_active.json），
-# 到期后由进化复盘回评续期/移除，这里只读取未到期条目注入系统提示
-_ADVICE_ACTIVE_PATH = os.path.join(
-    config.cfg.PROJECT_ROOT, "data", "evolution_advice_active.json")
-
-# 生效话术建议读取缓存时长（秒）：避免每轮对话都读文件
-_ADVICE_CACHE_TTL = 30
-
-# 观众画像文件：进化引擎复盘提炼（data/evolution_profile.json），
-# 本模块每轮按关键词召回注入系统提示（对标 hermes 的 USER.md/MEMORY.md）
-_PROFILE_PATH = os.path.join(
-    config.cfg.PROJECT_ROOT, "data", "evolution_profile.json")
-
-# 画像读取缓存时长（秒）：避免每轮对话都读文件
-_PROFILE_CACHE_TTL = 30
-
-# 单轮最多注入的画像条数（按与当前消息相关度排序取前 N，控制 token）
-_PROFILE_INJECT_MAX = 3
-
-# GEPA 进化策略段文件：prompt_evo.py 择优落盘（data/evolution_policy.json），
-# 本模块每轮读取注入系统提示（对标 hermes GEPA 的 prompt 进化层）
-_POLICY_PATH = os.path.join(
-    config.cfg.PROJECT_ROOT, "data", "evolution_policy.json")
-
-# 策略段读取缓存时长（秒）：避免每轮对话都读文件
-_POLICY_CACHE_TTL = 30
-
-
-def _bigram_set(s: str) -> set:
-    """文本的 2-gram 片段集合：中文按字符 2-gram 取交集（无第三方分词依赖）。"""
-    s = re.sub(r"\s+", "", s)
-    return {s[i:i + 2] for i in range(len(s) - 1)} if len(s) >= 2 else set()
-
-
-def _bigram_hits(text: str, query: str) -> int:
-    """公共 2-gram 片段数：轻量关键词召回（无第三方分词依赖）。
-
-    中文按字符 2-gram 取交集，两个文本共享片段越多说明越相关。
-    """
-    return len(_bigram_set(text) & _bigram_set(query))
-
-
-def _summarize_tool_content(content) -> str:
-    """工具结果历史摘要化：跨轮次历史中的工具消息只保留结果摘要。
-
-    dict/list → JSON 单行；超长截断并加提示。发送给模型时仍走
-    _clean_messages_for_api 的既有长度上限，不影响工具链配对。
-    """
-    if isinstance(content, (dict, list)):
-        try:
-            text = json.dumps(content, ensure_ascii=False, separators=(",", ":"))
-        except (TypeError, ValueError):
-            text = str(content)
-    else:
-        text = str(content or "")
-    if len(text) <= _MAX_TOOL_HISTORY_LOG:
-        return text
-    return text[:_MAX_TOOL_HISTORY_LOG] + f"…（结果过长，已存 {_MAX_TOOL_HISTORY_LOG} 字摘要）"
-
-
-def _format_tool_result(name: str, result) -> str:
-    """工具执行结果的结构化日志：JSON 压缩为一行 + 截断到 JSON 边界。
-
-    控制中心日志区据此展示「工具名 + 结果摘要」的紧凑块，便于调试；
-    截断仅影响日志展示，不裁剪进入工具上下文的结果。
-
-    截断策略：找最近的 '},' / '],' / '}' 边界，避免出现
-    "{"title":...,"content":"（半截）" 的坏 JSON 让排查困惑。
-    """
-    if result is None:
-        return f"  ↳ 「{name}」结果：（无返回）"
-    if isinstance(result, (dict, list)):
-        try:
-            text = json.dumps(result, ensure_ascii=False, separators=(",", ":"))
-        except (TypeError, ValueError):
-            text = str(result)
-    else:
-        text = str(result)
-    text = text.strip()
-    if len(text) > _MAX_TOOL_RESULT_LOG:
-        cut = text[:_MAX_TOOL_RESULT_LOG]
-        # 找最近的 JSON 边界（}, 或 ], 或 }）保证不会切到字段中间
-        for sep in ("},", "],", "}"):
-            idx = cut.rfind(sep)
-            if idx > _MAX_TOOL_RESULT_LOG // 2:
-                cut = cut[:idx + len(sep)]
-                break
-        text = cut + f"…（已截断至 {_MAX_TOOL_RESULT_LOG} 字符，完整结果保留在工具上下文）"
-    return f"  ↳ 「{name}」结果：{text}"
-
-
-def _parse_retry_after(e) -> float:
-    """从 429 异常的响应头解析服务端建议的等待秒数；解析失败返回 0。
-
-    优先 Retry-After（秒数），其次 X-RateLimit-Reset（未来 Unix 时间戳，秒）。
-    """
-    try:
-        headers = e.response.headers
-    except Exception:
-        return 0.0
-    for name in ("Retry-After", "retry-after"):
-        v = headers.get(name)
-        if v:
-            try:
-                return max(0.0, float(v))
-            except (TypeError, ValueError):
-                pass
-    for name in ("X-RateLimit-Reset", "x-ratelimit-reset"):
-        v = headers.get(name)
-        if v:
-            try:
-                ts = float(v)
-                if ts > time.time():
-                    return ts - time.time()
-            except (TypeError, ValueError):
-                pass
-    return 0.0
-
-# 工具响应内容长度上限（对标 llm-client.js _cleanMessagesForAPI 的 MAX_CONTENT_LENGTH）
-_MAX_TOOL_CONTENT_LENGTH = 8000
-# 本轮内：单工具结果 8000 字符 / 整轮累计 32K 字符。
-# 跨轮：只保留摘要（已有 _summarize_tool_content + _MAX_TOOL_HISTORY_LOG）
-# 防止 30 轮工具调用 × 8000 字符一次性进 LLM 上下文把免费档模型打爆。
-_MAX_TOOL_RESULT_CHARS = 8000
-_MAX_ROUND_TOOL_CHARS = 32000
-# 控制字符（可能导致 JSON 解析失败）：移除不可见字符，保留换行符(\n)和制表符(\t)
-_CONTROL_CHAR_RE = re.compile(r"[\x00-\x08\x0b-\x0c\x0e-\x1f\x7f]")
-
-
-def _find_sentence_end_from(text: str, start: int) -> int:
-    """返回 text 中从 start 起第一个句末符号的下标；找不到返回 -1。
-
-    消费端增量扫描用：start 之前已确认不含句末符号（含「后跟空格的句号」），
-    只扫描新增区域，避免每个 chunk 都从开头重扫整段 buffer。
-    切句规则与 _find_sentence_end 完全一致：按符号立即切，
-    英文句号仅在后跟空格/结尾时算边界。
-    """
-    for i in range(start, len(text)):
-        if text[i] in _SENTENCE_ENDS:
-            return i
-        if text[i] == ".":
-            # 英文句号：后跟空格或到结尾才算一句（'...'、小数、缩写不切）
-            if i == len(text) - 1 or text[i + 1] == " ":
-                return i
-    return -1
-
-
-def _find_sentence_end(text: str) -> int:
-    """返回 text 中第一个句末符号的下标；找不到返回 -1。
-
-    主循环（消费端）唯一的切句规则：按符号立即切，
-    英文句号仅在后跟空格/结尾时算边界。
-    """
-    return _find_sentence_end_from(text, 0)
-
-
-# 角色扮演动作/表情标注（*blushes deeply* 等）：LLM 常用来表达情绪/动作，
-# 若不清除 TTS 会直接念出来（"星号 blushes deeply 星号"），既"瞎喊"又拖慢合成。
-_ACTION_ANNOT_RE = re.compile(r"\*[^*\n]*\*")
-
-# 模型偶发输出 <time>...</time> 之类 HTML 标签（字段名/伪标签），
-# 不清理会被 TTS 直接念成"小于 time 大于"。统一替换为空。
-_HTML_TAG_RE = re.compile(r"<[^<>]{1,32}>")
-
-# 思考内容防御过滤（对标 live-2d(2) filterThinkingContent）：
-# Gemini/DeepSeek 等模型偶尔把 <think>/<thinking> 块混进 content
-_THINK_BLOCK_RE = re.compile(r"<(?:think|thinking)>[\s\S]*?</(?:think|thinking)>", re.IGNORECASE)
-
-# Qwen 文本格式工具调用（<tool_call>{json}</tool_call> 或 <fn_name attr="value"/>）
-_QWEN_TOOL_CALL_JSON_RE = re.compile(r"<tool_call>\s*(\{[\s\S]*?\})\s*</tool_call>", re.IGNORECASE)
-_QWEN_TOOL_CALL_XML_RE = re.compile(r"<(\w+)\s+([^>]+?)\/>", re.IGNORECASE)
-# 常见 HTML 自闭合标签——XML 格式工具解析时跳过，避免误伤
-_HTML_SELF_CLOSING_TAGS = {
-    "br", "hr", "a", "img", "input", "meta", "link", "source", "area",
-    "base", "col", "embed", "param", "track", "wbr",
-}
-# 清洗时移除工具调用文本，防止 TTS 念出 <tool_call> 等
-_TOOL_CALL_TEXT_RE = re.compile(
-    r"<tool_call>[\s\S]*?</tool_call>|<\w+\s+[^>]+?\/>", re.IGNORECASE
-)
-
-# 颜文字（(´•ω•̥`) / (T_T) 等）：GPT-SoVITS 无法合成（HTTP 500 死音）。
-# 只匹配含"颜文字信号字符"的短括号（假名/希腊字母 ω/´/•/组合符/点/下划线等），
-# 不会误伤 "(笑)" 这类正常括号。
-_KAOMOJI_RE = re.compile(
-    r"[（(](?=[^（）()]*[\u3040-\u30ff\u0370-\u03ff\u00b4\u2022\u0300-\u036f"
-    r"\u30fb\u00b7\u005e\u005f\u0060])[^（）()]{1,14}[)）]"
-)
-
-# Emoji 过滤：匹配主流 Unicode emoji 区域（含 ZWJ 序列、肤色修饰符等）
-_EMOJI_RE = re.compile(
-    "["
-    "\U0001F600-\U0001F64F"   # 表情符号
-    "\U0001F300-\U0001F5FF"   # 符号和象形文字
-    "\U0001F680-\U0001F6FF"   # 交通和地图符号
-    "\U0001F1E0-\U0001F1FF"   # 国旗
-    "\U00002702-\U000027B0"   # 杂项符号
-    "\U00002460-\U000024FF"   # 带括号的字母数字（Enclosed Alphanumerics，含 Ⓜ）
-    "\U0001F000-\U0001F1FF"   # 麻将/多米诺/扑克牌/封闭字母数字补充
-    "\U0001F900-\U0001F9FF"   # 补充符号和象形文字
-    "\U0001FA00-\U0001FA6F"   # 国际象棋符号
-    "\U0001FA70-\U0001FAFF"   # 符号和象形文字扩展-A
-    "\U00002600-\U000026FF"   # 杂项符号
-    "\U0000FE00-\U0000FE0F"   # 变体选择器
-    "\U0000200D"              # 零宽连接符（ZWJ）
-    "\U0000200C"              # 零宽非连接符
-    "\U00002B50"              # 白色五角星⭐
-    "\U00002728"              # 火花✨
-    "\U00002764"              # 红心❤
-    "\U0001F48B"              # 吻💋
-    "\U0001F4AF"              # 100💯
-    "\U0001F4A1"              # 灯泡💡
-    "]+"
-)
-
-# 实质内容检测：句子清理后若不含任何中英文/数字/假名（纯标点、符号、空白），
-# 直接丢弃——GPT-SoVITS 对无意义文本会合成退化，输出拖长音（"啊——"怪叫）。
-_HAS_CONTENT_RE = re.compile(r"[A-Za-z0-9\u4e00-\u9fff\u3040-\u30ff\uac00-\ud7af]")
-
-
-def _strip_emojis(text: str) -> str:
-    """移除文本中的 Emoji 字符。"""
-    return _EMOJI_RE.sub("", text) if text else text
-
-
-def _filter_thinking_content(text: str) -> str:
-    """过滤模型混入 content 的思考内容（对标 live-2d(2) filterThinkingContent）。"""
-    if not text:
-        return text
-    filtered = _THINK_BLOCK_RE.sub("", text)
-    if re.match(r"^思考\s*\n", filtered):
-        return ""
-    if re.match(r"^Thinking\s*\n", filtered, re.IGNORECASE):
-        return ""
-    return filtered
-
-
-def _remove_tool_calls_from_content(content: str) -> str:
-    """从内容中移除工具调用部分（对标 llm-client.js _removeToolCallsFromContent）。"""
-    if not content:
-        return content
-    return _TOOL_CALL_TEXT_RE.sub("", content).strip()
-
-
-def _clean_sentence(sentence: str) -> str:
-    """纯文本清洗（无副作用）：记忆标签 / 动作标注 / HTML / 工具文本 / 颜文字 / emoji。
-
-    关键：绝不 strip 首尾空白！句子按软边界（空格）切分时，
-    分界空格在 chunk 尾部；按硬边界（标点）切分时在下一 chunk 头部。
-    strip 会吞掉单词分界，导致英文粘连（I mean → Imean），
-    送进 TTS 后合成异常慢、甚至念出 *blushes* 之类的"瞎喊"。
-    """
-    if not sentence:
-        return sentence
-    sentence = memory.extract_and_strip(sentence)
-    sentence = _filter_thinking_content(sentence)
-    sentence = _ACTION_ANNOT_RE.sub(" ", sentence)
-    sentence = _HTML_TAG_RE.sub("", sentence)
-    sentence = _TOOL_CALL_TEXT_RE.sub(" ", sentence)
-    sentence = _KAOMOJI_RE.sub(" ", sentence)
-    sentence = _strip_emojis(sentence)
-    return sentence
-
-
-def _split_sentences(text: str) -> List[str]:
-    """按句末符号把文本切成句子（与主循环同一切句规则，无长度兜底）。"""
-    sentences: List[str] = []
-    buffer = text
-    while True:
-        idx = _find_sentence_end(buffer)
-        if idx < 0:
-            if buffer:
-                sentences.append(buffer)
-            break
-        sentences.append(buffer[: idx + 1])
-        buffer = buffer[idx + 1:]
-    return sentences
-
-
-def _parse_qwen_tool_calls(content: str) -> Optional[List[dict]]:
-    """解析 Qwen 模型的文本格式工具调用（对标 llm-client.js _parseQwenToolCalls）。
-
-    格式1：<tool_call>{"name": ..., "arguments": {...}}</tool_call>
-    格式2：<function_name attr1="value1" attr2="value2"/>
-    """
-    if not content:
-        return None
-
-    tool_calls: List[dict] = []
-    # 时间戳前缀保证跨轮次唯一（历史保留完整工具链后，id 不能与其他轮冲突）
-    _ts = int(time.time() * 1000)
-
-    # 格式1：JSON
-    for m in _QWEN_TOOL_CALL_JSON_RE.finditer(content):
-        try:
-            data = json.loads(m.group(1))
-        except (json.JSONDecodeError, TypeError):
-            continue
-        name = data.get("name") or ""
-        arguments = data.get("arguments") or {}
-        tool_calls.append({
-            "id": f"call_qwen_{_ts}_{len(tool_calls)}",
-            "type": "function",
-            "function": {
-                "name": name,
-                "arguments": json.dumps(arguments, ensure_ascii=False),
-            },
-        })
-
-    # 格式2：XML 属性（跳过常见 HTML 自闭合标签）
-    for m in _QWEN_TOOL_CALL_XML_RE.finditer(content):
-        fname = m.group(1)
-        if fname.lower() in _HTML_SELF_CLOSING_TAGS:
-            continue
-        attrs = dict(re.findall(r'(\w+)="([^"]*)"', m.group(2)))
-        tool_calls.append({
-            "id": f"call_qwen_{_ts}_{len(tool_calls)}",
-            "type": "function",
-            "function": {
-                "name": fname,
-                "arguments": json.dumps(attrs, ensure_ascii=False),
-            },
-        })
-
-    return tool_calls or None
-
-
-def _format_tool_calls(tool_calls: list) -> str:
-    """格式化工具调用日志（对标 llm-handler.js formatToolCalls）。"""
-    lines = []
-    for tc in tool_calls:
-        name = tc["function"]["name"]
-        try:
-            args = json.loads(tc["function"]["arguments"] or "{}")
-            arg_str = ", ".join(f"{k}={v}" for k, v in args.items()) or "（无参数）"
-        except (json.JSONDecodeError, TypeError):
-            arg_str = (tc["function"]["arguments"] or "")[:100] or "（无参数）"
-        lines.append(f"AI调用了：{name} 工具 输入参数：{arg_str}")
-    return "；".join(lines)
-
-
-class LLMBrain(BaseLLMAdapter):
+class LLMBrain(BaseLLMAdapter, _InjectionMixin, _SummaryMixin):
     """LLM 流式大脑：支持多轮工具调用，按句 yield 纯对话文本。"""
 
     def __init__(self, mcp=None) -> None:
@@ -476,97 +133,27 @@ class LLMBrain(BaseLLMAdapter):
             max_retries=2,
         )
 
-    # ---------- 生效话术建议注入 ----------
+    async def warmup(self) -> None:
+        """启动时预热 LLM 连接：发一个最小请求建立 TLS/HTTP 连接。
 
-    def _active_advice_section(self) -> str:
-        """读取未到期的生效话术建议，拼装成注入系统提示的段落。
-
-        30s TTL 缓存避免每轮对话都读文件；无生效建议时返回空字符串。
+        首轮对话的 TTFT 比后续轮慢 ~1s，主要来自握手冷启动（实测首轮
+        2565ms → 热连接后 959-1440ms）。启动后台预热一次，把冷启动
+        挪到空闲期，用户第一次提问即命中热连接。失败静默（不影响启动）。
         """
-        now = time.time()
-        if now - self._advice_cache_ts >= _ADVICE_CACHE_TTL:
-            self._advice_cache_ts = now
-            try:
-                with open(_ADVICE_ACTIVE_PATH, "r", encoding="utf-8") as f:
-                    data = json.load(f)
-                self._advice_cache = [
-                    (it.get("text") or "").strip()
-                    for it in data
-                    if isinstance(it, dict) and (it.get("expires") or 0) > now
-                ]
-            except (OSError, ValueError):
-                self._advice_cache = []
-        if not self._advice_cache:
-            return ""
-        return ("### 生效中的话术建议（直播时尽量遵循，若已被验证无效可忽略）\n"
-                + "\n".join(f"- {t}" for t in self._advice_cache))
-
-    # ---------- 观众画像注入（进化引擎复盘的长期事实，关键词召回） ----------
-
-    def _profile_section(self, user_text: str) -> str:
-        """按关键词召回观众画像，拼装成注入系统提示的段落。
-
-        轻量关键词召回（公共 2-gram 片段，无第三方分词依赖），补充向量
-        记忆检索之外的召回；30s TTL 缓存避免每轮对话都读文件；
-        无相关条目时返回空字符串。
-        """
-        now = time.time()
-        if now - self._profile_cache_ts >= _PROFILE_CACHE_TTL:
-            self._profile_cache_ts = now
-            try:
-                with open(_PROFILE_PATH, "r", encoding="utf-8") as f:
-                    data = json.load(f)
-                self._profile_cache = [
-                    {"owner": (it.get("owner") or "").strip()[:32],
-                     "fact": (it.get("fact") or "").strip()}
-                    for it in data
-                    if isinstance(it, dict) and (it.get("fact") or "").strip()
-                ]
-            except (OSError, ValueError):
-                self._profile_cache = []
-        if not self._profile_cache:
-            return ""
-        query = (user_text or "").strip()
-        if not query:
-            return ""
-        # query 的 2-gram 只算一次，避免每条画像重复计算（最多 30 条）
-        query_bigrams = _bigram_set(query)
-        # 相关度 = 与当前消息的公共 2-gram 片段数，降序取前 N
-        hits = sorted(
-            ((len(_bigram_set(it["fact"]) & query_bigrams), it)
-             for it in self._profile_cache),
-            key=lambda x: x[0], reverse=True,
-        )
-        top = [it for score, it in hits if score > 0][:_PROFILE_INJECT_MAX]
-        if not top:
-            return ""
-        return ("### 观众画像（复盘提炼的长期事实，相关时自然融入回答，不要机械复述）\n"
-                + "\n".join(f"- {it['owner'] or 'chao'}：{it['fact']}" for it in top))
-
-    # ---------- GEPA 进化策略段注入 ----------
-
-    def _policy_section(self) -> str:
-        """读取 GEPA 择优落盘的行为策略段，拼装成注入系统提示的段落。
-
-        30s TTL 缓存避免每轮对话都读文件；无策略或未启用进化时返回空字符串。
-        """
-        if not getattr(self.cfg, "EVOLUTION_PROMPT_EVO_ENABLED", True):
-            return ""
-        now = time.time()
-        if now - self._policy_cache_ts >= _POLICY_CACHE_TTL:
-            self._policy_cache_ts = now
-            try:
-                with open(_POLICY_PATH, "r", encoding="utf-8") as f:
-                    data = json.load(f)
-                self._policy_cache = (
-                    (data.get("text") or "").strip() if isinstance(data, dict) else ""
-                )
-            except (OSError, ValueError):
-                self._policy_cache = ""
-        if not self._policy_cache:
-            return ""
-        return ("### 进化行为策略（GEPA 迭代沉淀，直播中相关情境优先遵循，"
-                "与生效中的话术建议冲突时以本策略为准）\n" + self._policy_cache)
+        if not self.cfg.LLM_API_KEY:
+            return
+        try:
+            await asyncio.wait_for(
+                asyncio.to_thread(
+                    self.client.chat.completions.create,
+                    model=self.cfg.LLM_MODEL,
+                    messages=[{"role": "user", "content": "hi"}],
+                    max_tokens=1,
+                ),
+                timeout=10,
+            )
+        except Exception:
+            pass  # 预热失败无影响：首次真实对话再建连
 
     # ---------- 插件：本轮上下文 ----------
 
@@ -589,98 +176,11 @@ class LLMBrain(BaseLLMAdapter):
         from plugins.tools import get_merged_tools
         return get_merged_tools(self.mcp)
 
-    def _clean_messages_for_api(self, messages: List[dict]) -> List[dict]:
-        """清理消息格式，确保 API 兼容（对标 llm-client.js _cleanMessagesForAPI）。
-
-        - assistant 有 tool_calls 但 content 为 null → 设为 ''（部分 API 要求 content 非 null）
-        - tool 消息：content 对象→JSON 字符串、移除控制字符、超过 8000 截断
-        - 最后用 sanitize_tool_message_sequence 兜底，保证 tool_calls 与 tool 响应严格配对
-        """
-        normalized: List[dict] = []
-        for msg in messages:
-            msg = dict(msg)
-            if msg.get("role") == "assistant":
-                # 有 tool_calls 但 content 为 null 时，某些 API 要求 content 不能为 null
-                if msg.get("content") is None and msg.get("tool_calls"):
-                    msg["content"] = ""
-            elif msg.get("role") == "tool":
-                content = msg.get("content")
-                # content 是对象/数组 → 转 JSON 字符串
-                if isinstance(content, (dict, list)):
-                    try:
-                        content = json.dumps(content, ensure_ascii=False)
-                    except (TypeError, ValueError):
-                        content = str(content)
-                # 确保 content 是字符串
-                if not isinstance(content, str):
-                    content = str(content or "")
-                # 移除控制字符（可能导致 JSON 解析失败），保留 \n 和 \t
-                content = _CONTROL_CHAR_RE.sub("", content)
-                # 超长内容截断，避免超大响应
-                if len(content) > _MAX_TOOL_CONTENT_LENGTH:
-                    content = content[:_MAX_TOOL_CONTENT_LENGTH] + "...(内容过长已截断)"
-                msg = {
-                    "role": "tool",
-                    "name": msg.get("name") or "unknown_tool",
-                    "content": content,
-                    "tool_call_id": msg.get("tool_call_id"),
-                }
-            normalized.append(msg)
-
-        # 最后一道防线：清理 assistant.tool_calls 与 tool 响应不配对的序列
-        return sanitize_tool_message_sequence(normalized)
-
-    async def _execute_tool_calls(self, tool_calls: list) -> List[dict]:
-        """并行执行工具并返回结果消息（对标 NagaAgent agentic_tool_loop：
-        一轮多个工具 asyncio.gather 并行执行，显著缩短多工具轮次延迟）。
-
-        熔断：单轮累计工具结果超过 _MAX_ROUND_TOOL_CHARS 时，后续工具结果
-        直接截断为 0 并注入提示，避免 30 轮工具调用 × 8000 字符
-        一次性进 LLM 上下文把免费档模型打爆（400/截断/超时）。
-        """
-        from plugins.tools import call_tool
-
-        # 共享计数器：本轮已消耗的工具结果字符数
-        state = {"round_chars": 0, "truncated": False}
-
-        async def _run(tc: dict) -> dict:
-            name = tc["function"]["name"]
-            try:
-                args = json.loads(tc["function"]["arguments"] or "{}")
-            except (json.JSONDecodeError, TypeError):
-                args = {}
-            console.dim(f"  ↳ 执行「{name}」...")
-            result = await _call_tool_with_retry(name, args, self.mcp)
-            console.dim(_format_tool_result(name, result))
-            # 单轮累计熔断：本轮已超阈值时把后续结果直接截断为 0，
-            # 模型依旧能看到「有工具被熔断」的提示
-            if state["truncated"]:
-                result = (f"[后续工具结果因本轮累计超过 "
-                          f"{_MAX_ROUND_TOOL_CHARS // 1000}K 字符被截断]")
-            else:
-                if isinstance(result, str):
-                    state["round_chars"] += len(result)
-                if state["round_chars"] > _MAX_ROUND_TOOL_CHARS:
-                    state["truncated"] = True
-                    result = (f"[后续工具结果因本轮累计超过 "
-                              f"{_MAX_ROUND_TOOL_CHARS // 1000}K 字符被截断]")
-            return {
-                "role": "tool",
-                "name": name,
-                "tool_call_id": tc.get("id") or f"call_{name}",
-                "content": result,
-            }
-
-        async def _call_tool_with_retry(name: str, args: dict, mcp) -> Any:
-            """单工具执行失败自动重试 1 次（指数退避 1s），减少偶发失败。"""
-            try:
-                return await call_tool(name, args, mcp)
-            except Exception as e:
-                console.warn(f"  ↳ 「{name}」执行失败（{e}），1s 后自动重试...")
-                await asyncio.sleep(1.0)
-                return await call_tool(name, args, mcp)
-
-        return await asyncio.gather(*(_run(tc) for tc in tool_calls))
+    @staticmethod
+    def _describe_mcp_servers(mcp) -> str:
+        """取 MCP 服务器能力说明（供 system prompt 注入，见 _chat_stream_inner）。"""
+        from src.mcp.llm_bridge import describe_mcp_servers
+        return describe_mcp_servers(mcp)
 
     async def _request_final_reply(self, messages: List[dict]) -> str:
         """轮数超限后的非流式兜底（对标 llm-handler.js L684-696）。
@@ -690,7 +190,7 @@ class LLMBrain(BaseLLMAdapter):
         """
         kwargs = dict(
             model=self.cfg.LLM_MODEL,
-            messages=self._clean_messages_for_api(messages),
+            messages=_clean_messages_for_api(messages),
             stream=False,
             max_tokens=2048,
             temperature=0.95,
@@ -719,49 +219,6 @@ class LLMBrain(BaseLLMAdapter):
         return "抱歉，任务太复杂了，我已经尽力了~"
 
     # ---------- 流式对话 ----------
-
-    def _consume_summary(self) -> Optional[str]:
-        """取后台摘要任务的结果（完成即用，未完成则等下一轮），返回当前生效摘要。
-
-        非阻塞：不等待任务，避免拖慢本轮对话首字延迟。
-        """
-        if self._summary_task is not None:
-            if self._summary_task.done():
-                try:
-                    result = self._summary_task.result()
-                    if isinstance(result, str) and result.strip():
-                        self._session_summary = result.strip()
-                except Exception as e:
-                    console.dim(f"[摘要] 后台压缩失败：{e}")
-                self._summary_task = None
-        return self._session_summary
-
-    async def _summarize_dropped(self, turns: list[dict]) -> str:
-        """后台任务：把被裁剪的早期对话压缩成中文摘要，并写入记忆跨会话继承。"""
-        try:
-            from src.llm.agent import ButlerAgent, _pick_owner
-            butler = ButlerAgent()
-            text = await asyncio.wait_for(
-                butler.summarize_session(turns), timeout=30.0
-            )
-            text = (text or "").strip()
-            if not text:
-                return ""
-            # 摘要写入记忆（归属从被裁剪轮次推断），重启后检索可带出
-            try:
-                owner = _pick_owner(turns, None)
-                await butler.commit_recall_files([{
-                    "name": "session-summary",
-                    "description": "archive/对话摘要：早期对话压缩",
-                    "content": text,
-                    "user": owner,
-                }])
-            except Exception:
-                pass
-            return text
-        except Exception as e:
-            console.dim(f"[摘要] 后台压缩失败：{e}")
-            return ""
 
     def _max_tool_iterations(self) -> int:
         """工具调用轮数上限（对标 NagaAgent max_loop_stream：.env TOOL_MAX_ITERATIONS 可配，默认 30）。"""
@@ -800,6 +257,25 @@ class LLMBrain(BaseLLMAdapter):
         # 2) 检索结果按 memU hosts/retrieval.py _shape_for_agent 的三层形状注入。
         #    Embedding 不可用/失败时自动回退 LLM 检索（仍输出同形状）。
         sys_content = self.cfg.SYSTEM_PROMPT
+        # 每轮对话实时合并一次工具列表（对标 live-2d(2) getMergedToolsList，不缓存）
+        tools = self._get_tools()
+        # 有工具可用时注入能力引导：角色人设（尤其 Neuro-sama 这类"不是通用
+        # 助手"人设）常导致模型遇到搜索/查资料需求直接道歉"我无法搜索"，
+        # 明明有 bing_search 等工具却从不调用。引导段只在有工具时注入。
+        if tools:
+            sys_content += (
+                """                
+                \n\n### 工具使用\n
+                你可以调用函数工具完成实际任务（联网搜索、抓取网页、查询时间天气、
+                加载技能、读写记忆等）。当用户问需要实时/最新信息、新闻、资料、
+                事实核查的问题时，必须先调用下方列出的搜索/抓取网页工具获取真实
+                结果再回答，不要说自己无法联网搜索——工具列表已提供给你。"""
+            )
+            # 注入 MCP 服务器能力说明（mcp_config.json 的 description 字段），
+            # 让模型明确知道每台服务器能做什么、有哪些工具可调用
+            mcp_desc = self._describe_mcp_servers(self.mcp)
+            if mcp_desc:
+                sys_content += "\n\n### 可用的联网服务器\n" + mcp_desc
         if self.cfg.MEMORY_ENABLED:
             sys_content += "\n\n" + memory.STANDING_INSTRUCTION
             mem_ctx = await memory.retrieve(user_text)
@@ -856,9 +332,6 @@ class LLMBrain(BaseLLMAdapter):
             await self.plugin_manager.run_llm_request_hooks(request)
             messages = request.messages
 
-        # 每轮对话实时合并一次工具列表（对标 live-2d(2) getMergedToolsList，不缓存）
-        tools = self._get_tools()
-
         # 模型路由进化：本轮按 UCB1 选择要用的 LLM 服务（未启用时均为
         # None → 沿用 self.client / LLM_MODEL，与原有行为完全一致）
         route_name = None
@@ -901,7 +374,7 @@ class LLMBrain(BaseLLMAdapter):
                     def _send():
                         kwargs = dict(
                             model=model,
-                            messages=self._clean_messages_for_api(messages),
+                            messages=_clean_messages_for_api(messages),
                             stream=True,
                             max_tokens=2048,
                             temperature=0.95,
@@ -1061,7 +534,7 @@ class LLMBrain(BaseLLMAdapter):
                 cleaned = _clean_sentence(sentence)
                 # 纯标点/符号/空白句（无实质文字）直接丢弃：
                 # GPT-SoVITS 对这类文本会合成退化，输出拖长音怪叫
-                if not cleaned.strip() or not _HAS_CONTENT_RE.search(cleaned):
+                if not cleaned.strip() or not has_content(cleaned):
                     return ""
                 round_content.append(cleaned)
                 sentence_count += 1
@@ -1137,7 +610,7 @@ class LLMBrain(BaseLLMAdapter):
                 })
 
                 # 2) 执行工具 → tool 响应消息（工具链完整进入下一轮上下文）
-                tool_messages = await self._execute_tool_calls(tool_calls)
+                tool_messages = await _execute_tool_calls(self.mcp, tool_calls)
                 messages.extend(tool_messages)
                 continue
 

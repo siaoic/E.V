@@ -22,6 +22,29 @@ def get_mcp_tools_for_llm(mcp) -> List[dict]:
     return mcp.get_tools_for_llm() or []
 
 
+def describe_mcp_servers(mcp) -> str:
+    """生成 MCP 服务器能力说明（供注入 system prompt 告知模型）。
+
+    逐台列出已成功启动、注册了工具的服务器：服务器名 + 配置里的
+    description + 该服务器注册的工具名，让模型知道有哪些联网能力可用
+    （避免有工具却不调用、道歉"无法搜索"）。无可用服务器时返回空字符串。
+    """
+    if mcp is None or not mcp.is_enabled or not mcp.mcp_servers:
+        return ""
+    lines = []
+    for name, srv in mcp.mcp_servers.items():
+        tool_names = [t["name"] for t in mcp.tool_registry.get_tools_by_server(name)]
+        if not tool_names:
+            continue  # 启动失败/无工具注册的服务器不告知模型
+        desc = (srv.get("description") or "").strip()
+        head = f"- {name}"
+        if desc:
+            head += f"：{desc}"
+        head += f"（工具：{', '.join(tool_names)}）"
+        lines.append(head)
+    return "\n".join(lines)
+
+
 async def call_mcp_tool(name: str, args: dict, mcp) -> Optional[str]:
     """MCP 优先调用单个工具。
 

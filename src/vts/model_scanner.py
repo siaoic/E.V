@@ -320,7 +320,7 @@ async def scan_model(vts: VTSController, cfg) -> ModelProfile:
     无论成功与否都会返回 ModelProfile（失败时多为空字段，调用方按默认值兜底）。
     """
     profile = ModelProfile()
-    console.header("正在扫描当前模型，自动适配（约数秒）")
+    console.dim("正在扫描当前模型，自动适配（约数秒）")
 
     # 1) 当前模型
     d = await vts.get_current_model()

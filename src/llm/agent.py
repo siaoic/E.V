@@ -36,16 +36,21 @@ _EXTRACT_SYSTEM = """你是长期记忆管家。从给定的对话轮次中提�
 - AI侧：自我认知、承诺、偏好、个人经历讲述
 
 【角色区分】（说话人是谁，决定 subject 与 owner）
-- 「观众: [弹幕@xxx] ...」是观众发言：subject 填具体观众名（从 [弹幕@ 中提取，如「蓝奶」），不要笼统写「观众」
-- 「主播: ...」是主播（用户）本人发言：subject 填「主播」，归属 user，不要归为「观众」
+- 「观众: [弹幕@xxx] ...」是观众发言：subject 填具体观众名（从 [弹幕@ 中提取，如「蓝奶」），不要笼统写「观众」；owner 填 user
+- 「主播: ...」是主播（用户）本人发言：subject 填「主播」，owner 填 user，不要归为「观众」
 - 「AI: ...」是 AI 自己发言：subject 填「AI」，owner 填 self
+
+【subject 与 owner 的分工】
+- subject = 这条记忆的说话人/归属者（具体观众名/主播/AI），决定记忆记在谁名下
+- owner = 事实大分类：self 表示 AI 自身事实，user 表示用户侧事实（观众或主播发言）
+- 观众发言必须给出具体观众名作为 subject，禁止用「观众」「他」「她」等笼统词代替
 
 【过滤原则】
 - 保留：稳定偏好、重要关系、约定、身份、经历、持久状态
 - 过滤：纯情感宣泄、临时修辞、假设性内容、隐喻性表达
 
 【合并规则】
-- 同一主体或同一话题的多条信息合并为一条完整记忆
+- 同一说话人或同一话题的多条信息合并为一条完整记忆
 - 同一事实的不同表述只保留一条底层事实
 - 输出前自检，剔除与其它条目高度重复者
 
@@ -55,12 +60,12 @@ JSON数组，每项包含：
 |------|------|------|
 | name | string | 简短主题，≤20字 |
 | content | string | 完整记忆，一句话 |
-| subject | string | 主体名称，无则空 |
+| subject | string | 说话人/归属者：具体观众名/主播/AI，观众发言必填观众名，无则空 |
 | subject_type | enum | person/location/organization/item/concept/time/event/activity，无则空 |
 | predicate | string | 关系或行为描述，无则空 |
 | object | string | 客体名称，无则空 |
 | object_type | enum | 同 subject_type，无则空 |
-| owner | enum | self=AI自身事实，user=用户侧事实，由事实归属判断 |
+| owner | enum | self=AI自身事实，user=用户侧事实，由说话人判断 |
 
 无值得记录信息时输出 []。
 只输出 JSON，不要任何额外文字。"""
@@ -73,20 +78,20 @@ _DISTILL_SYSTEM = """你是长期记忆管家。从会话中蒸馏出值得永�
 - 约定与承诺
 
 【角色区分】（说话人是谁，决定 subject 与 owner）
-- 观众发言（「观众: [弹幕@xxx] ...」）：subject 填具体观众名（从 [弹幕@ 中提取，如「蓝奶」），不要笼统写「观众」
+- 观众发言（「观众: [弹幕@xxx] ...」）：subject 填具体观众名（从 [弹幕@ 中提取，如「蓝奶」），不要笼统写「观众」；owner 填 user
 - 主播发言（「主播: ...」）：subject 填「主播」，owner 填 user
 - AI 发言（「AI: ...」）：subject 填「AI」，owner 填 self
 
 【合并规则】
-- 同一主体（同一观众/主播/AI）的多条信息合并为一条完整记忆
-- 不同主体的条目分开输出，不要合并，各自保留自己的 subject
+- 同一归属者（同一观众/主播/AI）的多条信息合并为一条完整记忆
+- 不同归属者的条目分开输出，不要合并，各自保留自己的 subject
 - 剔除近似重复条目
 
 【输出格式】
 JSON数组，每项包含：
 - name：简短主题，≤20字
 - content：完整记忆，一句话
-- subject：具体主体名（具体观众名/主播/AI），无则空
+- subject：说话人/归属者（具体观众名/主播/AI），观众发言必填观众名，无则空
 - owner：self 或 user（事实归属方，由说话人判断）
 
 无内容时输出 []。
@@ -113,7 +118,7 @@ _INTEGRATE_SYSTEM = """你是长期记忆整理管家。以下是记忆库中的
 JSON数组，元素间用逗号分隔。每项含：
 - name：简短主题，≤20字，不加句号
 - content：完整记忆，一句话，保留关键细节
-- subject：具体主体名（具体观众名/主播/AI），无则空
+- subject：说话人/归属者（具体观众名/主播/AI），观众发言必填观众名，无则空
 - owner：self（AI自身）或 user（用户侧）
 
 【格式约束】
@@ -370,7 +375,7 @@ class ButlerAgent:
                     "name": item["name"] or "记忆",
                     "description": description,
                     "content": item["content"],
-                    "user": _entry_owner(item, owner),
+                    "user": _entry_user(item, owner),
                 }
             )
         await memory.get_manager().commit_recall_files(files)
@@ -430,6 +435,10 @@ class ButlerAgent:
         recs: list[dict] = []
         batches = [files[i : i + batch] for i in range(0, len(files), batch)]
         for part in batches:
+            # 该批输入中多数归属者作为回退（避免整合把具体观众名塌缩成默认用户）
+            part_owners = [str(f.get("user") or memory._USER_DEFAULT) for f in part]
+            fallback = (max(set(part_owners), key=part_owners.count)
+                        if part_owners else memory._USER_DEFAULT)
             # 每条带 [归属者] 前缀，模型据此保留具体观众名/主播/AI 的独立归属
             user_text = "\n".join(
                 f"{i + 1}. [{f.get('user') or '?'}] {f.get('content')}"
@@ -482,7 +491,7 @@ class ButlerAgent:
                         "name": str(e["name"]).strip()[:64],
                         "description": str(e["name"]).strip()[:64],
                         "content": str(e["content"]).strip(),
-                        "user": _entry_user(e, memory._USER_DEFAULT),
+                        "user": _entry_user(e, fallback),
                     }
                 )
         return recs
@@ -585,6 +594,12 @@ class ButlerAgent:
         )
 
 
+# AI 发言的 role 取值：内部轮次用 ROLE_ASSISTANT/ROLE_AI_ALIAS（如 "Neuro"/"Neuro sama"），
+# 而提取/蒸馏外部构造的轮次用字面量 "assistant"，统一转小写后对比，避免误把 AI 回复
+# 当作观众/主播轮次，导致记忆归属全部塌缩成默认用户。
+_AI_ROLES = {ROLE_ASSISTANT.lower(), ROLE_AI_ALIAS.lower(), "assistant", "ai"}
+
+
 def _pick_owner(recent_turns: list[dict] | None, new_turns: list[dict] | None) -> str:
     """从轮次中推断记忆归属者：优先最近一条非 AI 发言的归属者。
 
@@ -594,7 +609,7 @@ def _pick_owner(recent_turns: list[dict] | None, new_turns: list[dict] | None) -
     source = new_turns or recent_turns or []
     for turn in reversed(source):
         role = str(turn.get("role") or "").lower()
-        if role not in (ROLE_ASSISTANT, ROLE_AI_ALIAS):
+        if role not in _AI_ROLES:
             content = str(turn.get("content") or "")
             m = re.match(r"^\[弹幕@([^\]]+)\]", content)
             if m:
@@ -603,26 +618,19 @@ def _pick_owner(recent_turns: list[dict] | None, new_turns: list[dict] | None) -
     return memory._USER_SELF
 
 
-# 记忆归属判定：优先采用提取模型显式标注的 owner（self/user，由模型判断
-# 事实真正的主人），缺失或取值非法时回退对话轮次推断的归属者。
-def _entry_owner(item: dict, fallback: str) -> str:
-    """条目归属：模型标注 owner=self → AI 自己；owner=user → fallback。"""
-    owner = (item.get("owner") or "").strip().lower()
-    if owner == "self":
-        return memory._USER_SELF
-    return fallback
-
-
 # 蒸馏/整合条目的归属者判定：owner=self → AI 自己；否则优先模型标注的
 # subject（蒸馏 prompt 要求按「观众: [弹幕@名]」给出具体观众名/主播/AI），
 # 排除笼统词（观众/主播/用户/AI 等）避免角色塌缩，缺失才回退推断归属者。
 _ABSTRACT_SUBJECTS = {"观众", "主播", "用户", "AI", "self", "我", "他", "她"}
+# subject 常见前缀清洗：模型有时把「观众@名」「弹幕@名」整段当作 subject，
+# 剥掉角色前缀只留纯用户名（如「观众@蓝奶」→「蓝奶」），保证图谱归属者干净。
+_SUBJECT_PREFIX_RE = re.compile(r"^(观众|弹幕|主播)@")
 def _entry_user(item: dict, fallback: str) -> str:
     """蒸馏/整合条目归属者：AI 自己的事实归 self，其余优先具体主体名。"""
     owner = (item.get("owner") or "").strip().lower()
     if owner == "self":
         return memory._USER_SELF
-    subject = str(item.get("subject") or "").strip()[:32]
+    subject = _SUBJECT_PREFIX_RE.sub("", str(item.get("subject") or "").strip()[:32])
     if subject and subject not in _ABSTRACT_SUBJECTS:
         return subject
     return fallback

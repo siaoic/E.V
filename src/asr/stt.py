@@ -1,12 +1,15 @@
-"""语音识别（STT）：麦克风录音 → SiliconFlow 云端转写（SenseVoice）。
+"""语音识别（STT）：麦克风录音 → 转写（本地 ASR 服务 / SiliconFlow 云端）。
 
-流程：sounddevice 采集 16kHz 单声道 → 能量 VAD 静音分割（开口开始 / 静音
-结束 / 超时强制切段）→ 写入临时 WAV → POST /v1/audio/transcriptions
-（multipart：file + model=FunAudioLLM/SenseVoiceSmall，Bearer 认证）
+流程：sounddevice 采集 16kHz 单声道 → WebRTC VAD 语音活动检测（缺失时回退
+能量阈值）静音分割（开口开始 / 静音结束 / 超时强制切段）→ 写入临时 WAV
+→ 转写（STT_ENGINE=local 走本地 ASR 服务 src/asr/asr_server.py，由 asr.bat
+启动、监听 127.0.0.1:8487；默认 cloud 走 POST /v1/audio/transcriptions
+multipart：file + model=FunAudioLLM/SenseVoiceSmall，Bearer 认证）
 → 识别文本经 asyncio future 投递给主循环，与键盘输入并存（谁先到谁生效）。
 
-依赖：sounddevice + numpy（录音），requests（转写）。任一缺失时启动
-引擎会报错并优雅降级——主程序捕获后仅告警，不影响对话。
+依赖：sounddevice + numpy（录音），本地转写需 requests（HTTP 调用 ASR 服务），
+云端转写需 requests，WebRTC VAD 需 webrtcvad（缺失时回退能量阈值判定）。
+任一缺失时启动引擎会报错并优雅降级——主程序捕获后仅告警，不影响对话。
 """
 
 import asyncio
@@ -28,6 +31,11 @@ DTYPE = "int16"
 BLOCK_SECONDS = 0.1          # 每块 100ms（VAD 状态机的最小粒度）
 _MIN_SPEECH_SECONDS = 0.3    # 最短有效语音：低于此长度视为环境杂音，不提交
 _EMPTY_RMS = 1.0             # 转写前忽略的能量下限（防纯静音段上传）
+# WebRTC VAD 帧参数：20ms 帧（16000Hz 下 WebRTC 最稳粒度），每块 5 帧
+_VAD_FRAME_SECONDS = 0.02
+_VAD_FRAME_LEN = int(SAMPLE_RATE * _VAD_FRAME_SECONDS)  # 320 样本/帧
+_VAD_FRAME_BYTES = _VAD_FRAME_LEN * 2                   # int16 = 2 字节/样本
+_VAD_SPEECH_RATIO = 0.4      # 块内语音帧占比 ≥ 40% 判为有声块
 
 
 def _rms(audio: np.ndarray) -> float:
@@ -50,6 +58,12 @@ class STTEngine(BaseInputAdapter):
     """
 
     def __init__(self, cfg) -> None:
+        # 转写引擎：local（本地 ASR 服务 asr.bat，8487 端口）/ cloud（SiliconFlow 云端）
+        self.engine = str(getattr(cfg, "STT_ENGINE", None) or "cloud").lower()
+        # 本地 ASR 服务地址（src/asr/asr_server.py 独立进程）
+        self.server_url = (
+            getattr(cfg, "STT_SERVER_URL", None)
+            or "http://127.0.0.1:8487").rstrip("/")
         # 独立 STT key 优先，留空回退复用 SiliconFlow 主 key（与嵌入同源）
         self.api_key = (
             getattr(cfg, "STT_API_KEY", None) or cfg.SILICONFLOW_API_KEY or ""
@@ -60,10 +74,19 @@ class STTEngine(BaseInputAdapter):
         self.model = getattr(cfg, "STT_MODEL", None) or "FunAudioLLM/SenseVoiceSmall"
         self.level_threshold = float(
             getattr(cfg, "STT_LEVEL_THRESHOLD", None) or 500)
+        self.vad_mode = int(getattr(cfg, "STT_VAD_MODE", None) or 2)
         self.silence_seconds = float(
-            getattr(cfg, "STT_SILENCE_SECONDS", None) or 1.0)
+            getattr(cfg, "STT_SILENCE_SECONDS", None) or 0.6)
         self.max_seconds = float(
             getattr(cfg, "STT_MAX_SECONDS", None) or 10.0)
+        # WebRTC VAD：区分语音/噪声比纯能量阈值更准，可安全缩短静音等待
+        # （STT_SILENCE_SECONDS）以降低识别延迟；依赖缺失时回退能量判定
+        self._vad = None
+        try:
+            import webrtcvad
+            self._vad = webrtcvad.Vad(self.vad_mode)
+        except Exception as e:
+            console.warn(f"[STT] WebRTC VAD 不可用，回退能量阈值判定：{e}")
 
         self._loop: "asyncio.AbstractEventLoop | None" = None
         self._stop_event = threading.Event()
@@ -102,7 +125,12 @@ class STTEngine(BaseInputAdapter):
         """返回下一个识别结果的 future，结果为 `(文本, 说话时长秒)` 元组。
 
         多次调用返回同一 future（首个未完成者），消费后下一次调用拿到新的。
+        先清掉已取消的残留 future（对话结束 / 被打断时会取消未消费的识别
+        future，不清理会让下一次等输入拿到已取消的 future，result() 抛
+        CancelledError 打崩主循环——表现为语音对话一结束程序就退出）。
         """
+        while self._futures and self._futures[0].done():
+            self._futures.pop(0)
         if self._futures:
             return self._futures[0]
         assert self._loop is not None, "STTEngine.start() 必须在 asyncio 主循环内调用"
@@ -117,13 +145,14 @@ class STTEngine(BaseInputAdapter):
         text = (text or "").strip()
         if not text:
             return
-        if self._futures:
+        # 跳过已取消的残留 future（被打断 / 对话结束取消的），把文本交给
+        # 下一个等待者；没有可用等待者时进缓冲，下次等输入时立刻拿到
+        while self._futures:
             fut = self._futures.pop(0)
             if not fut.done():
                 fut.set_result((text, speech_seconds))
-        else:
-            # 主循环在对话中（没在等输入）→ 缓冲，下次等输入时立刻拿到
-            self._pending_texts.append((text, speech_seconds))
+                return
+        self._pending_texts.append((text, speech_seconds))
 
     # ---------- 采集线程 ----------
 
@@ -149,6 +178,26 @@ class STTEngine(BaseInputAdapter):
 
     # ---------- 处理线程（VAD 状态机） ----------
 
+    def _is_speech_block(self, audio: np.ndarray) -> bool:
+        """块级语音判定：WebRTC VAD 为主，能量阈值兜底（VAD 不可用时）。
+
+        当前块 100ms = 5 个 20ms 帧，语音帧占比达 _VAD_SPEECH_RATIO 判为
+        有声块。相比纯能量阈值更能区分语音与噪声尾音，从而允许更短的
+        静音等待切段（STT_SILENCE_SECONDS），降低识别延迟。
+        """
+        if self._vad is not None:
+            buf = audio.astype(np.int16).tobytes()
+            frames = len(audio) // _VAD_FRAME_LEN
+            speech_frames = sum(
+                self._vad.is_speech(
+                    buf[i * _VAD_FRAME_BYTES:(i + 1) * _VAD_FRAME_BYTES],
+                    SAMPLE_RATE,
+                )
+                for i in range(frames)
+            )
+            return speech_frames >= max(1, int(frames * _VAD_SPEECH_RATIO))
+        return _rms(audio) > self.level_threshold
+
     def _process_loop(self) -> None:
         silence_blocks = max(1, int(self.silence_seconds / BLOCK_SECONDS))
         state = "silent"
@@ -168,16 +217,16 @@ class STTEngine(BaseInputAdapter):
                         buf, state, silent_run, speech_blocks = [], "silent", 0, 0
                 continue
 
-            rms = _rms(block)
+            speech = self._is_speech_block(block)
             if state == "silent":
-                if rms > self.level_threshold:
+                if speech:
                     state = "speaking"
                     buf = [block]
                     speech_blocks = 1
                     silent_run = 0
             else:
                 buf.append(block)
-                if rms > self.level_threshold:
+                if speech:
                     speech_blocks += 1
                     silent_run = 0
                 else:
@@ -240,6 +289,24 @@ class STTEngine(BaseInputAdapter):
             self._loop.call_soon_threadsafe(self._deliver, text, speech_seconds)
 
     def transcribe(self, wav_path: str) -> str:
+        """按引擎配置转写：local 走本地 qwen3_asr 模型，cloud 走 SiliconFlow 云端。"""
+        if self.engine == "local":
+            return self._transcribe_local(wav_path)
+        return self._transcribe_cloud(wav_path)
+
+    def _transcribe_local(self, wav_path: str) -> str:
+        """提交本地 ASR 服务（asr_server.py 独立进程，8487 端口）转写。
+
+        服务未启动 / 连接失败时抛异常，由 _transcribe_worker 捕获并告警。
+        """
+        import requests
+
+        resp = requests.post(
+            f"{self.server_url}/transcribe", json={"path": wav_path}, timeout=60)
+        resp.raise_for_status()
+        return str(resp.json().get("text") or "").strip()
+
+    def _transcribe_cloud(self, wav_path: str) -> str:
         """上传音频到 SiliconFlow 转写，返回识别文本（失败抛异常）。"""
         import requests
 

@@ -124,6 +124,12 @@ async def converse(brain: LLMBrain,
         # 主动对话：回复流首个句子前加「主动对话：」前缀（只加一次，
         # 句子是连续流，后续句子不再重复前缀）
         turn_prefixed = False
+        # 每轮对话起始预热 TTS 客户端链路：HTTP keep-alive + sf.read 缓存
+        # 在 30s+ 无合成后会变冷，首句延迟会多 ~100-300ms。这里立即起后台
+        # task 跑一发「。」的合成+解码（不 emit 到 player 所以听不到），
+        # 与 chat_stream 并行；真实首句走 pump 时，连接 / 缓存已是热的。
+        if tts is not None:
+            tts.preheat()
         async for sentence in brain.chat_stream(text, proactive=proactive, history=history):
             # AI 回复脏话过滤：仅过滤要播给用户听 / 字幕展示的句子，
             # 不过滤 LLM 原文存记忆（记忆存原文，on_llm_done 存的是 LLM 历史）。

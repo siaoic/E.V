@@ -69,6 +69,10 @@ class BaseEmotionActor:
         """按文件名（去扩展名）播放动作。返回是否播放成功。"""
         raise NotImplementedError
 
+    async def restore(self) -> None:
+        """说话结束复原：回到默认表情并停止正在播放的动作。子类实现。"""
+        raise NotImplementedError
+
     # ---------- 映射表 ----------
 
     def load_map(self) -> None:

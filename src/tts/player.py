@@ -26,6 +26,10 @@ from src.utils import console
 # 过大延迟首块出声，过小口型回调过于频繁，0.5s 为平衡值。
 _PLAY_CHUNK_SEC = 0.5
 
+# 说话结束复原防抖（秒）：队列排空后仍无新音频才视为说话结束。
+# 多句连播时句间合成间隙（< 1.2s）不触发复原，避免表情/动作在句间闪烁。
+_DONE_DEBOUNCE = 1.2
+
 
 class _AudioQueue:
     """本地扬声器无缝播放队列（复用旧引擎实现，与 GSV-TTS-Lite 播放无关）。
@@ -40,13 +44,21 @@ class _AudioQueue:
     """
 
     def __init__(self, samplerate: int,
-                 on_block: Optional[Callable[[], None]] = None) -> None:
+                 on_block: Optional[Callable[[], None]] = None,
+                 on_idle: Optional[Callable[[], None]] = None) -> None:
         self.samplerate = samplerate
         self.q: "queue.Queue[Optional[np.ndarray]]" = queue.Queue()
+        # 未播放块计数：put +1、消费 -1、clear 归零。playback_finished 只在
+        # 计数归零时置位——避免「队列瞬间为空但新块将入队」时 drain 误判结束
+        # （原实现在队列空 0.25s 检测窗内置位，与 put 之间存在竞态窗口）。
+        self._pending = 0
+        self._pending_lock = threading.Lock()
         self.playback_finished = threading.Event()
         self.playback_finished.set()
         self._stopped = False       # close() 后线程退出
         self._on_block = on_block
+        self._on_idle = on_idle
+        self._idle_fired = True     # 初始空闲不触发；put 后置 False，播空触发一次
         try:
             self.stream = sd.OutputStream(
                 samplerate=samplerate, channels=1, dtype="float32")
@@ -61,6 +73,9 @@ class _AudioQueue:
         if data.ndim == 1:
             data = data.reshape(-1, 1)
         self.q.put(data)
+        with self._pending_lock:
+            self._pending += 1
+        self._idle_fired = False
         self.playback_finished.clear()
 
     def _run(self) -> None:
@@ -68,8 +83,18 @@ class _AudioQueue:
             try:
                 data = self.q.get(timeout=0.25)
             except queue.Empty:
-                # 队列空：标记空闲（drain 可返回），继续等待新数据
-                self.playback_finished.set()
+                # 队列空：标记空闲（drain 可返回），继续等待新数据；
+                # 本轮有音频播完后排空 → 通知上层（说话结束复原等）
+                if not self._idle_fired:
+                    self._idle_fired = True
+                    if self._on_idle is not None:
+                        try:
+                            self._on_idle()
+                        except Exception:
+                            pass
+                with self._pending_lock:
+                    if self._pending <= 0:
+                        self.playback_finished.set()
                 continue
             self.playback_finished.clear()
             try:
@@ -79,12 +104,20 @@ class _AudioQueue:
                     self.stream.write(data)
             except Exception:
                 pass  # 打断等瞬态错误：丢弃该块，等待下一块
+            finally:
+                with self._pending_lock:
+                    self._pending -= 1
+                    if self._pending <= 0:
+                        self._pending = 0
+                        self.playback_finished.set()
         self.playback_finished.set()
 
     def clear(self) -> None:
         """丢弃所有未播块并标记空闲（不碰 stream，避免打断卡死播放线程）。"""
         with self.q.mutex:
             self.q.queue.clear()
+        with self._pending_lock:
+            self._pending = 0
         self.playback_finished.set()
 
     def close(self) -> None:
@@ -161,7 +194,9 @@ class _SubtitlesQueue:
                 if self._closed:
                     self.t = None
                     return
-                time.sleep(min(0.02, target - time.time()))
+                delta = target - time.time()
+                if delta > 0:
+                    time.sleep(min(0.02, delta))
             # 该词开始时刻已到（或播放领先）：推进并显示累积文本
             i_end = item.get("orig_idx_end")
             if isinstance(i_end, int) and 0 <= i_end < len(text):
@@ -219,6 +254,9 @@ class TTSPlayer:
     def __init__(self) -> None:
         self._queue: Optional[_AudioQueue] = None  # 无缝播放队列（按首个音频采样率懒创建）
         self._on_play: Optional[Callable[[str, str, float], None]] = None
+        self._on_play_done: Optional[Callable[[], None]] = None
+        self._done_timer: Optional[threading.Timer] = None  # 说话结束防抖定时器
+        self._done_lock = threading.Lock()
         self._sub_sink: Optional[Callable[[str], None]] = None
         self._sub_q: Optional[_SubtitlesQueue] = None
         self._loop: Optional[asyncio.AbstractEventLoop] = None
@@ -238,6 +276,10 @@ class TTSPlayer:
         """设置音频开始播放回调（wav 路径, 文本, 时长秒）——口型同步用。"""
         self._on_play = cb
 
+    def set_on_play_done_callback(self, cb: Optional[Callable[[], None]]) -> None:
+        """设置整段播放结束回调（队列排空/打断清空后触发）——说话结束复原用。"""
+        self._on_play_done = cb
+
     def set_subtitle_callback(self, cb: Optional[Callable[[str], None]]) -> None:
         """设置字幕回调：逐字推进时调用（入参为累积文本）。"""
         self._sub_sink = cb
@@ -252,7 +294,7 @@ class TTSPlayer:
         """
         if self._queue is not None:
             return
-        self._queue = _AudioQueue(sr, self._on_block_play)
+        self._queue = _AudioQueue(sr, self._on_block_play, self._schedule_play_done)
 
     def _on_block_play(self) -> None:
         """每块音频写入声卡前调用：字幕锚点 + 口型回调 + 临时 wav 即时删除。
@@ -299,6 +341,36 @@ class TTSPlayer:
         except Exception as e:
             console.dim(f"TTS 口型回调异常：{e}")
 
+    def _fire_play_done(self) -> None:
+        """整段播放结束（队列排空/打断清空）时触发回调（播放线程/防抖定时器调用）。"""
+        cb = self._on_play_done
+        if cb is None:
+            return
+        try:
+            cb()
+        except Exception as e:
+            console.dim(f"TTS 播放结束回调异常：{e}")
+
+    def _schedule_play_done(self) -> None:
+        """队列排空（可能是句间空隙）→ 防抖定时器：防抖期内仍无新音频才触发复原。
+
+        多句连播时句间合成间隙（< _DONE_DEBOUNCE）内新音频入队会取消本定时器，
+        避免表情/动作在句间闪烁；只有真正长时间无后续音频才视为说话结束。
+        """
+        with self._done_lock:
+            if self._done_timer is not None:
+                self._done_timer.cancel()
+            self._done_timer = threading.Timer(_DONE_DEBOUNCE, self._fire_play_done)
+            self._done_timer.daemon = True
+            self._done_timer.start()
+
+    def _cancel_play_done(self) -> None:
+        """取消待触发的说话结束复原定时器（新音频入队时调用）。"""
+        with self._done_lock:
+            if self._done_timer is not None:
+                self._done_timer.cancel()
+                self._done_timer = None
+
     def _push_subtitle(self, text: str) -> None:
         """字幕线程 → 事件循环线程（Qt 线程）转发，保证 GUI 安全。"""
         if (not text or self._sub_sink is None or self._loop is None
@@ -322,6 +394,8 @@ class TTSPlayer:
         except Exception as e:
             console.dim(f"TTS 播放队列初始化失败（口型/字幕可能不可用）：{e}")
             return
+        # 新音频到达：取消待触发的说话结束复原定时器（多句连播防抖）
+        self._cancel_play_done()
         if self._sub_q is None:
             self._sub_q = _SubtitlesQueue(self._push_subtitle)
         sent_id = next(self._sent_seq)
@@ -396,6 +470,7 @@ class TTSPlayer:
 
     def close(self) -> None:
         """停止播放线程、关闭输出流并清理临时目录（进程退出前调用）。"""
+        self._cancel_play_done()
         if self._sub_q is not None:
             try:
                 self._sub_q.clear()

@@ -38,6 +38,10 @@ _USER_SELF = "self"
 _USER_DEFAULT = os.getenv("MEMORY_USER_DEFAULT", "chao")
 _AGENT_ID = "vtuber"
 
+# 慢路径（memU progressive_retrieve）限时：memU 内部 embedding 调用失败/超时
+# 时快速回退关键词粗筛，避免一次检索拖到 ~15s 才降级
+_SLOW_RETRIEVE_TIMEOUT = 5.0
+
 # 会话保留的最大轮数（超出丢弃最旧）
 _MAX_TURNS = 60
 # 记忆文件过期天数（超期未更新则被衰减清理）
@@ -76,8 +80,13 @@ _ensure_memu_path()
 
 from src.utils import config, console  # noqa: E402
 from src.utils.constants import (
-    ROLE_ASSISTANT, ROLE_AI_ALIAS, SOURCE_DANMAKU_INPUT,
+    ROLE_ASSISTANT, ROLE_AI_ALIAS, SOURCE_DANMAKU_INPUT, SOURCE_DANMAKU_REPLY,
 )
+
+# AI 发言的 role 取值：内部轮次用 ROLE_ASSISTANT/ROLE_AI_ALIAS（如 "Neuro"/"Neuro sama"），
+# 提取/蒸馏路径外部构造的轮次用字面量 "assistant"。统一转小写后对比，避免把 AI 回复
+# 误判为观众/主播轮次，导致记忆归属塌缩成默认用户。
+_AI_ROLES = {ROLE_ASSISTANT.lower(), ROLE_AI_ALIAS.lower(), "assistant", "ai"}
 
 
 # ---------- 进程内加速：内存向量索引 / 文件池 / 嵌入 LRU ----------
@@ -681,7 +690,7 @@ class MemoryManager:
         """
         owner = (
             _USER_SELF
-            if str(role).strip().lower() in (ROLE_ASSISTANT, ROLE_AI_ALIAS)
+            if str(role).strip().lower() in _AI_ROLES
             else (user or _USER_DEFAULT)
         )
         with self._turns_lock:
@@ -855,12 +864,19 @@ class MemoryManager:
     async def _retrieve_slow(
         self, query: str, top_k: int, user: str, started: float
     ) -> str:
-        """慢路径：原 memU progressive_retrieve（保留兼容 + 异常兜底）。"""
+        """慢路径：原 memU progressive_retrieve（保留兼容 + 异常兜底）。
+
+        限时 _SLOW_RETRIEVE_TIMEOUT 秒：memU 内部 embedding 失败/超时时
+        快速回退关键词粗筛；失败静默降级（结果形状与快路径一致）。
+        """
         try:
             service = self._ensure_service()
             with self._io_lock:
-                data = await service.progressive_retrieve(
-                    query, where={"user__in": [user, _USER_SELF]}
+                data = await asyncio.wait_for(
+                    service.progressive_retrieve(
+                        query, where={"user__in": [user, _USER_SELF]}
+                    ),
+                    timeout=_SLOW_RETRIEVE_TIMEOUT,
                 )
             elapsed_ms = (time.monotonic() - started) * 1000
             text = _format_retrieval(data)
@@ -868,10 +884,8 @@ class MemoryManager:
             console.dim(f"[记忆检索] 慢路径 {elapsed_ms:.0f}ms，命中 {hits} 段")
             return text
         except Exception:
-            elapsed_ms = (time.monotonic() - started) * 1000
-            text = _llm_fallback(query, user)
-            console.dim(f"[记忆检索] 慢路径失败，关键词回退 {elapsed_ms:.0f}ms")
-            return text
+            # 静默降级：不打印失败日志，直接关键词回退
+            return _llm_fallback(query, user)
 
     # ---------- 写入 ----------
 
@@ -1427,8 +1441,8 @@ def format_turns_text(turns: list[dict]) -> str:
     """把对话轮次格式化为角色明确的文本（供 LLM 记忆提取/复盘/进化使用）。
 
     区分三方发言，避免弹幕（观众）被误当作主播或 AI 自己的发言：
-    - AI 发言（role=assistant/muika）→ "AI：..."
-    - 弹幕（source=danmaku_input 或内容以 [弹幕@ 开头）→ "观众：..."
+    - AI 发言（role 命中 _AI_ROLES，含 assistant/Neuro/Neuro sama）→ "AI：..."
+    - 弹幕（source=danmaku_input/danmaku_reply 或内容以 [弹幕@ 开头）→ "观众：..."
     - 其余轮次（主播输入等）→ "主播：..."
     """
     if not turns:
@@ -1439,9 +1453,10 @@ def format_turns_text(turns: list[dict]) -> str:
         if not content:
             continue
         role = str(t.get("role") or "").strip().lower()
-        if role in (ROLE_ASSISTANT, ROLE_AI_ALIAS):
+        if role in _AI_ROLES:
             speaker = "AI"
-        elif t.get("source") == SOURCE_DANMAKU_INPUT or content.startswith("[弹幕@"):
+        elif (t.get("source") in (SOURCE_DANMAKU_INPUT, SOURCE_DANMAKU_REPLY)
+                or content.startswith("[弹幕@")):
             speaker = "观众"
         else:
             speaker = "主播"

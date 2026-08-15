@@ -567,6 +567,7 @@ class Text2SemanticDecoder(nn.Module):
         temperature: float = 1.0,
         repetition_penalty: float = 1.35,
         check_interval: int = 5,
+        initial_suppression_steps: int = 10,
     ):
         B, device = len(x), x[0].device
         
@@ -614,6 +615,10 @@ class Text2SemanticDecoder(nn.Module):
 
         bucket.kv_cache_len[:actual_batch_size].copy_(xy_lens)
 
+        # 首 token 也压制循环/静音 token（280/486）与 EOS——对齐单句 infer 的
+        # 修复：GPT 一旦卡进 280/486 这类 token 会无限循环生成（28s 怪音）
+        logits[:, self.suppressed_tokens] = -float("Inf")
+
         samples = sample(logits[:, :-1], top_k=top_k, top_p=top_p, repetition_penalty=repetition_penalty, temperature=temperature)[0]
         pre_tokens[batch_indices, bucket.kv_cache_len][:actual_batch_size] = samples.squeeze()
         y_emb = self.ar_audio_embedding(samples)
@@ -652,7 +657,25 @@ class Text2SemanticDecoder(nn.Module):
 
                 logits = self.ar_predict_layer(xy_dec[:, -1])
 
-                samples = sample(logits, top_k=top_k, top_p=top_p, repetition_penalty=repetition_penalty, temperature=temperature)[0] # 在想出更好的方案之前，暂时取消repetition_penalty
+                # 生成初期（前 initial_suppression_steps 步）压制循环/静音
+                # token（280/486）与 EOS，防止 GPT 卡进循环 token 后无限
+                # 生成（28s 怪音）；10 步后放开 EOS 使其能正常结束——
+                # 对齐单句 infer（L448-449）的修复
+                suppress_mask = decode_steps < initial_suppression_steps
+                if suppress_mask.any():
+                    logits[torch.where(suppress_mask)[0], self.suppressed_tokens] = -float("Inf")
+
+                # 启用 repetition_penalty（对齐单句 infer）：惩罚已生成 token
+                # 的重复，抑制 GPT 卡进循环 token 无限生成（28s 怪音）。
+                # 此前批量路径传入 pre_tokens 才生效，却被注释"暂时取消"——
+                # 正是批量合成随机怪叫的根源。批量 pre_tokens 只含生成区
+                # （不含 prompt 前缀），不会误惩罚参考音频、不伤音色。
+                samples = sample(
+                    logits,
+                    pre_tokens[:, : int(bucket.kv_cache_len.max())],
+                    top_k=top_k, top_p=top_p, temperature=temperature,
+                    repetition_penalty=repetition_penalty,
+                )[0]
                 
                 pre_tokens[batch_indices, bucket.kv_cache_len] = samples.squeeze()
 
@@ -710,6 +733,8 @@ class Text2SemanticDecoder(nn.Module):
 
                                     xy_dec = self.t2s_transformer.process_prompt(_xy_pos, bucket.k_cache[:, i:i+1], bucket.v_cache[:, i:i+1], bucket.kv_cache_len[i:i+1], prompt_attn_mask)
                                     logits = self.ar_predict_layer(xy_dec[:, -1])
+                                    # 新样本首次采样同样压制循环/静音 token 与 EOS
+                                    logits[0, self.suppressed_tokens] = -float("Inf")
 
                                     x_lens[i].copy_(single_x.shape[0])
                                     bucket.kv_cache_len[i].copy_(single_x.shape[0] + single_y.shape[0])
