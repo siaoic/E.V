@@ -6,8 +6,8 @@ import time
 
 from PySide6.QtWidgets import QSizePolicy
 
-from src.memory import memory
-from src.memory.memory_graph import MemoryGraphWidget, _display_user
+from tools.memory import memory
+from tools.memory.memory_graph import MemoryGraphWidget, _display_user
 from src.utils import config
 from ui.dialogs.memory_detail import MemoryDetailDialog
 from ui.dialogs.memory_list import MemoryListDialog

@@ -1,0 +1,38 @@
+[gd_scene load_steps=2 format=3 uid="uid://douadk8pdcrsl"]
+
+[ext_resource type="Texture2D" uid="uid://jxb64ry5lyhi" path="res://examples/white.png" id="1_5qo63"]
+
+[node name="Cell" type="TextureButton"]
+texture_normal = ExtResource("1_5qo63")
+
+[node name="X" type="RichTextLabel" parent="."]
+visible = false
+modulate = Color(0, 0, 0, 1)
+texture_filter = 2
+layout_mode = 1
+anchors_preset = 15
+anchor_right = 1.0
+anchor_bottom = 1.0
+grow_horizontal = 2
+grow_vertical = 2
+theme_override_font_sizes/normal_font_size = 70
+bbcode_enabled = true
+text = "[center]X"
+scroll_active = false
+autowrap_mode = 0
+
+[node name="O" type="RichTextLabel" parent="."]
+visible = false
+modulate = Color(0, 0, 0, 1)
+texture_filter = 2
+layout_mode = 1
+anchors_preset = 15
+anchor_right = 1.0
+anchor_bottom = 1.0
+grow_horizontal = 2
+grow_vertical = 2
+theme_override_font_sizes/normal_font_size = 70
+bbcode_enabled = true
+text = "[center]O"
+scroll_active = false
+autowrap_mode = 0

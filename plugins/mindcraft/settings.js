@@ -1,0 +1,28 @@
+const settings = {
+    "minecraft_version": "auto",
+    "host": "127.0.0.1",
+    "port": 55916,
+    "auth": "offline",
+    "mindserver_port": 8080,
+    "auto_open_ui": false,
+    "base_profile": "assistant",
+    "profiles": ["./andy.json"],
+    "load_memory": false,
+    "init_message": null,
+    "only_chat_with": [],
+    "speak": false,
+    "chat_ingame": true,
+    "language": "en",
+    "render_bot_view": false,
+    "allow_insecure_coding": false,
+    "allow_vision": false,
+    "max_messages": 15,
+    "num_examples": 2,
+    "max_commands": 8,
+    "show_command_syntax": "none",
+    "narrate_behavior": false,
+    "chat_bot_messages": true,
+    "log_all_prompts": false,
+};
+
+export default settings;

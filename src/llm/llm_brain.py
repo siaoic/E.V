@@ -42,8 +42,9 @@ import time
 from typing import Any, AsyncGenerator, List, Optional
 
 from src.utils import config, console
-from src.memory import memory
-from src.llm.tools.skills import get_skill_manager
+from tools.memory import memory
+from src.adapter.llm import BaseLLMAdapter
+from plugins.tools.skills import get_skill_manager
 from src.llm.tool_message_utils import (
     sanitize_tool_message_sequence,
     trim_messages_preserving_tool_rounds,
@@ -99,16 +100,18 @@ _POLICY_PATH = os.path.join(
 _POLICY_CACHE_TTL = 30
 
 
+def _bigram_set(s: str) -> set:
+    """文本的 2-gram 片段集合：中文按字符 2-gram 取交集（无第三方分词依赖）。"""
+    s = re.sub(r"\s+", "", s)
+    return {s[i:i + 2] for i in range(len(s) - 1)} if len(s) >= 2 else set()
+
+
 def _bigram_hits(text: str, query: str) -> int:
     """公共 2-gram 片段数：轻量关键词召回（无第三方分词依赖）。
 
     中文按字符 2-gram 取交集，两个文本共享片段越多说明越相关。
     """
-    def bigrams(s: str) -> set:
-        s = re.sub(r"\s+", "", s)
-        return {s[i:i + 2] for i in range(len(s) - 1)} if len(s) >= 2 else set()
-
-    return len(bigrams(text) & bigrams(query))
+    return len(_bigram_set(text) & _bigram_set(query))
 
 
 def _summarize_tool_content(content) -> str:
@@ -198,20 +201,31 @@ _MAX_ROUND_TOOL_CHARS = 32000
 _CONTROL_CHAR_RE = re.compile(r"[\x00-\x08\x0b-\x0c\x0e-\x1f\x7f]")
 
 
+def _find_sentence_end_from(text: str, start: int) -> int:
+    """返回 text 中从 start 起第一个句末符号的下标；找不到返回 -1。
+
+    消费端增量扫描用：start 之前已确认不含句末符号（含「后跟空格的句号」），
+    只扫描新增区域，避免每个 chunk 都从开头重扫整段 buffer。
+    切句规则与 _find_sentence_end 完全一致：按符号立即切，
+    英文句号仅在后跟空格/结尾时算边界。
+    """
+    for i in range(start, len(text)):
+        if text[i] in _SENTENCE_ENDS:
+            return i
+        if text[i] == ".":
+            # 英文句号：后跟空格或到结尾才算一句（'...'、小数、缩写不切）
+            if i == len(text) - 1 or text[i + 1] == " ":
+                return i
+    return -1
+
+
 def _find_sentence_end(text: str) -> int:
     """返回 text 中第一个句末符号的下标；找不到返回 -1。
 
     主循环（消费端）唯一的切句规则：按符号立即切，
     英文句号仅在后跟空格/结尾时算边界。
     """
-    for i, ch in enumerate(text):
-        if ch in _SENTENCE_ENDS:
-            return i
-        if ch == ".":
-            # 英文句号：后跟空格或到结尾才算一句（'...'、小数、缩写不切）
-            if i == len(text) - 1 or text[i + 1] == " ":
-                return i
-    return -1
+    return _find_sentence_end_from(text, 0)
 
 
 # 角色扮演动作/表情标注（*blushes deeply* 等）：LLM 常用来表达情绪/动作，
@@ -399,7 +413,7 @@ def _format_tool_calls(tool_calls: list) -> str:
     return "；".join(lines)
 
 
-class LLMBrain:
+class LLMBrain(BaseLLMAdapter):
     """LLM 流式大脑：支持多轮工具调用，按句 yield 纯对话文本。"""
 
     def __init__(self, mcp=None) -> None:
@@ -429,6 +443,10 @@ class LLMBrain:
         self._summary_task: Optional[asyncio.Task] = None
         # MCP 管理器（外部工具服务器）；None 表示禁用
         self.mcp = mcp
+        # 插件系统（Application 启动后注入）：钩子分发与系统提示补丁
+        self.plugin_manager = None
+        # 插件 on_user_input 注入的本轮背景上下文（一次性消费，下轮自动清除）
+        self._turn_contexts: List[str] = []
         # 生效话术建议缓存（进化引擎写入 active json，30s TTL 防每轮读文件）
         self._advice_cache_ts = 0.0
         self._advice_cache: list[str] = []
@@ -511,9 +529,12 @@ class LLMBrain:
         query = (user_text or "").strip()
         if not query:
             return ""
+        # query 的 2-gram 只算一次，避免每条画像重复计算（最多 30 条）
+        query_bigrams = _bigram_set(query)
         # 相关度 = 与当前消息的公共 2-gram 片段数，降序取前 N
         hits = sorted(
-            ((_bigram_hits(it["fact"], query), it) for it in self._profile_cache),
+            ((len(_bigram_set(it["fact"]) & query_bigrams), it)
+             for it in self._profile_cache),
             key=lambda x: x[0], reverse=True,
         )
         top = [it for score, it in hits if score > 0][:_PROFILE_INJECT_MAX]
@@ -547,6 +568,17 @@ class LLMBrain:
         return ("### 进化行为策略（GEPA 迭代沉淀，直播中相关情境优先遵循，"
                 "与生效中的话术建议冲突时以本策略为准）\n" + self._policy_cache)
 
+    # ---------- 插件：本轮上下文 ----------
+
+    def push_turn_context(self, contexts: List[str]) -> None:
+        """追加插件 on_user_input 注入的本轮背景上下文（仅本轮对话生效）。"""
+        self._turn_contexts.extend(contexts)
+
+    def _pop_turn_context(self) -> List[str]:
+        """取走本轮注入的上下文并清空（一次性消费）。"""
+        contexts, self._turn_contexts = self._turn_contexts, []
+        return contexts
+
     # ---------- 工具 ----------
 
     def _get_tools(self) -> List[dict]:
@@ -554,7 +586,7 @@ class LLMBrain:
 
         每轮对话实时获取一次（不缓存）：MCP 服务器可能在运行中动态增删工具。
         """
-        from src.llm.tools import get_merged_tools
+        from plugins.tools import get_merged_tools
         return get_merged_tools(self.mcp)
 
     def _clean_messages_for_api(self, messages: List[dict]) -> List[dict]:
@@ -606,7 +638,7 @@ class LLMBrain:
         直接截断为 0 并注入提示，避免 30 轮工具调用 × 8000 字符
         一次性进 LLM 上下文把免费档模型打爆（400/截断/超时）。
         """
-        from src.llm.tools import call_tool
+        from plugins.tools import call_tool
 
         # 共享计数器：本轮已消耗的工具结果字符数
         state = {"round_chars": 0, "truncated": False}
@@ -796,6 +828,15 @@ class LLMBrain:
         policy_section = self._policy_section()
         if policy_section:
             sys_content += "\n\n" + policy_section
+        # 插件注入：on_user_input 本轮背景上下文（一次性）+ add_system_prompt_patch 长期提示
+        if self.plugin_manager is not None:
+            turn_contexts = self._pop_turn_context()
+            if turn_contexts:
+                sys_content += ("\n\n### 插件补充背景（仅本轮对话参考，不要向用户复述）\n"
+                                + "\n".join(f"- {t}" for t in turn_contexts))
+            patch_section = self.plugin_manager.system_prompt_patch_section()
+            if patch_section:
+                sys_content += "\n\n" + patch_section
         messages: List[dict] = [{"role": "system", "content": sys_content}]
         # 注入早期对话摘要（历史裁剪时后台压缩生成，跨会话继承）
         summary = self._consume_summary()
@@ -807,6 +848,13 @@ class LLMBrain:
         # agent 主动发言：只带精简历史快照（最近 N 条），降低 token 消耗
         messages.extend(history if history is not None else self.history)
         messages.append({"role": "user", "content": user_text})
+
+        # 插件钩子：on_llm_request（可在请求发出前修改 messages）
+        if self.plugin_manager is not None:
+            from plugins.base import LLMRequestEvent
+            request = LLMRequestEvent(messages)
+            await self.plugin_manager.run_llm_request_hooks(request)
+            messages = request.messages
 
         # 每轮对话实时合并一次工具列表（对标 live-2d(2) getMergedToolsList，不缓存）
         tools = self._get_tools()
@@ -1005,6 +1053,7 @@ class LLMBrain:
 
             # 主协程：消费 content 增量，按句切分 yield
             buffer = ""
+            scanned = 0  # buffer[:scanned] 已确认无句末符号，增量扫描起点
 
             def _emit(sentence: str) -> str:
                 """清洗、保存记忆、计数并返回清理后的文本。空文本返回 ''。"""
@@ -1036,17 +1085,19 @@ class LLMBrain:
                     return
                 buffer += item
 
-                # 按符号切分：遇句末符号（。！？!?…换行 / 英文 '.'+空格）立即切出。
-                # 不做长度兜底——没有符号就继续等，保证语义完整、不拆词。
+                # 增量切句：每 chunk 只扫描新增区域（scanned 之后），
+                # 切出句子后剩余 buffer 从头开始；行为与原全量扫描一致。
                 while True:
-                    idx = _find_sentence_end(buffer)
+                    idx = _find_sentence_end_from(buffer, scanned)
                     if idx < 0:
                         break
                     sentence = buffer[: idx + 1]
                     buffer = buffer[idx + 1:]
+                    scanned = 0
                     cleaned = _emit(sentence)
                     if cleaned:
                         yield cleaned
+                scanned = len(buffer)
 
             # 收尾：剩余内容作为最后一句
             cleaned = _emit(buffer)

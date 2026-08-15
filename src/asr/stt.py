@@ -19,6 +19,7 @@ import wave
 import numpy as np
 
 from src.utils import console
+from src.adapter.input import BaseInputAdapter
 
 # 录音参数（与 STT_LEVEL_THRESHOLD 等 .env 配置区分：这些是硬件级常量）
 SAMPLE_RATE = 16000          # SiliconFlow/SenseVoice 标准采样率
@@ -36,7 +37,7 @@ def _rms(audio: np.ndarray) -> float:
     return float(np.sqrt(np.mean(np.square(audio.astype(np.float64)))))
 
 
-class STTEngine:
+class STTEngine(BaseInputAdapter):
     """麦克风监听 + 语音识别引擎。
 
     线程模型：

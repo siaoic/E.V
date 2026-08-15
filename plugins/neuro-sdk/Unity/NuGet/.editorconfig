@@ -1,0 +1,11 @@
+root = true
+
+[*.cs]
+csharp_style_namespace_declarations = block_scoped:warning
+csharp_style_prefer_primary_constructors = false
+dotnet_diagnostic.IDE0290.severity = none
+resharper_convert_to_primary_constructor_highlighting = none
+dotnet_diagnostic.IDE0300.severity = none
+resharper_use_collection_expression_highlighting = none
+resharper_replace_with_field_keyword_highlighting = none
+resharper_check_namespace_highlighting = none

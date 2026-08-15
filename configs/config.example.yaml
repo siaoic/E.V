@@ -1,0 +1,148 @@
+# E.V 分层配置模板（可选）
+#
+# 用法：复制本文件为 configs/config.yaml，按需取消注释修改。
+# 优先级：环境变量 > config.yaml > 默认值。
+#   - 环境变量（.env）已设置的字段，yaml 不覆盖（环境变量永远优先）；
+#   - 所有字段均可省略，省略即用默认值（与不配 yaml 时行为完全一致）；
+#   - 配置项全量说明见 docs/config.md。
+# 注意：.env 仍建议保留 LLM_API_KEY 等密钥；yaml 用于「非密钥、按环境差异化」
+# 的配置（如直播间 / 运行参数），避免每次改配置都改 .env。
+
+# ===== LLM（OpenAI 兼容接口） =====
+# LLM_API_KEY: ""
+# LLM_BASE_URL: ""
+# LLM_MODEL: "glm-4.7-flash"
+# LLM_THINKING: true
+
+# ===== VTubeStudio =====
+# VTS_PORT: 8001
+# VTS_PLUGIN_NAME: "ZhipuAI_VTuber"
+# VTS_PLUGIN_DEVELOPER: "LocalUser"
+# MOTION_PATH: ""
+# VTS_ROOT: ""
+# VTS_IDLE_TAKEOVER: true
+
+# ===== 口型同步 =====
+# MOUTH_PARAMETER: ""
+# MOUTH_GAIN: 0.4
+
+# ===== GPT-SoVITS TTS =====
+# GPTSOVITS_URL: "http://127.0.0.1:9880"
+# TTS_SERVER_URL: "http://127.0.0.1:8000"
+# GPTSOVITS_REF_AUDIO: ""
+# GPTSOVITS_REF_AUDIOS: ""
+# GPTSOVITS_PROMPT_TEXT: ""
+# GPTSOVITS_TIMEOUT: 120
+# GPTSOVITS_MODELS_DIR: "tools/gsv_tts/API/models"
+
+# ===== 内容过滤 =====
+# PROFANITY_FILTER_ENABLED: true
+# PROFANITY_FILTER_RATE: 0.7
+
+# ===== 记忆系统 =====
+# MEMORY_ENABLED: true
+
+# ===== ButlerAgent 管家模型（留空 = 与主对话共用） =====
+# BUTLER_BASE_URL: ""
+# BUTLER_API_KEY: ""
+# BUTLER_MODEL: ""
+# SESSION_SUMMARIZE_MODEL: ""
+# BUTLER_THINKING: false
+
+# ===== 人设（SYSTEM_PROMPT_FILE 优先于 yaml/UI 人设） =====
+# SYSTEM_PROMPT_FILE: ""
+# SYSTEM_PROMPT: ""
+
+# ===== Function Calling 工具 =====
+# OPENWEATHERMAP_API_KEY: ""
+# TOOLS_ENABLED: true
+# TOOL_GET_CURRENT_TIME_ENABLED: true
+# TOOL_GET_WEATHER_ENABLED: true
+# TOOL_LOAD_SKILL_ENABLED: true
+# TOOL_LOOK_SCREEN_ENABLED: true
+# TOOL_PLAY_SFX_ENABLED: true
+
+# ===== 自我进化 =====
+# EVOLUTION_ENABLED: true
+# EVOLUTION_MIN_INTERVAL: 600
+# EVOLUTION_MIN_TURNS: 10
+# EVOLUTION_PERIODIC_INTERVAL: 1800
+# EVOLUTION_EVAL_ENABLED: true
+# EVOLUTION_EVAL_CASES: 2
+# EVOLUTION_PROMPT_EVO_ENABLED: true
+# EVOLUTION_PROMPT_EVO_INTERVAL: 21600
+
+# ===== 模型路由进化 =====
+# LLM_SERVERS: ""
+# LLM_ROUTER_ENABLED: true
+# LLM_ROUTER_EPSILON: 0.1
+
+# ===== MCP =====
+# MCP_ENABLED: false
+# MCP_CONFIG_PATH: "src/mcp/mcp_config.json"
+
+# ===== 外部服务（mindcraft） =====
+# MINDCRAFT_PATH: "plugins/mindcraft"
+# MINDCRAFT_LLM_BASE_URL: ""
+# MINDCRAFT_LLM_MODEL: "glm-4-flash-250414"
+# MINDCRAFT_BOT_NAME: "vtuber"
+# MINDCRAFT_HOST: "127.0.0.1"
+# MINDCRAFT_PORT: 55916
+# MINDCRAFT_AUTH: "offline"
+# MINDCRAFT_MINDSERVER_PORT: 8080
+# MINDCRAFT_BRIDGE_ENABLED: false
+# MINDCRAFT_BOT_PERSONA: ""
+
+# ===== 运行参数与并发控制 =====
+# HISTORY_ROUNDS: 10
+# LLM_MAX_CONCURRENCY: 2
+# PROACTIVE_QUEUE_MAX: 4
+# AGENT_AVOID_MAIN_LLM: true
+# AGENT_HISTORY_SNAPSHOT: 6
+# AGENT_DUP_THRESHOLD: 0.85
+
+# ===== 主动对话 =====
+# PROACTIVE_ENABLED: true
+# RESPONSE_INTERVAL_MIN: 5
+# RESPONSE_INTERVAL_MAX: 10
+
+# ===== 技能系统 =====
+# SKILLS_DIR: "src/llm/skills"
+
+# ===== 运行模式（vtuber / pet） =====
+# RUN_MODE: "vtuber"
+
+# ===== 桌宠模式 =====
+# PET_MODEL_PATH: ""
+# PET_WINDOW_SIZE: ""
+# PET_ALWAYS_ON_TOP: true
+# PET_MOTION_PATH: ""
+# PET_IDLE_MOTION: ""
+
+# ===== 表情/动作（Embedding 情绪控制） =====
+# EMOTION_ACTOR_ENABLED: false
+# SILICONFLOW_API_KEY: ""
+# SILICONFLOW_MODEL: "Qwen/Qwen3-Embedding-0.6B"
+# SILICONFLOW_BASE_URL: "https://api.siliconflow.cn/v1"
+# EMBEDDING_BASE_URL: ""
+# EMBEDDING_API_KEY: ""
+# EMBEDDING_DIMENSIONS: null
+# EMBEDDING_MODEL: "Qwen/Qwen3-Embedding-0.6B"
+# EMOTION_MAP_FILE: ""
+
+# ===== 语音识别（STT） =====
+# STT_ENABLED: false
+# STT_MODEL: "FunAudioLLM/SenseVoiceSmall"
+# STT_API_KEY: ""
+# STT_BASE_URL: ""
+# STT_LEVEL_THRESHOLD: 500
+# STT_SILENCE_SECONDS: 1.0
+# STT_MAX_SECONDS: 10
+# STT_INTERRUPT_MIN_SECONDS: 3
+
+# ===== B 站直播弹幕 =====
+# BILI_ENABLED: true
+# BILI_ROOM_ID: 0
+# BILI_ROOM_IDS: []
+# BILI_SESSDATA: ""
+# BILI_SERVER_PORT: 8766

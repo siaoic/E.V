@@ -7,8 +7,8 @@ from PySide6.QtWidgets import (
     QMessageBox, QPushButton, QScrollArea, QVBoxLayout, QWidget,
 )
 
-from src.memory import memory
-from src.memory.memory_graph import _display_user
+from tools.memory import memory
+from tools.memory.memory_graph import _display_user
 from ui.dialogs.confirm import ConfirmDialog
 from ui.dialogs.memory_detail import _make_type_badge, _memory_type_label
 

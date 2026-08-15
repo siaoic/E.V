@@ -116,17 +116,11 @@ class MyHandler(blivedm.BaseHandler):
     def _on_super_chat(self, client: blivedm.BLiveClient, message: web_models.SuperChatMessage):
         print(f'[{client.room_id}] 醒目留言 ¥{message.price} {message.uname}：{message.message}')
 
-<<<<<<< HEAD
     def _on_interact_word_v2(self, client: blivedm.BLiveClient, message: web_models.InteractWordV2Message):
-        if message.msg_type == 1:
-            print(f'[{client.room_id}] {message.username} 进入房间')
-=======
-    def _on_interact_word(self, client: blivedm.BLiveClient, message: web_models.InteractWordMessage):
         if message.msg_type == 1:
             content = f'[{client.room_id}] {message.username} 进入房间'
             self._write_log('enter', content)
             print(content)
->>>>>>> aa9e3094c5045c0548c8bb5da46d794be91b2a79
 
 
 if __name__ == '__main__':

@@ -1,0 +1,55 @@
+# ============ E.V（AI 虚拟主播）一键安装依赖 ============
+# 安装：pip install -r requirements.txt
+# 注：TTS 推理依赖 torch / torchaudio，需按本机 CUDA 版本手动安装；
+#     gsv_tts 为本地包（tools/gsv_tts/），直接 import 无需 pip 安装。
+
+# ---------- 主程序 ----------
+# UI / 桌面宠物
+PySide6>=6.6.0
+# LLM（智谱 / DeepSeek 等 OpenAI 兼容接口）
+openai>=1.0.0
+# B 站直播弹幕（blivedm 及其依赖）
+blivedm
+Brotli~=1.1.0
+pure-protobuf~=3.1.2
+yarl~=1.9.3
+aiohttp~=3.9.0
+# MCP 客户端（插件工具）
+mcp>=2.0.0
+# 配置 / 人设 / 复盘 / 插件（yaml）
+python-dotenv>=1.0.0
+PyYAML>=6.0.0
+pydantic>=2.0.0
+rich>=13.0.0
+# 网络（TTS 客户端 / VTS WebSocket）
+httpx>=0.24.0
+websockets>=10.0
+requests>=2.31.0
+# 科学计算 / 音频 / 记忆向量检索
+numpy>=1.24.0
+scipy>=1.10.0
+soundfile>=0.12.0
+
+# ---------- 插件工具（可选） ----------
+# 截屏工具 plugins/tools/screen.py
+Pillow>=10.0.0
+
+# ---------- TTS 服务端（tools/gsv_tts） ----------
+fastapi>=0.100.0
+uvicorn>=0.23.0
+einops
+tqdm
+av
+transformers
+sounddevice
+safetensors
+py3langid
+pysbd
+onnxruntime
+nltk
+future
+inflect
+wordsegment
+pypinyin
+jieba
+pyopenjtalk-plus

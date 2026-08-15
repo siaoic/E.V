@@ -48,7 +48,6 @@ _DRAG_MIME_MOTION = "application/x-vtuber-motion"
 # 各插件配置页的 .env 字段（显示名）：无字段的插件不显示「配置」按钮。
 # MCP 服务器不在此列——配置页直接编辑 mcp_config.json 中对应服务器的 JSON 段。
 PLUGIN_CONFIG_FIELDS: Dict[str, List[Tuple[str, str]]] = {
-    "TOOL_WEB_SEARCH_ENABLED": [("TAVILY_API_KEY", "Tavily API Key")],
     "TOOL_GET_WEATHER_ENABLED": [
         ("OPENWEATHERMAP_API_KEY", "OpenWeatherMap API Key")],
     "TOOL_LOAD_SKILL_ENABLED": [("SKILLS_DIR", "技能根目录（逗号分隔多个）")],
@@ -75,7 +74,7 @@ _MINDCRAFT_DEFAULT_PERSONA = (
     "收到请求时立即使用命令行动（如 !goToPlayer、!build），不要假装已经执行。"
 )
 
-# 记忆类型 → 名称/主色（与 src/memory/memory_graph.py
+# 记忆类型 → 名称/主色（与 tools/memory/memory_graph.py
 # _LAYER_STYLE / _TRACK_COLORS 配色一致；详情弹窗与列表行共用）
 _MEMORY_LAYER_COLORS = {
     "core": (140, 100, 200),        # 紫：核心身份

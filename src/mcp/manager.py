@@ -17,6 +17,7 @@ from typing import Dict, List, Optional
 
 from src.utils import config as vtuber_config
 from src.utils import console
+from src.core.exceptions import EVBaseException, ErrorCode
 from src.mcp.http_transport import MCPHttpTransport
 from src.mcp.registry import MCPToolRegistry
 from src.mcp.stdio_transport import MCPStdioTransport
@@ -28,11 +29,24 @@ _MCP_DIR = os.path.dirname(os.path.abspath(vtuber_config.cfg.MCP_CONFIG_PATH))
 _ENV_PLACEHOLDER_RE = re.compile(r"\$\{(\w+)\}")
 
 
+def _unwrap_mcp_servers(config: dict) -> dict:
+    """兼容标准 mcpServers 包装与平铺两种格式，返回服务器名→配置映射。"""
+    servers = config.get("mcpServers")
+    return servers if isinstance(servers, dict) else config
+
+
+def _wrap_mcp_servers(config: dict, original: dict) -> dict:
+    """写回时保持原文件的包装结构（mcpServers 或平铺）。"""
+    if isinstance(original.get("mcpServers"), dict):
+        return {"mcpServers": config}
+    return config
+
+
 def _expand_env(value):
     """递归展开字符串中的 ${ENV_VAR} 占位符（对标 live-2d(2) 的 env 注入方式）。
 
-    用于 mcp_config.json 中需要从 .env 动态注入密钥的场景，
-    例如 Tavily 远程 MCP：url = "...?tavilyApiKey=${TAVILY_API_KEY}"。
+    用于 mcp_config.json 中需要从环境变量动态注入的系统字段 / 密钥，
+    例如 stdio 服务器的 "SystemRoot": "${SystemRoot}"。
     注意用 `os.getenv(k) or ""`：env 里字段被清空时不会拿到默认值。
     """
     if isinstance(value, str):
@@ -97,12 +111,15 @@ class MCPManager:
             self._auto_sync_tools_folder(config_path)
 
             with open(config_path, "r", encoding="utf-8") as f:
-                all_servers = json.load(f)
+                loaded = json.load(f)
+
+            # 兼容标准 mcpServers 包装与平铺两种格式
+            servers = _unwrap_mcp_servers(loaded)
 
             # 过滤 _disabled 后缀服务器
             self.mcp_servers = {
                 name: srv
-                for name, srv in all_servers.items()
+                for name, srv in servers.items()
                 if not name.endswith("_disabled")
             }
             console.info(
@@ -136,11 +153,15 @@ class MCPManager:
 
         try:
             with open(config_path, "r", encoding="utf-8") as f:
-                config = json.load(f)
+                raw = json.load(f)
         except (OSError, json.JSONDecodeError):
-            config = {}
+            raw = {}
 
-        # 保留非 tools/ 的外部服务配置（如远程 tavily 等）
+        # 解包 mcpServers 包装，统一按平铺格式处理；写回时恢复原包装结构
+        config = _unwrap_mcp_servers(raw)
+        wrapped = isinstance(raw.get("mcpServers"), dict)
+
+        # 保留非 tools/ 的外部服务配置（如 bing-cn-mcp 等）
         external_configs = {}
         for key, srv in config.items():
             args = srv.get("args") or []
@@ -179,6 +200,8 @@ class MCPManager:
                 console.dim(f"📦 自动添加工具: {t['name']}")
 
         final_config = {**external_configs, **tool_configs}
+        if wrapped:
+            final_config = {"mcpServers": final_config}
         try:
             with open(config_path, "w", encoding="utf-8") as f:
                 json.dump(final_config, f, ensure_ascii=False, indent=2)
@@ -187,7 +210,7 @@ class MCPManager:
 
         # 重新载入（含自动同步后的最新配置）
         with open(config_path, "r", encoding="utf-8") as f:
-            loaded = json.load(f)
+            loaded = _unwrap_mcp_servers(json.load(f))
         self.mcp_servers = {
             name: srv
             for name, srv in loaded.items()
@@ -218,7 +241,7 @@ class MCPManager:
         未配置时回退到全局 startup_timeout。
         """
         try:
-            cfg = _expand_env(dict(server_config))  # 展开 ${ENV_VAR}（如 Tavily key）
+            cfg = _expand_env(dict(server_config))  # 展开 ${ENV_VAR}（如 SystemRoot）
             timeout = float(cfg.get("timeout") or self.startup_timeout)
             # 相对路径命令（./tools/...）默认以 MCP 配置目录为 cwd
             args = cfg.get("args") or []
@@ -230,10 +253,13 @@ class MCPManager:
                 transport = MCPHttpTransport(cfg, self.tool_registry, timeout)
             else:
                 transport = MCPStdioTransport(cfg, self.tool_registry, timeout)
-            await asyncio.wait_for(transport.start(name), timeout=timeout)
+            # 启动超时由 transport.start 内部处理（ready 等待），这里不再包 wait_for，
+            # 避免 Python 3.10 的 wait_for 把协程迁到新 task 导致 SDK cancel scope 不匹配
+            await transport.start(name)
             self.transports[name] = transport
         except asyncio.TimeoutError:
-            raise RuntimeError(f"服务器 {name} 启动超时（{timeout}s）")
+            raise EVBaseException(
+                ErrorCode.MCP_SERVER_FAILED, f"服务器 {name} 启动超时（{timeout}s）")
 
     # ------------------------------------------------------------------
     # 工具调用
@@ -243,11 +269,14 @@ class MCPManager:
         """调用 MCP 工具（内部方法）。"""
         tool = self.tool_registry.find_tool(tool_name)
         if not tool:
-            raise RuntimeError(f"MCP 工具未找到: {tool_name}")
+            raise EVBaseException(
+                ErrorCode.TOOL_NOT_FOUND, f"MCP 工具未找到: {tool_name}")
 
         transport = self.transports.get(tool["server"])
         if not transport:
-            raise RuntimeError(f"MCP 服务器未找到: {tool['server']}")
+            raise EVBaseException(
+                ErrorCode.MCP_SERVER_FAILED,
+                f"MCP 服务器未找到: {tool['server']}")
 
         return await transport.call_tool(tool_name, args)
 
@@ -286,7 +315,7 @@ class MCPManager:
     async def execute_function(self, tool_name: str, parameters: dict) -> str:
         """统一执行入口（供外部直接调用）。"""
         if not self.is_enabled:
-            raise RuntimeError("MCP 管理器已禁用")
+            raise EVBaseException(ErrorCode.MCP_SERVER_FAILED, "MCP 管理器已禁用")
         return await self.call_mcp_tool(tool_name, parameters)
 
     # ------------------------------------------------------------------

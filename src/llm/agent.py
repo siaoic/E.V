@@ -20,7 +20,7 @@ from typing import Any
 
 from openai import AsyncOpenAI
 
-from src.memory import memory
+from tools.memory import memory
 from src.utils import config, console
 from src.utils.constants import ROLE_ASSISTANT, ROLE_AI_ALIAS
 

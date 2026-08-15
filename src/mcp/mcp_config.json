@@ -1,2 +1,14 @@
 {
+    "mcpServers": {
+        "bing-cn-mcp": {
+            "command": "npx",
+            "args": ["-y", "bing-cn-mcp"],
+            "timeout": 120
+        },
+        "playwright": {
+            "command": "npx",
+            "args": ["-y", "@playwright/mcp@latest"],
+            "timeout": 120
+        }
+    }
 }

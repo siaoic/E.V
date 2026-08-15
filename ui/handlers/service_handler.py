@@ -3,7 +3,7 @@
 import json
 import os
 
-from PySide6.QtCore import QProcess
+from PySide6.QtCore import QProcess, QTimer
 
 from ui.utils.constants import _MINDCRAFT_DEFAULT_PERSONA
 
@@ -25,7 +25,7 @@ class ServiceHandler:
         """
         mdir = str(self.cfg.MINDCRAFT_PATH or "")
         if not os.path.isfile(os.path.join(mdir, "main.js")):
-            self._log("[控制中心] Mindcraft 未安装，无法启动（先部署 tools/mindcraft）\n")
+            self._log("[控制中心] Mindcraft 未安装，无法启动（先部署 plugins/mindcraft）\n")
             return
         if self._service_running("mindcraft"):
             self._log("[控制中心] Mindcraft 已在运行\n")
@@ -39,7 +39,7 @@ class ServiceHandler:
             return
         proc = QProcess(self.ui)
         proc.setWorkingDirectory(mdir)
-        # 优先用引擎自带的 node（已实体化到 tools/mindcraft），缺失才回退系统 node
+        # 优先用引擎自带的 node（已实体化到 plugins/mindcraft），缺失才回退系统 node
         node_exe = os.path.join(mdir, "node", "node.exe")
         proc.setProgram(node_exe if os.path.isfile(node_exe) else "node")
         proc.setArguments(["main.js"])
@@ -131,16 +131,27 @@ class ServiceHandler:
             f.write("\n".join(lines))
 
     def _stop_service(self, service_id: str) -> None:
-        """停止外部服务进程（terminate 优雅退出，超时强杀）。"""
+        """停止外部服务进程（terminate 优雅退出，超时后异步强杀）。"""
         proc = self._svc_procs.get(service_id)
         if proc is None or proc.state() == QProcess.NotRunning:
             self._svc_procs.pop(service_id, None)
             return
         self._log(f"[控制中心] 正在停止 {service_id}…\n")
         proc.terminate()
-        if not proc.waitForFinished(5000):
-            proc.kill()
-            proc.waitForFinished(3000)
+        # 异步超时强杀：waitForFinished 会在 UI 线程同步阻塞最长 8 秒（界面冻结），
+        # 改用定时器延迟检查；进程正常退出走 finished 信号清理记录。
+        timer = QTimer(self.ui)
+        timer.setSingleShot(True)
+        timer.timeout.connect(lambda: self._force_kill_service(proc))
+        timer.start(5000)
+
+    def _force_kill_service(self, proc: QProcess) -> None:
+        """terminate 超时仍未退出时的强杀兜底（非阻塞）。"""
+        try:
+            if proc.state() != QProcess.NotRunning:
+                proc.kill()
+        except RuntimeError:
+            pass  # 进程对象已随窗口销毁（timer 挂在 ui 上，理论上不会发生）
 
     def _on_svc_finished(self, service_id: str, exit_code: int) -> None:
         """外部服务进程退出：移除记录并重建卡片刷新状态。"""

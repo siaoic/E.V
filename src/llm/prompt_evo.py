@@ -67,7 +67,7 @@ _JUDGE_SYSTEM = (
 
 def _format_turns(turns: list[dict]) -> str:
     """把对话轮次格式化为进化素材文本（与 evolution.py 同一格式，区分三方角色）。"""
-    from src.memory import memory
+    from tools.memory import memory
     return memory.format_turns_text(turns)
 
 

@@ -208,5 +208,7 @@ class ConfigHandler:
 
     def _restore_save_btn(self) -> None:
         """还原「更新配置」按钮文字与样式（回到 .ui 全局 QSS）。"""
+        if self._closing:  # 窗口已关闭：控件已销毁，跳过还原
+            return
         self.btn_save_config.setText("💾 更新配置")
         self.btn_save_config.setStyleSheet("")

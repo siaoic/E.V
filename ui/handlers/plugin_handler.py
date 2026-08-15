@@ -6,6 +6,9 @@ import os
 from PySide6.QtCore import QProcess
 
 from src.utils import config
+from plugins.manager import (
+    load_enabled_plugins, save_enabled_plugins, scan_plugin_dirs,
+)
 from ui.utils import env_helpers
 
 
@@ -35,16 +38,6 @@ class PluginHandler:
             add(tid, name, "本地", enabled, checkable, status, desc)
 
         # ---- 本地 Function Call 工具 ----
-        if cfg.TOOL_WEB_SEARCH_ENABLED:
-            if cfg.TAVILY_API_KEY:
-                add_local("TOOL_WEB_SEARCH_ENABLED", "web_search", True, True,
-                    "✅ 已启用", "联网搜索（Tavily）")
-            else:
-                add_local("TOOL_WEB_SEARCH_ENABLED", "web_search", True, True,
-                    "⚠️ 未配置 key", "需在 .env 设置 TAVILY_API_KEY")
-        else:
-            add_local("TOOL_WEB_SEARCH_ENABLED", "web_search", False, True,
-                "⭕ 已关闭", "联网搜索（Tavily）")
         if cfg.TOOL_GET_CURRENT_TIME_ENABLED:
             add_local("TOOL_GET_CURRENT_TIME_ENABLED", "get_current_time",
                 True, True, "✅ 已启用", "获取当前时间（无外部依赖）")
@@ -117,9 +110,15 @@ class PluginHandler:
         else:
             add("service:mindcraft", "Mindcraft", "外部", False, False,
                 "⚠️ 未安装", "未找到 main.js，请先 git clone + npm install")
-        # neuro-sdk：Neuro-sama 游戏接入协议 + SDK，无可托管进程 → 信息卡片
-        add("service:neuro_sdk", "Neuro SDK", "外部", False, False,
-            "ℹ️ 参考", "Neuro-sama 游戏接入协议+SDK（文档，无独立服务）")
+
+        # ---- Python 插件（plugins/ 目录，enabled_plugins.json 控制，独立于工具总开关）----
+        for p in self._scan_plugins():
+            if p["enabled"]:
+                add(f"plugin:{p['rel']}", f"插件：{p['display']}", "插件", True, True,
+                    "✅ 已启用", p["desc"])
+            else:
+                add(f"plugin:{p['rel']}", f"插件：{p['display']}", "插件", False, True,
+                    "⭕ 已关闭", p["desc"])
         return rows
 
     def _on_plugin_toggle(self, idx: int, checked: bool) -> None:
@@ -150,6 +149,15 @@ class PluginHandler:
                         "MCP 服务器重命名失败（同名冲突或配置文件不可写）")
                 self._log(f"[控制中心] MCP 服务器已{'启用' if checked else '禁用'}："
                           f"{key[:-len('_disabled')] if key.endswith('_disabled') else key}\n")
+            elif tid.startswith("plugin:"):
+                # Python 插件：写 enabled_plugins.json + 热通知主程序同步
+                rel = tid[len("plugin:"):]
+                if not self._toggle_plugin_enabled(rel, checked):
+                    raise OSError("enabled_plugins.json 写入失败")
+                self._log(f"[控制中心] 插件已{'启用' if checked else '禁用'}：{rel}\n")
+                self._fill_plugin_cards()
+                self._notify_main_plugins()
+                return
             else:
                 env_helpers._update_env(tid, "true" if checked else "false")
                 self._log(f"[控制中心] 插件开关已保存：{tid}="
@@ -259,3 +267,58 @@ class PluginHandler:
                     if os.path.isfile(os.path.join(d, entry, "SKILL.md")):
                         total += 1
         return total
+
+    # ---- Python 插件分区（plugins/ 目录）----
+
+    def _plugins_root(self) -> str:
+        """插件目录：plugins（插件本体与框架同处）。"""
+        return os.path.join(self.cfg.PROJECT_ROOT, "plugins")
+
+    def _scan_plugins(self) -> list:
+        """扫描 plugins/ 下带 metadata.json 的插件目录。
+
+        返回 [{rel, display, desc, enabled}]，供插件页卡片展示。
+        """
+        rows = []
+        enabled = load_enabled_plugins(self._plugins_root())
+        for rel in sorted(scan_plugin_dirs(self._plugins_root())):
+            meta_path = os.path.join(self._plugins_root(), rel, "metadata.json")
+            try:
+                with open(meta_path, "r", encoding="utf-8") as f:
+                    meta = json.load(f)
+            except (OSError, ValueError):
+                continue
+            rows.append({
+                "rel": rel,
+                "display": meta.get("displayName") or meta.get("name") or rel,
+                "desc": meta.get("description") or "",
+                "enabled": rel in enabled,
+            })
+        return rows
+
+    def _toggle_plugin_enabled(self, rel: str, enabled: bool) -> bool:
+        """在 enabled_plugins.json 中启用/禁用插件（幂等），返回是否写入成功。"""
+        plugins = load_enabled_plugins(self._plugins_root())
+        if enabled:
+            if rel in plugins:
+                return True
+            plugins.add(rel)
+        else:
+            if rel not in plugins:
+                return True
+            plugins.remove(rel)
+        try:
+            save_enabled_plugins(self._plugins_root(), plugins)
+        except OSError:
+            return False
+        return True
+
+    def _notify_main_plugins(self) -> None:
+        """主程序运行中 → 发 !plugins sync 命令热加载/卸载插件。"""
+        running = (self.proc is not None
+                   and self.proc.state() == QProcess.ProcessState.Running)
+        if running:
+            self.proc.write(b"!plugins sync\n")
+            self._log("[控制中心] 已通知主程序热同步插件\n")
+        else:
+            self._log("[控制中心] 主程序未运行，插件将在下次启动生效\n")

@@ -1,0 +1,7 @@
+{
+    "name": "gemini",
+
+    "model": "gemini-2.5-flash",
+
+    "cooldown": 5000
+}

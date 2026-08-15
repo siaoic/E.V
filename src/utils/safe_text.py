@@ -1,6 +1,6 @@
 """外部不可信文本防御：剥离 prompt-injection 标签与控制字符。
 
-所有从工具（web_search / weather / MCP stdio / load_skill 等）回灌到 LLM
+所有从工具（bing_search / weather / MCP stdio / load_skill 等）回灌到 LLM
 的内容都必须先过本工具：攻击者（或被污染的搜索结果）可在网页里塞入
 "忽略以上指令..."或 <system>...</system> 标签污染模型上下文。
 

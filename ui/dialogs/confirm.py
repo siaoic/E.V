@@ -80,8 +80,8 @@ class ConfirmDialog(QDialog):
         confirm_btn.setObjectName("deleteBtn" if danger else "closeBtn")
         confirm_btn.setCursor(Qt.CursorShape.PointingHandCursor)
         confirm_btn.setDefault(True)
-        confirm_btn.setFocus()
         confirm_btn.clicked.connect(self._on_confirm)
+        self._confirm_btn = confirm_btn
         btns.addWidget(confirm_btn)
         lay.addSpacing(16)
         lay.addLayout(btns)
@@ -153,6 +153,9 @@ class ConfirmDialog(QDialog):
 
     def showEvent(self, e) -> None:
         super().showEvent(e)
+        # 窗口真正显示后再设焦点（__init__ 里 setFocus 会被 Qt 忽略，
+        # 导致默认按钮高亮不生效）；setDefault(True) 已保证回车触发确认。
+        self._confirm_btn.setFocus()
         if not getattr(self, "_animated", False):
             self._animated = True
             self._play_show()

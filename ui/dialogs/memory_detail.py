@@ -9,8 +9,8 @@ from PySide6.QtWidgets import (
     QMessageBox, QPlainTextEdit, QPushButton, QVBoxLayout, QWidget,
 )
 
-from src.memory import memory
-from src.memory.memory_graph import _display_user
+from tools.memory import memory
+from tools.memory.memory_graph import _display_user
 from ui.dialogs.confirm import ConfirmDialog
 from ui.utils.constants import (
     _MEMORY_LAYER_COLORS, _MEMORY_LAYER_NAMES,
@@ -76,7 +76,7 @@ class MemoryDetailDialog(QDialog):
       - 阴影 blur 24 / 偏移 (0, 6) / 黑色 24% 透明度
     """
 
-    # 记忆层 → 标签色（与 src/memory/memory_graph.py _LAYER_STYLE 同义）
+    # 记忆层 → 标签色（与 tools/memory/memory_graph.py _LAYER_STYLE 同义）
     _LAYER_COLORS = _MEMORY_LAYER_COLORS
     _LAYER_NAMES = _MEMORY_LAYER_NAMES
 

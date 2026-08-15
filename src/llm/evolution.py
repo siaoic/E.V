@@ -412,7 +412,7 @@ _TOPIC_CATEGORY = "learned"
 
 def _format_turns(turns: list[dict]) -> str:
     """把对话轮次格式化为复盘素材文本（区分弹幕/主播/AI 三方角色）。"""
-    from src.memory import memory
+    from tools.memory import memory
     return memory.format_turns_text(turns)
 
 
@@ -640,7 +640,7 @@ class EvolutionEngine:
         # 追加技能使用统计：让 LLM 修补/清理决策有真实使用数据支撑
         # （对标 hermes 的 skill usage counters，仅作参考不作硬性依据）
         try:
-            from src.llm.tools.skills import get_skill_manager
+            from plugins.tools.skills import get_skill_manager
             usage = get_skill_manager().usage_section()
             if usage:
                 user_content += "\n\n[SKILL USAGE STATS]\n" + usage
@@ -818,7 +818,7 @@ class EvolutionEngine:
         new_body = (patch.get("patch") or "").strip()
         if not name or not new_body:
             return
-        from src.llm.tools.skills import get_skill_manager
+        from plugins.tools.skills import get_skill_manager
         skill = get_skill_manager().get(name)
         if skill is None:
             console.warn(f"[进化] 技能修补失败：技能 {name!r} 不存在")
@@ -872,7 +872,7 @@ class EvolutionEngine:
         被合并/归档技能目录移出扫描路径后，watchdog 重扫自动从注册表移除。
         技能太少或新技能未满 _PRUNE_MIN_AGE 时跳过，防止误清理。
         """
-        from src.llm.tools.skills import get_skill_manager
+        from plugins.tools.skills import get_skill_manager
         manager = get_skill_manager()
         now = time.time()
         candidates = [
@@ -1099,7 +1099,7 @@ class EvolutionEngine:
     async def _save_lesson(self, lesson: str) -> None:
         """把复盘出的经验教训写入记忆库（后续检索可带出）。"""
         try:
-            from src.memory import memory
+            from tools.memory import memory
             await memory.get_manager().commit_recall_files([{
                 "name": "进化经验",
                 "description": "进化/经验教训",
@@ -1170,7 +1170,7 @@ class EvolutionEngine:
         画像文件由 llm_brain 每轮按关键词召回注入系统提示（对标 hermes 的
         USER.md/MEMORY.md），与 memU 向量记忆互为补充。
         """
-        from src.memory import memory
+        from tools.memory import memory
         items = _load_profile()
         existing = {it.get("fact", "").strip() for it in items}
         added = 0

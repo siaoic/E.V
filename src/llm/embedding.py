@@ -23,7 +23,7 @@ from collections import OrderedDict
 from typing import Any
 
 from src.utils import config, console
-from src.memory.memory import _ensure_memu_path
+from tools.memory.memory import _ensure_memu_path
 
 # memU 引擎路径注入（仅动 sys.path，memU 本体由 _build_client 惰性导入，
 # 避免缺 httpx/openai 的环境在模块导入期就崩溃）

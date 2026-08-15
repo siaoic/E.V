@@ -1,7 +1,7 @@
 """Mindcraft 双向桥：socket.io 客户端连接 MindServer（对齐 live-2d 重构版）。
 
 架构（live-2d MindServer 重构版）：
-- Node 引擎（tools/mindcraft，由控制中心插件页启停）持有 MindServer + MC bot；
+- Node 引擎（plugins/mindcraft，由控制中心插件页启停）持有 MindServer + MC bot；
 - 本桥作为 socket.io 客户端连入 MindServer，实现双向对话：
   * 用户输入  → send-message 转发给指定 agent（bot 在游戏内说话/行动）；
   * bot 输出  → bot-output 事件回调 → 主播 TTS 朗读；

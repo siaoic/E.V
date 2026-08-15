@@ -34,11 +34,11 @@ env/
 
 # ================= 大文件与安装包（torch whl、memU 源码压缩包） =================
 *.whl
-src/memory/memU-main.zip
+tools/memory/memU-main.zip
 
 # ================= TTS 本地模型（体积巨大，不入库，需自行下载/拷贝） =================
-# 注意：实际模型目录在 gsv_tts/API/models 下（旧条目 gsv_tts/API/models/ 已失效）
-gsv_tts/API/models/
+# 注意：实际模型目录在 tools/gsv_tts/API/models 下（旧条目 gsv_tts/API/models/ 已失效）
+tools/gsv_tts/API/models/
 
 # ================= 临时 TTS 音频（GPT-SoVITS 为 wav，edge 为 mp3） =================
 vtuber_tts_*
@@ -49,7 +49,24 @@ vendor_pet/
 # ================= PyInstaller 桌面端打包产物 =================
 build/
 dist/
-ControlCenter.spec
+E.V.spec
+
+# ================= 编译产物（根目录 exe） =================
+/ControlCenter.exe
+/E.V.exe
+
+# ================= npm 依赖与捆绑运行时（mindcraft 插件，大体积不入库） =================
+node_modules/
+plugins/mindcraft/node/
+
+# ================= mindcraft 本地密钥 / 运行状态（敏感或可再生成） =================
+plugins/mindcraft/keys.json
+plugins/mindcraft/.claude/
+plugins/mindcraft/bots/*/memory.json
+plugins/mindcraft/bots/*/last_profile.json
+
+# ================= 本地日志转储 =================
+/新建 文本文档.txt
 
 # ================= 本地调试 / 研究垃圾（不入库） =================
 # 临时抓取/研究资料
@@ -70,13 +87,14 @@ docs/references/
 # ================= 大体积 Live2D 模型（保留本地不入库，需要时 git add -f 强制提交） =================
 live2d/【免费版】悠小喵/
 live2d/阿芙洛狄忒模型文件/
+live2d/yumi_vts/
 
-# ================= memU 源码库（仅保留 src/memu 运行包 + LICENSE.txt + AGENTS.md） =================
+# ================= memU 源码库（仅保留 tools/memu 运行包 + LICENSE.txt + AGENTS.md） =================
 # 其余为库本身的开发期文件，防止重新解压/拷贝时再次误提交
-src/memory/memu/*
-!src/memory/memu/src/
-!src/memory/memu/LICENSE.txt
-!src/memory/memu/AGENTS.md
+tools/memory/memu/*
+!tools/memory/memu/src/
+!tools/memory/memu/LICENSE.txt
+!tools/memory/memu/AGENTS.md
 
 # ================= 通用 =================
 .DS_Store
@@ -87,7 +105,3 @@ src/memory/memu/*
 # ================= Playwright MCP =================
 # AI 浏览器操作的下载/截图/文件保存目录
 browser_files/
-
-# ================= MCP 本地 node 依赖（npm install --prefix tools/mcp 安装） =================
-# package-lock.json 保留用于复现安装，node_modules 体积大不入库
-tools/mcp/node_modules/

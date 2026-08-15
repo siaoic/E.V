@@ -1,0 +1,18 @@
+{
+    "name": "NeuroSdk.Examples",
+    "rootNamespace": "NeuroSdk",
+    "references": [
+        "GUID:2fea756a1bd543946a401b107e3a5e95"
+    ],
+    "includePlatforms": [],
+    "excludePlatforms": [],
+    "allowUnsafeCode": false,
+    "overrideReferences": false,
+    "precompiledReferences": [],
+    "autoReferenced": false,
+    "defineConstraints": [
+        "UNITY_EDITOR"
+    ],
+    "versionDefines": [],
+    "noEngineReferences": false
+}

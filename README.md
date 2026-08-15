@@ -21,9 +21,9 @@
 
 ## Features🪄
 
-- **大脑**：基于智谱 AI（zhipuai SDK）的流式对话与工具调用，模型路由 + Prompt 自演化（`evolution.py`）
+- **大脑**：基于智谱 AI（OpenAI 兼容 SDK）的流式对话与工具调用，模型路由 + Prompt 自演化（`evolution.py`）
 - **耳朵**：B 站弹幕多房间监听（`blivedm`）+ 本地语音识别（`src/asr/stt.py`），全场景统一抽象为 `InputEvent`
-- **嘴巴**：内置 GPT-SoVITS 本地推理（`gsv_tts/`）+ 流式字幕推送（SSE，`subtitle_server.py`），字幕默认显示 2.5s 后淡出
+- **嘴巴**：内置 GPT-SoVITS 本地推理（`tools/gsv_tts/`）+ 流式字幕推送（SSE，`subtitle_server.py`），字幕默认显示 2.5s 后淡出
 - **身体**：VTube Studio HTTP 插件接口（`src/vts/`），含表情切换、口型同步、动作播放、ARKit 面部驱动
 - **形态**：双形态运行——直播台（控制中心 `ui/control_center.py`）+ 桌宠（`src/pet/pet_app.py`，基于 PySide6 + live2d-py）
 - **记忆**：四层记忆架构——短期上下文（recent_turns）、长期向量记忆（memU）、人格画像（evolution_profile.json）、自演化提示词档案
@@ -50,7 +50,7 @@ E.V 通过 `src/core/output_lock.py` 实现**全局输出互斥锁（`_OUTPUT_LO
 | 层级 | 存储 | 用途 | 注入时机 |
 |---|---|---|---|
 | 短期上下文 | `recent_turns`（内存） | 最近 N 轮对话 | 每轮必注入 |
-| 长期向量记忆 | memU（`src/memory/memu/`） | 跨 Session 语义检索 | 按当前 query 检索 Top-K |
+| 长期向量记忆 | memU（`tools/memory/memu/`） | 跨 Session 语义检索 | 按当前 query 检索 Top-K |
 | 人格画像 | `data/evolution_profile.json` | 主人偏好、关系状态 | 复盘后写入，每轮轻量 2-gram 关键词召回 |
 | 自演化提示词 | `evolution.py` 产出 | 高质量对话范式沉淀 | 注入 system prompt |
 
@@ -77,7 +77,7 @@ pip install -e .
 
 ### 2. 准备 GPT-SoVITS 模型
 
-将训练好的 GPT-SoVITS 模型放入 `gsv_tts/GPT_SoVITS/参考模型/` 目录，并在 `configs/` 中配置模型路径。E.V 默认会按 `tts.engine` 的优先级选择本地 GSV 推理。
+将训练好的 GPT-SoVITS 模型放入 `tools/gsv_tts/GPT_SoVITS/参考模型/` 目录，并在 `configs/` 中配置模型路径。E.V 默认会按 `tts.engine` 的优先级选择本地 GSV 推理。
 
 ### 3. 启动
 

@@ -10,6 +10,8 @@ from __future__ import annotations
 
 from typing import Dict, List, Optional
 
+from src.utils import console
+
 
 class MCPToolRegistry:
     """MCP 工具注册表：注册 / 查找 / 格式转换。"""
@@ -35,7 +37,7 @@ class MCPToolRegistry:
                 "server": server_name,
                 "type": transport_type,   # 'mcp'（stdio）或 'mcp_http'
             })
-            print(f"  ✅ 注册 {transport_type} 工具: {tool.get('name')}")
+            console.ok(f"✅ 注册 {transport_type} 工具: {tool.get('name')}")
 
     # ------------------------------------------------------------------
     # 查找

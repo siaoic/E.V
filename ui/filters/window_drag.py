@@ -3,7 +3,7 @@
 from PySide6.QtCore import QEvent, QObject, Qt
 from PySide6.QtWidgets import QApplication, QWidget
 
-from src.memory.memory_graph import MemoryGraphWidget
+from tools.memory.memory_graph import MemoryGraphWidget
 
 
 class _WindowDragFilter(QObject):

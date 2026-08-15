@@ -22,12 +22,13 @@ from typing import Callable, Dict, List, Optional
 import websockets
 
 from src.utils import config, console
+from src.adapter.avatar import BaseAvatarAdapter
 
 # 口型参数缺失时只提示一次（inject_mouth 每帧调用，避免刷屏）
 _mouth_param_warned: bool = False
 
 
-class VTSController:
+class VTSController(BaseAvatarAdapter):
     """VTubeStudio WebSocket 客户端封装。"""
 
     def __init__(self) -> None:

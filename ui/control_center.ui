@@ -2073,7 +2073,7 @@ QPlainTextEdit:focus {
                   <item row="0" column="0">
                    <widget class="QCheckBox" name="cb_mcp">
                     <property name="text">
-                     <string>启用工具</string>
+                     <string>启用插件</string>
                     </property>
                    </widget>
                   </item>
@@ -2578,7 +2578,7 @@ QPlainTextEdit:focus {
 &lt;p&gt;因此E.V内置完整live2d目录与UI交互层，窗口可悬浮桌面，角色会随对话切换表情、动作，做成&lt;b&gt;桌面宠物+虚拟主播双形态&lt;/b&gt;，既能像Neuro一样直播互动，也能常驻电脑桌面贴身陪伴。&lt;/p&gt;
 &lt;h5&gt;3. 多场景融合的全能交互能力&lt;/h5&gt;
 &lt;p&gt;Neuro不止聊天，还能独立游玩osu!、Minecraft、杀戮尖塔，看懂屏幕画面、reaction视频，打通聊天、游戏、视听娱乐全场景。&lt;/p&gt;
-&lt;p&gt;E.V参考这套多模态思路，预留屏幕视觉读取、游戏联动接口，同时拆分configs、scripts、src分层架构，支持拓展更多功能模块，不局限单一聊天场景，实现工作陪伴、游戏陪玩、日常闲聊、睡前倾诉多种用途。&lt;/p&gt;
+&lt;p&gt;E.V参考这套多模态思路，预留屏幕视觉读取、游戏联动接口，同时拆分configs、src、plugins、tools分层架构，支持拓展更多功能模块，不局限单一聊天场景，实现工作陪伴、游戏陪玩、日常闲聊、睡前倾诉多种用途。&lt;/p&gt;
 &lt;h4&gt;三、E.V对Neuro-sama的补足与自我革新（项目差异化思考）&lt;/h4&gt;
 &lt;p&gt;Neuro-sama的局限，正是E.V的创作突破口，也是我持续迭代开发的核心动力：&lt;/p&gt;
 &lt;ol&gt;&lt;li&gt;&lt;b&gt;私有化本地部署，24小时专属陪伴&lt;/b&gt;&lt;p&gt;Neuro依赖平台直播，下播即消失；E.V完全本地运行，启动main.py或run.bat即可常驻桌面，不受直播时段限制，随时能唤醒对话，真正属于使用者个人。&lt;/p&gt;&lt;/li&gt;

@@ -1,4 +1,4 @@
-"""TTS 引擎：连接外部 GPT-SoVITS HTTP 服务端（gsv_tts/API/fastapi_server_example.py）。
+"""TTS 引擎：连接外部 GPT-SoVITS HTTP 服务端（tools/gsv_tts/API/fastapi_server_example.py）。
 
 主程序不再进程内加载模型，改由 tts.bat 启动的外部服务负责合成，本引擎作为
 客户端使用：
@@ -25,6 +25,7 @@ import soundfile as sf
 
 from src.utils import console
 from src.tts.player import TTSPlayer
+from src.adapter.tts import BaseTTSAdapter
 
 # 多参考音频分隔符：GPTSOVITS_REF_AUDIOS 可配置多个路径，以 | 连接
 # （控制中心支持拖拽多个音频文件，落地即 | 连接写入 .env）
@@ -80,10 +81,10 @@ def _cleanup_output() -> Tuple[int, int]:
     return (0, 0)
 
 
-class TTSEngine:
+class TTSEngine(BaseTTSAdapter):
     """GPT-SoVITS HTTP 服务端客户端引擎（合成在独立进程，本引擎只播放）。
 
-    服务端为 gsv_tts/API/fastapi_server_example.py（tts.bat 启动）：
+    服务端为 tools/gsv_tts/API/fastapi_server_example.py（tts.bat 启动）：
     - /tts/batch 批量合成，返回 output 目录下的文件名列表；
     - /audio/{filename} 下载 wav 字节流，本进程解码后无缝播放。
     未连接服务时 start() 返回 False，speak 等接口静默降级（不报错）。

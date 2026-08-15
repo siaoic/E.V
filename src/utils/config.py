@@ -176,6 +176,10 @@ def _default_pet_model() -> str:
     return ""
 
 
+# yaml 覆盖层不处理的字段（派生路径 / 配置文件自身路径）
+_SKIP_YAML_FIELDS = {"PROJECT_ROOT", "TOKEN_FILE", "CONFIG_YAML_PATH"}
+
+
 @dataclass
 class Config:
     # ===== LLM（OpenAI 兼容接口） =====
@@ -215,7 +219,7 @@ class Config:
     GPTSOVITS_PROMPT_TEXT: str = os.getenv(
         "GPTSOVITS_PROMPT_TEXT", "")
     GPTSOVITS_TIMEOUT: float = float(os.getenv("GPTSOVITS_TIMEOUT", "120"))
-    # 本地 TTS 模型目录（GSV-TTS-Lite 的 models_dir；留空 = gsv_tts/API/models）
+    # 本地 TTS 模型目录（GSV-TTS-Lite 的 models_dir；留空 = tools/gsv_tts/API/models）
     GPTSOVITS_MODELS_DIR: str = os.getenv("GPTSOVITS_MODELS_DIR", "")
     # 外部 TTS 合成服务地址（tts.bat 启动的 fastapi_server_example.py，
     # 监听 0.0.0.0:8000；留空 = http://127.0.0.1:8000）
@@ -252,14 +256,12 @@ class Config:
     SYSTEM_PROMPT: str = _load_system_prompt()
 
     # ===== Function Calling 工具 =====
-    # 搜索 / 天气 key 留空时对应工具自动隐藏（对标 live-2d(2) web-search 插件）
-    TAVILY_API_KEY: str = os.getenv("TAVILY_API_KEY") or ""
+    # 联网搜索走 bing-cn-mcp（MCP 服务器，见 src/mcp/mcp_config.json），无需 key
     OPENWEATHERMAP_API_KEY: str = os.getenv("OPENWEATHERMAP_API_KEY") or ""
     # 工具总开关：关闭后本地工具与 MCP 全部停用（纯对话模式）
     TOOLS_ENABLED: bool = _get_bool("TOOLS_ENABLED", True)
     # 各工具开关供控制中心「工具屋」勾选（写 .env 后发 !tools 热生效）；
-    # web_search/get_weather 还需 API Key，没 key 时开关打开也自动隐藏。
-    TOOL_WEB_SEARCH_ENABLED: bool = _get_bool("TOOL_WEB_SEARCH_ENABLED", True)
+    # get_weather 还需 API Key，没 key 时开关打开也自动隐藏。
     TOOL_GET_CURRENT_TIME_ENABLED: bool = _get_bool(
         "TOOL_GET_CURRENT_TIME_ENABLED", True)
     TOOL_GET_WEATHER_ENABLED: bool = _get_bool(
@@ -315,11 +317,11 @@ class Config:
     )
 
     # ===== 外部服务（插件页进程托管：mindcraft） =====
-    # mindcraft = LLM 驱动的 Minecraft bot（tools/mindcraft，Node + Mineflayer）。
+    # mindcraft = LLM 驱动的 Minecraft bot（plugins/mindcraft，Node + Mineflayer）。
     # 复用本项目 LLM（LLM_BASE_URL / LLM_MODEL / LLM_API_KEY）作为 bot 大脑，
     # 插件页负责进程启停；未 clone / 未 npm install 时卡片提示未安装。
     MINDCRAFT_PATH: str = os.getenv("MINDCRAFT_PATH") or os.path.join(
-        _PROJECT_ROOT, "tools", "mindcraft")
+        _PROJECT_ROOT, "plugins", "mindcraft")
     MINDCRAFT_LLM_BASE_URL: str = os.getenv(
         "MINDCRAFT_LLM_BASE_URL") or os.getenv("LLM_BASE_URL", "")
     MINDCRAFT_LLM_MODEL: str = os.getenv(
@@ -472,6 +474,63 @@ class Config:
     TOKEN_FILE: str = os.path.join(
         _PROJECT_ROOT, "data", "vts_token.json")
 
+    # ===== 配置中心（可选 yaml 覆盖层） =====
+    # configs/config.yaml（或 CONFIG_YAML_PATH 指定）提供分层配置：
+    # 优先级 环境变量 > config.yaml > 默认值；文件不存在时不影响现有行为。
+    CONFIG_YAML_PATH: str = os.getenv("CONFIG_YAML_PATH") or os.path.join(
+        _PROJECT_ROOT, "configs", "config.yaml")
+
+    def __post_init__(self) -> None:
+        """初始化完成后应用 config.yaml 覆盖层（环境变量优先）。"""
+        self._apply_yaml_overrides()
+
+    def _apply_yaml_overrides(self) -> None:
+        """从 config.yaml 读取配置，覆盖「环境变量未设置」的字段。
+
+        优先级：环境变量 > config.yaml > 默认值（与 load_dotenv 语义一致）。
+        纯增量能力：文件不存在 / 解析失败时静默跳过，行为与原来完全一致。
+        """
+        yaml_path = self.CONFIG_YAML_PATH
+        if not os.path.isfile(yaml_path):
+            return
+        try:
+            import yaml
+            with open(yaml_path, "r", encoding="utf-8") as f:
+                data = yaml.safe_load(f) or {}
+        except Exception as e:
+            try:
+                from src.utils import console
+                console.warn(f"[config] 读取 yaml 配置失败，忽略：{e}")
+            except Exception:
+                pass
+            return
+        for key, value in data.items():
+            if value is None or key in _SKIP_YAML_FIELDS:
+                continue
+            if key not in self.__dataclass_fields__:
+                continue
+            # 环境变量优先：已设置就不再被 yaml 覆盖
+            if os.getenv(key) is not None:
+                continue
+            current = getattr(self, key)
+            if isinstance(current, bool):
+                coerced = value if isinstance(value, bool) else (
+                    str(value).strip().lower()
+                    in ("1", "true", "yes", "y", "on"))
+            elif isinstance(current, int):
+                try:
+                    coerced = int(value)
+                except (TypeError, ValueError):
+                    continue
+            elif isinstance(current, float):
+                try:
+                    coerced = float(value)
+                except (TypeError, ValueError):
+                    continue
+            else:
+                coerced = value
+            setattr(self, key, coerced)
+
     def validate(self) -> None:
         """检查必填项；缺失时给出明确提示。"""
         if not self.LLM_API_KEY or self.LLM_API_KEY == "YOUR_API_KEY":
@@ -495,11 +554,10 @@ def reload_tool_runtime() -> None:
     """
     load_dotenv(os.path.join(_PROJECT_ROOT, ".env"), override=True)
     cfg.TOOLS_ENABLED = _get_bool("TOOLS_ENABLED", True)
-    cfg.TAVILY_API_KEY = os.getenv("TAVILY_API_KEY") or ""
     cfg.OPENWEATHERMAP_API_KEY = os.getenv("OPENWEATHERMAP_API_KEY") or ""
     cfg.MCP_ENABLED = _get_bool("MCP_ENABLED", False)
     cfg.MINDCRAFT_PATH = os.getenv("MINDCRAFT_PATH") or os.path.join(
-        _PROJECT_ROOT, "tools", "mindcraft")
+        _PROJECT_ROOT, "plugins", "mindcraft")
     cfg.MINDCRAFT_LLM_BASE_URL = os.getenv(
         "MINDCRAFT_LLM_BASE_URL") or os.getenv("LLM_BASE_URL", "")
     cfg.MINDCRAFT_LLM_MODEL = os.getenv(
@@ -514,7 +572,6 @@ def reload_tool_runtime() -> None:
     cfg.MINDCRAFT_BRIDGE_ENABLED = _get_bool(
         "MINDCRAFT_BRIDGE_ENABLED", False)
     cfg.MINDCRAFT_BOT_PERSONA = os.getenv("MINDCRAFT_BOT_PERSONA") or ""
-    cfg.TOOL_WEB_SEARCH_ENABLED = _get_bool("TOOL_WEB_SEARCH_ENABLED", True)
     cfg.TOOL_GET_CURRENT_TIME_ENABLED = _get_bool(
         "TOOL_GET_CURRENT_TIME_ENABLED", True)
     cfg.TOOL_GET_WEATHER_ENABLED = _get_bool("TOOL_GET_WEATHER_ENABLED", True)
@@ -539,6 +596,8 @@ def reload_tool_runtime() -> None:
     cfg.STT_API_KEY = os.getenv("STT_API_KEY") or ""
     cfg.STT_BASE_URL = os.getenv("STT_BASE_URL") or (
         os.getenv("SILICONFLOW_BASE_URL") or "https://api.siliconflow.cn/v1")
+    # yaml 覆盖层（环境变量未设置的字段回落到 config.yaml，保持一致）
+    cfg._apply_yaml_overrides()
 
 
 def reload_config() -> None:
@@ -603,3 +662,5 @@ def reload_config() -> None:
     cfg.BILI_ROOM_IDS = _get_room_ids()
     cfg.BILI_SESSDATA = os.getenv("BILI_SESSDATA") or ""
     cfg.BILI_SERVER_PORT = int(os.getenv("BILI_SERVER_PORT") or "8766")
+    # yaml 覆盖层（环境变量未设置的字段回落到 config.yaml，保持一致）
+    cfg._apply_yaml_overrides()

@@ -22,7 +22,7 @@ logging.getLogger("httpx").setLevel(logging.WARNING)
 logging.getLogger("httpcore").setLevel(logging.WARNING)
 logging.getLogger("openai").setLevel(logging.WARNING)
 
-from src.memory import memory
+from tools.memory import memory
 from src.llm import stream
 from src.utils.content_filter import ProfanityFilter
 from src.utils.safe_text import sanitize_external
@@ -44,6 +44,10 @@ from src.core.output_lock import (
     get_output_lock, get_output_owner, set_output_owner, set_global_state,
     is_rejecting_input, set_danmaku_pending,
 )
+from plugins import PluginManager, UserInputEvent
+from src.core.bus import EV_ERROR, EV_SESSION_END, EV_USER_INPUT, bus
+from src.core.events.models import ErrorEvent, InputEvent, SessionEndEvent
+from src.core.exceptions import ErrorCode
 
 # 记忆自动整合蒸馏：碎片条数 ≥ 阈值时触发 AI 蒸馏合并（成功后才删除旧碎片），
 # 后台循环检查间隔（秒）。阈值 60 = 约 4 批 × 15 条，正常会话去重后很少触达。
@@ -222,6 +226,7 @@ class Application:
                 if self.proactive is not None:
                     # 用户输入优先：丢弃排队中的主动消息，只保留正在播报的
                     self.proactive.discard_pending()
+                self._input_source = "text"
                 return text
 
             if stt_fut is not None and stt_fut in done:
@@ -237,6 +242,7 @@ class Application:
                     # 用户输入优先：丢弃排队中的主动消息
                     self.proactive.discard_pending()
                 print(f"[语音识别] {text}", flush=True)
+                self._input_source = "voice"
                 return text
 
             if self.proactive is None:
@@ -299,6 +305,10 @@ class Application:
         else:
             shown = text
         console.chat(f"精彩弹幕：{shown}")
+        # 事件总线：观众弹幕进入内核
+        await bus.emit(EV_USER_INPUT, InputEvent(
+            source="barrage", content=shown, sender=username,
+            metadata={"uid": uid, "extra": extra}))
         if self.bili_svc is not None:
             try:
                 self.bili_svc.broadcast({
@@ -327,6 +337,19 @@ class Application:
                 f"请用 stream-chat 技能的直播闲聊风格回复（先回应情绪或接话，"
                 f"一句话说完即可，不要连续追问）。"
             )
+
+        # 插件钩子：onUserInput（source="barrage"，可改写 prompt / 注入背景 / 拦截回复）
+        if self.plugin_manager is not None:
+            event = UserInputEvent(wrapped, "barrage")
+            await self.plugin_manager.run_user_input_hooks(event)
+            if event.prevented:
+                console.dim("[插件] 弹幕回复被插件拦截")
+                # 本条跳过且无人再清「弹幕回复待播报」标记，必须立即清除
+                set_danmaku_pending(False)
+                return
+            wrapped = event.text
+            if event.contexts:
+                self.brain.push_turn_context(event.contexts)
 
         # 主动引擎：有观众说话也算"有人互动"——清 0 一下孤独/无聊
         if self.proactive is not None:
@@ -431,6 +454,9 @@ class Application:
                 raise
             except Exception as e:
                 console.error(f"[弹幕] 回复出错：{e}")
+                await bus.emit(EV_ERROR, ErrorEvent(
+                    code=ErrorCode.INTERNAL_ERROR.value,
+                    code_name="INTERNAL_ERROR", msg=f"[弹幕] 回复出错：{e}"))
 
     def _stop_bili(self):
         """关闭弹幕服务；返回 reply_task cancel 协程或 None。"""
@@ -781,10 +807,49 @@ class Application:
         cleaner.cleanup_temp_files(verbose=True)
         return True
 
+    async def _cmd_plugins(self, cmd: str) -> bool:
+        """!plugins 插件管理：list / sync / reload <name> / enable|disable <相对路径>。"""
+        mgr = self.plugin_manager
+        if mgr is None:
+            console.dim("插件系统未启用")
+            return True
+        parts = cmd.split()
+        sub = parts[1] if len(parts) > 1 else "list"
+        if sub == "list":
+            entries = mgr.get_plugin_list()
+            if not entries:
+                console.dim("当前没有已加载的插件")
+            else:
+                console.header("插件列表")
+                for it in entries:
+                    console.kv(it["name"], f"{it['displayName']} v{it['version']}")
+            return True
+        if sub == "sync":
+            await mgr.sync_enabled_plugins()
+            console.ok("插件启用列表已同步（热加载/卸载完成）")
+            return True
+        if sub == "reload" and len(parts) >= 3:
+            try:
+                await mgr.reload(parts[2])
+            except Exception as e:
+                console.error(f"插件热重载失败（{parts[2]}）：{e}")
+            return True
+        if sub in ("enable", "disable") and len(parts) >= 3:
+            try:
+                result = await mgr.apply_enabled(parts[2], sub == "enable")
+            except OSError as e:
+                console.error(f"插件启停失败：{e}")
+                return True
+            console.ok(result)
+            return True
+        console.dim("用法：!plugins list ｜ !plugins sync ｜ !plugins reload <name> ｜ "
+                    "!plugins enable|disable <相对路径>")
+        return True
+
     async def _cmd_tools(self, cmd: str) -> bool:
         """!tools 工具 / MCP 配置热更新。"""
         from src.utils import config as cfg_mod
-        from src.llm.tools import get_merged_tools
+        from plugins.tools import get_merged_tools
         cfg_mod.reload_tool_runtime()
         if cfg_mod.cfg.MCP_ENABLED and cfg_mod.cfg.TOOLS_ENABLED:
             if self.mcp is not None:
@@ -945,6 +1010,7 @@ class Application:
             Command("/memory", self._handle_memory_command, help="记忆管理：list/del/clear/decay"),
             Command("!model ", self._cmd_model, help="桌宠模式热切换模型"),
             Command("!clean", self._cmd_clean, exact=True, help="清理运行时内存和临时文件"),
+            Command("!plugins", self._cmd_plugins, help="插件管理：list/sync/reload/enable/disable"),
             Command("!tools", self._cmd_tools, exact=True, help="工具 / MCP 配置热更新"),
             Command("!config", self._cmd_reload_config, exact=True, help="统一配置热更新"),
             Command("!stt", self._cmd_stt, exact=True, help="语音识别热启停"),
@@ -1133,7 +1199,7 @@ class Application:
         self.mcp = MCPManager() if (self.cfg.MCP_ENABLED and self.cfg.TOOLS_ENABLED) else None
         if self.mcp is not None:
             await self.mcp.initialize()
-        from src.llm.tools import get_merged_tools
+        from plugins.tools import get_merged_tools
         merged_tools = get_merged_tools(self.mcp)
         if merged_tools:
             names = [t["function"]["name"] for t in merged_tools]
@@ -1142,7 +1208,7 @@ class Application:
             console.dim("无可用工具：AI 将以纯对话模式运行（MCP 未启用且未配置搜索/天气 key）")
 
         # 技能系统
-        from src.llm.tools.skills import get_skill_manager
+        from plugins.tools.skills import get_skill_manager
         skill_mgr = get_skill_manager()
         if skill_mgr.skills:
             names = [s.name for s in skill_mgr.skills]
@@ -1158,6 +1224,7 @@ class Application:
         self.danmaku_picker = None
         self.danmaku_reply_task = None
         self._pending_stdin_fut = None  # 交还复用的 stdin 监听
+        self.plugin_manager = None      # 插件系统（服务就绪后初始化）
         try:
             # vtuber 模式：启动时模型扫描适配
             profile = None
@@ -1224,7 +1291,7 @@ class Application:
                 # 上次运行时 remember/forget 失败队列（drain 期间要等 memory service
                 # 就绪，所以放后台任务里）
                 async def _drain_retry_after_load() -> None:
-                    from src.llm.tools import memory_tools
+                    from plugins.tools import memory_tools
                     # 等几帧让 mm.load() 完成 service 初始化
                     await asyncio.sleep(0.5)
                     try:
@@ -1262,6 +1329,20 @@ class Application:
                     f"是否开口由主模型自主决定）")
             else:
                 console.dim("主动对话未启用（.env 设置 PROACTIVE_ENABLED=true 开启）")
+
+            # 插件系统：加载 plugins/ 下启用的插件（Python 同进程 async 运行时，
+            # 对标 live-2d 插件体系——钩子 / 工具 / 定时器，目录约定见 plugins/README.md）
+            try:
+                from plugins.manager import set_default_manager
+                self.plugin_manager = PluginManager(self)
+                await self.plugin_manager.load_all()
+                await self.plugin_manager.start_all()
+                # 供工具合并（get_merged_tools）与 speak_text 读取
+                self.brain.plugin_manager = self.plugin_manager
+                set_default_manager(self.plugin_manager)
+            except Exception as e:
+                self.plugin_manager = None
+                console.warn(f"[插件] 插件系统初始化失败（不影响运行）：{e}")
 
             # 自我进化：定期自我提示（空闲期主动补复盘，后台循环）
             if self.evolution is not None:
@@ -1352,6 +1433,22 @@ class Application:
                     if await self._dispatch(user_text):
                         show_prompt = False
                         break
+                    # 插件钩子：onUserInput（可注入背景上下文 / 改写消息 / 拦截不发给 AI）
+                    if self.plugin_manager is not None:
+                        event = UserInputEvent(user_text, "text")
+                        await self.plugin_manager.run_user_input_hooks(event)
+                        if event.prevented:
+                            console.dim("[插件] 消息被插件拦截，未发送给 AI")
+                            break
+                        user_text = event.text
+                        if event.contexts:
+                            self.brain.push_turn_context(event.contexts)
+                        if not user_text.strip():
+                            break
+                    # 事件总线：用户输入进入内核（键盘 / 语音识别）
+                    await bus.emit(EV_USER_INPUT, InputEvent(
+                        source=getattr(self, "_input_source", "text") or "text",
+                        content=user_text, sender="user"))
                     # 用户发言：重置主动引擎状态
                     if self.proactive is not None:
                         self.proactive.on_user_message()
@@ -1423,6 +1520,10 @@ class Application:
                         self._pending_stdin_fut = pending
                     except Exception as e:
                         console.error(f"对话流程出错：{e}")
+                        await bus.emit(EV_ERROR, ErrorEvent(
+                            code=ErrorCode.INTERNAL_ERROR.value,
+                            code_name="INTERNAL_ERROR",
+                            msg=f"对话流程出错：{e}"))
                         interrupted, buzz, self._pending_stdin_fut = False, "", None
                         # 对话未正常结束：兜底复位状态，避免卡在忙碌态抑制 agent
                         set_global_state(STATE_IDLE)
@@ -1445,8 +1546,16 @@ class Application:
                     await asyncio.wait_for(self._archive_session(), timeout=20)
                 except Exception as e:
                     console.warn(f"会话摘要/蒸馏失败（不影响退出）：{e}")
+            # 事件总线：会话结束（退出归档完成）
+            await bus.emit(EV_SESSION_END, SessionEndEvent(
+                turns=len(self.mm.recent_turns) if self.mm is not None else 0))
 
-            # 清理：停弹幕 → 停字幕 → 排空 TTS → 关 TTS → 停面捕 → 关 VTS
+            # 清理：停插件 → 停弹幕 → 停字幕 → 排空 TTS → 关 TTS → 停面捕 → 关 VTS
+            if self.plugin_manager is not None:
+                try:
+                    await self.plugin_manager.stop_all()
+                except Exception:
+                    pass
             cancel = self._stop_bili()
             self.danmaku_picker, self.bili_svc, self.danmaku_reply_task = None, None, None
             if cancel is not None:
