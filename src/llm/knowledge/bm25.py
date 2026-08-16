@@ -9,12 +9,24 @@ from __future__ import annotations
 import math
 import re
 
-_TOKEN_RE = re.compile(r"[a-zA-Z0-9_]+|[\u4e00-\u9fff]")
+_TOKEN_RE = re.compile(r"[a-zA-Z0-9_]+|[\u4e00-\u9fff]+")
 
 
 def _tokenize(text: str) -> list:
-    """粗粒度分词：中文按单字、英文按单词（BM25 打分 + 命中排序够用）。"""
-    return _TOKEN_RE.findall(text.lower())
+    """粗粒度分词：中文按滑动双字（bigram），英文按单词。
+
+    单字 BM25 对短中文查询过宽（实测「今天天气怎么样」命中 74/118 段落，
+    普通消息被误注入背景资料）；bigram 显著提升相关/无关分离度
+    （实测 9/118），配合 recall 的分数门槛，保证只有真正相关的剧情问句
+    才会带上知识库背景。
+    """
+    tokens = []
+    for m in _TOKEN_RE.findall(text.lower()):
+        if m[0].isascii():
+            tokens.append(m)
+        else:
+            tokens.extend(m[i:i + 2] for i in range(len(m) - 1))
+    return tokens
 
 
 class BM25:

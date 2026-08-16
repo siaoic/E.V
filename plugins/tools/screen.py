@@ -55,7 +55,7 @@ async def _look_at_screen() -> str:
     except Exception as e:
         return f"错误：截屏失败：{e}"
 
-    # 图片直接交给 agent 处理（视觉模型调用统一在 agent.py 实现）
-    from src.llm.agent import ButlerAgent
+    # 图片直接交给管家处理（视觉模型调用统一在 butler_agent.py 实现）
+    from src.llm.butler_agent import ButlerAgent
     text = await ButlerAgent().describe_image(img_b64, prompt=_VISION_PROMPT)
     return text or "错误：视觉模型未返回描述。"

@@ -318,7 +318,6 @@ class EvolutionConfig:
 @dataclass
 class VoiceConfig:
     """语音链路：GPT-SoVITS TTS + STT（本地/云端）+ 口型参数。"""
-    GPTSOVITS_URL: str = "http://127.0.0.1:9880"
     GPTSOVITS_REF_AUDIO: str = ""
     GPTSOVITS_REF_AUDIOS: str = ""
     GPTSOVITS_PROMPT_TEXT: str = ""
@@ -508,7 +507,6 @@ _EVOLUTION_LOADERS = {
 }
 
 _VOICE_LOADERS = {
-    "GPTSOVITS_URL": lambda: os.getenv("GPTSOVITS_URL", "http://127.0.0.1:9880"),
     "GPTSOVITS_REF_AUDIO": lambda: os.getenv("GPTSOVITS_REF_AUDIO", ""),
     "GPTSOVITS_REF_AUDIOS": lambda: os.getenv("GPTSOVITS_REF_AUDIOS", ""),
     "GPTSOVITS_PROMPT_TEXT": lambda: os.getenv("GPTSOVITS_PROMPT_TEXT", ""),
@@ -991,10 +989,6 @@ class Config:
     @property
     def EVOLUTION_PROMPT_EVO_INTERVAL(self) -> int:
         return self.evolution.EVOLUTION_PROMPT_EVO_INTERVAL
-
-    @property
-    def GPTSOVITS_URL(self) -> str:
-        return self.voice.GPTSOVITS_URL
 
     @property
     def GPTSOVITS_REF_AUDIO(self) -> str:

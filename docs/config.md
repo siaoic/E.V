@@ -35,7 +35,6 @@
 
 | 变量 | 默认值 | 说明 |
 |---|---|---|
-| `GPTSOVITS_URL` | `http://127.0.0.1:9880` | 本地合成服务地址（旧配置，当前主要用 `TTS_SERVER_URL`） |
 | `TTS_SERVER_URL` | `http://127.0.0.1:8000` | **外部 TTS 合成服务**（`tts.bat` 启动的 fastapi_server_example.py） |
 | `GPTSOVITS_REF_AUDIO` | 空 | 主参考音频（音色 + 发音参考）；**为空则语音合成关闭** |
 | `GPTSOVITS_REF_AUDIOS` | 空 | 辅助参考音频，多条 `\|` 分隔（服务端仅支持单说话人，当前忽略） |

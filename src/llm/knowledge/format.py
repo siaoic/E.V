@@ -30,7 +30,8 @@ def format_for_injection(
     max_total_chars: int = 1200,
     fail_closed: bool = False,
 ) -> str:
-    """按 level 拼接检索结果：level>=1 注入 curated+facts，level>=2 追加 lore。
+    """按 level 拼接检索结果：level>=1 注入 curated+facts+lore（level 仅
+    区分「是否知识相关」，各层无匹配内容时自动跳过）。
 
     返回空串表示无需注入（闸门误判或无匹配内容时的安全回退）。
     fail_closed=True：无匹配内容时返回防编造约束块而非空串，阻止模型
@@ -71,8 +72,10 @@ def format_for_injection(
         if section:
             sections.append(section)
 
-    # L0c/L1：lore（仅剧情意图等全层注入时带上）
-    if level >= 2 and budget > 0:
+    # L0c/L1：lore（知识相关即带上背景资料；BM25 无命中时返回空，不会
+    # 白白追加 Token。level>=1：第三人称剧情问句如「流萤在匹诺康尼经历
+    # 了什么」也判 level 1，须能注入 lore 才真正生效）
+    if budget > 0:
         lore = recalled.get("lore") or []
         if lore:
             block = "\n\n".join(l.strip() for l in lore if l.strip())

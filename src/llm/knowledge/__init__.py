@@ -58,6 +58,9 @@ class KnowledgeService:
             from src.llm.embedding import SiliconFlowEmbeddingProvider
             self._recall = KnowledgeRecall(
                 kb, embedding=SiliconFlowEmbeddingProvider())
+            # 后台预热 lore 语义矩阵：构建早于首次语义补位查询，
+            # 避免在对话路径上同步向量化（本地 118 段耗时数秒）
+            self._recall.preheat_lore()
 
     def section(self, user_text: str, *, max_total_chars: int = 1200) -> str:
         """按用户消息返回应注入的知识段；无需注入或不可用时返回空串。"""
@@ -67,7 +70,7 @@ class KnowledgeService:
         if not self._gate.should_inject(user_text):
             return ""
         level = self._gate.level(user_text)
-        recalled = self._recall.recall(user_text)
+        recalled = self._recall.recall(user_text, level=level)
         return format_for_injection(
             recalled,
             level=level,

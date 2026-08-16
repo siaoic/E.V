@@ -32,7 +32,7 @@ class _SummaryMixin:
     async def _summarize_dropped(self, turns: list[dict]) -> str:
         """后台任务：把被裁剪的早期对话压缩成中文摘要，并写入记忆跨会话继承。"""
         try:
-            from src.llm.agent import ButlerAgent, _pick_owner
+            from src.llm.butler_agent import ButlerAgent, _pick_owner
             butler = ButlerAgent()
             text = await asyncio.wait_for(
                 butler.summarize_session(turns), timeout=30.0

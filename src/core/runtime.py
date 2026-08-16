@@ -17,7 +17,7 @@ from src.utils.constants import (
 )
 from tools.memory import memory
 from src.llm import stream
-from src.llm.agent import ButlerAgent
+from src.llm.butler_agent import ButlerAgent
 from src.llm.evolution import EvolutionEngine
 from src.mcp.manager import MCPManager
 from src.llm.proactive import ProactiveEngine

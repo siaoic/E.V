@@ -17,7 +17,6 @@
 from __future__ import annotations
 
 import asyncio
-import concurrent.futures
 import threading
 from collections import OrderedDict
 from typing import Any
@@ -57,14 +56,38 @@ def _cosine_similarity(a: list[float], b: list[float]) -> float:
     return float(np.dot(vector_a, vector_b) / denom)
 
 
+# 常驻后台事件循环：embedding 同步桥接共用同一个循环，保证 httpx 连接池
+# 持续复用。Windows 上每次 asyncio.run 新建循环会让旧连接失效重建，
+# 单次 embed 固定开销从 ~30ms 涨到 ~450ms（实测）。
+_embed_loop: asyncio.AbstractEventLoop | None = None
+_embed_loop_lock = threading.Lock()
+
+
+def _get_embed_loop() -> asyncio.AbstractEventLoop:
+    """懒启动常驻后台事件循环（daemon 线程，进程退出自动回收）。"""
+    global _embed_loop
+    if _embed_loop is None or _embed_loop.is_closed():
+        with _embed_loop_lock:
+            if _embed_loop is None or _embed_loop.is_closed():
+                loop = asyncio.new_event_loop()
+
+                def _run_forever() -> None:
+                    asyncio.set_event_loop(loop)
+                    loop.run_forever()
+
+                threading.Thread(target=_run_forever, daemon=True,
+                                 name="embed-loop").start()
+                _embed_loop = loop
+    return _embed_loop
+
+
 def _run_sync(coro):
-    """在同步上下文执行协程（无运行 loop 直接跑；有则放入线程池）。"""
-    try:
-        asyncio.get_running_loop()
-    except RuntimeError:
-        return asyncio.run(coro)
-    with concurrent.futures.ThreadPoolExecutor(max_workers=1) as pool:
-        return pool.submit(lambda: asyncio.run(coro)).result()
+    """在常驻后台事件循环执行协程并同步取结果。
+
+    兼容两种调用上下文（有无运行中的事件循环），都不会死锁。
+    """
+    loop = _get_embed_loop()
+    return asyncio.run_coroutine_threadsafe(coro, loop).result()
 
 
 class SiliconFlowEmbeddingProvider:

@@ -6,6 +6,7 @@
 - facts.yaml           L0b：确定性事实（id / keywords / answer / confidence）
 - persona_lore.md      L0c：角色亲历（## 分段，第一人称）
 - world_lore/*.md      L1：世界观（## 分段，第三人称）
+- *_lore.md            L1：根目录世界观（兼容 Firefly 布局，persona_lore.md 除外）
 """
 
 from __future__ import annotations
@@ -111,17 +112,21 @@ def load_knowledge(root: Optional[str] = None) -> KnowledgeBase:
                 topic=para.get("topic", "general")))
 
     # L1：world_lore/*.md（## 二级标题分段，第三人称，topic = 文件名）
+    # 兼容 Firefly 数据布局：data/knowledge/ 根目录下的 *_lore.md 同样按
+    # 世界观层加载（persona_lore.md 已作为 L0c 角色亲历，跳过）
     world_dir = base / "world_lore"
-    if world_dir.is_dir():
-        for f in sorted(world_dir.glob("*.md")):
-            for i, para in enumerate(_split_lore_paragraphs(f.read_text(encoding="utf-8"))):
-                if not para["content"].strip():
-                    continue
-                kb.lore.append(LoreBlock(
-                    id=f"{f.stem}-{i}",
-                    content=para["content"],
-                    perspective="third_person",
-                    topic=para.get("topic", f.stem)))
+    lore_files = sorted(world_dir.glob("*.md")) if world_dir.is_dir() else []
+    lore_files += [f for f in sorted(base.glob("*_lore.md"))
+                   if f.name != "persona_lore.md"]
+    for f in lore_files:
+        for i, para in enumerate(_split_lore_paragraphs(f.read_text(encoding="utf-8"))):
+            if not para["content"].strip():
+                continue
+            kb.lore.append(LoreBlock(
+                id=f"{f.stem}-{i}",
+                content=para["content"],
+                perspective="third_person",
+                topic=para.get("topic", f.stem)))
 
     return kb
 
