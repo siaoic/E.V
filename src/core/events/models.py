@@ -59,7 +59,7 @@ class ErrorEvent(BaseModel):
 
 
 class StateChangeEvent(BaseModel):
-    """全局状态机变化（idle / user_talking / ai_speaking / agent_thinking）。"""
+    """全局状态机变化（idle / user_talking / ai_speaking / agent_thinking / agent_running）。"""
 
     api_version: int = API_VERSION
     state: str

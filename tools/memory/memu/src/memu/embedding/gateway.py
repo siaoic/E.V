@@ -22,6 +22,7 @@ def _build_sdk_client(cfg: EmbeddingConfig) -> Any:
         api_key=cfg.api_key,
         embed_model=cfg.embed_model,
         batch_size=cfg.embed_batch_size,
+        embed_dimensions=cfg.embed_dimensions,
     )
 
 
@@ -34,6 +35,7 @@ def _build_httpx_client(cfg: EmbeddingConfig) -> Any:
         embed_model=cfg.embed_model,
         provider=cfg.provider,
         endpoint_overrides=cfg.endpoint_overrides,
+        embed_dimensions=cfg.embed_dimensions,
     )
 
 

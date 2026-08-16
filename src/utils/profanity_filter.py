@@ -30,7 +30,7 @@ class ProfanityFilter:
 
     @staticmethod
     def _default_path() -> str:
-        return os.path.join(config.cfg.PROJECT_ROOT, "data", "profanity.txt")
+        return os.path.join(config.cfg.DATA_ROOT, "profanity.txt")
 
     def load(self, path: str) -> None:
         """（重新）加载词库；文件缺失/读取失败时置空（过滤不生效，不阻断主流程）。

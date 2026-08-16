@@ -23,10 +23,12 @@ from datetime import datetime
 
 from openai import AsyncOpenAI
 
+from src.llm.client.factory import get_async_openai_client
+from src.llm.jsonutil import parse_json_array
 from src.utils import config, console
 
 # 评估结果存档（追加写，供用户审阅每次评估的对比数据）
-_EVAL_LOG_PATH = os.path.join(config.cfg.PROJECT_ROOT, "data", "evolution_evals.jsonl")
+_EVAL_LOG_PATH = os.path.join(config.cfg.DATA_ROOT, "evolution_evals.jsonl")
 
 # 生成测试用例的系统提示：要求输出 task + expected_keywords 的 JSON 数组
 _GENERATE_CASES_SYSTEM = (
@@ -45,49 +47,6 @@ _EXECUTE_SYSTEM = (
     "以下是你要遵循的技能指令。请按它完成用户给出的任务，"
     "输出简洁可执行的结果（不要复述技能内容）。"
 )
-
-# 全角字符 → 半角（模型输出 JSON 时常见全角标点导致解析失败）
-_FULLWIDTH_MAP = str.maketrans(
-    {
-        "，": ",",
-        "：": ":",
-        "；": ";",
-        "？": "?",
-        "！": "!",
-        "。": ".",
-        "“": '"',
-        "”": '"',
-        "‘": "'",
-        "’": "'",
-        "（": "(",
-        "）": ")",
-        "【": "[",
-        "】": "]",
-        "　": " ",
-    }
-    | {chr(code): chr(code - 0xFEE0) for code in range(0xFF10, 0xFF1A)}
-)
-
-
-def _extract_json_array(content: str) -> list | None:
-    """容错解析 JSON 数组：直接解析失败后截取首个 [ 到末尾 ] 兜底。"""
-    content = content.translate(_FULLWIDTH_MAP)
-    try:
-        data = json.loads(content)
-        return data if isinstance(data, list) else None
-    except (json.JSONDecodeError, TypeError):
-        pass
-    start = content.find("[")
-    if start < 0:
-        return None
-    end = content.rfind("]")
-    if end <= start:
-        return None
-    try:
-        data = json.loads(content[start : end + 1])
-        return data if isinstance(data, list) else None
-    except (json.JSONDecodeError, TypeError):
-        return None
 
 
 def _message_text(message) -> str:
@@ -124,8 +83,8 @@ class SkillEvaluator:
             self._model = (config.cfg.LLM_MODEL or "").strip()
             if not (base_url and api_key and self._model):
                 return None
-            self._client = AsyncOpenAI(base_url=base_url, api_key=api_key,
-                                       timeout=60.0)
+            self._client = get_async_openai_client(
+                api_key=api_key, base_url=base_url, timeout=60.0)
         return self._client
 
     async def _complete(self, system: str, user_text: str, max_tokens: int):
@@ -171,7 +130,7 @@ class SkillEvaluator:
         if resp is None:
             return None
         content = _message_text(resp.choices[0].message)
-        data = _extract_json_array(content)
+        data = parse_json_array(content)
         if not data:
             return None
         cases: list[dict] = []

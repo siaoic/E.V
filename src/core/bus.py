@@ -19,6 +19,7 @@
 
 from __future__ import annotations
 
+import fnmatch
 from collections import defaultdict
 from typing import Awaitable, Callable, Dict, List
 
@@ -36,29 +37,64 @@ EV_SESSION_END = "session_end"          # 会话结束（payload: SessionEndEven
 # 订阅者回调签名：async (payload: Any) -> None
 Handler = Callable[[object], Awaitable[None]]
 
+# 通配订阅事件名（on_any）：匹配所有事件
+_ANY = "*"
+
+
+def _is_pattern(event: str) -> bool:
+    """事件名是否含通配符（* / ?），含则按 fnmatch 模式匹配。"""
+    return any(ch in event for ch in "*?")
+
 
 class EventBus:
-    """极简进程内 pub/sub 总线：单线程事件循环内使用，顺序执行订阅者。"""
+    """极简进程内 pub/sub 总线：单线程事件循环内使用，顺序执行订阅者。
+
+    支持通配符订阅：事件名含 * / ? 时按 fnmatch 匹配（如 "speaking_*"），
+    或直接用 on_any() 订阅全部事件。
+    """
 
     def __init__(self) -> None:
         self._handlers: Dict[str, List[Handler]] = defaultdict(list)
+        self._patterns: Dict[str, List[Handler]] = defaultdict(list)
 
     def subscribe(self, event: str, handler: Handler) -> None:
         """订阅事件；同一 handler 重复订阅自动去重。"""
-        handlers = self._handlers[event]
+        handlers = self._patterns[event] if _is_pattern(event) else self._handlers[event]
         if handler not in handlers:
             handlers.append(handler)
 
     def unsubscribe(self, event: str, handler: Handler) -> None:
         """取消订阅；未订阅时静默。"""
         try:
-            self._handlers[event].remove(handler)
+            if _is_pattern(event):
+                self._patterns[event].remove(handler)
+            else:
+                self._handlers[event].remove(handler)
         except ValueError:
             pass
 
+    def on(self, event: str, handler: Handler) -> None:
+        """订阅事件（subscribe 别名）。"""
+        self.subscribe(event, handler)
+
+    def off(self, event: str, handler: Handler) -> None:
+        """取消订阅（unsubscribe 别名）。"""
+        self.unsubscribe(event, handler)
+
+    def on_any(self, handler: Handler) -> None:
+        """订阅全部事件（等价 subscribe("*", handler)）。"""
+        self.subscribe(_ANY, handler)
+
     async def emit(self, event: str, payload=None) -> None:
-        """广播事件：顺序 await 执行订阅者；单个订阅者异常不影响其余。"""
-        for handler in list(self._handlers.get(event, ())):
+        """广播事件：精确订阅优先，再按通配符匹配；同一 handler 只执行一次。
+
+        单个订阅者异常不影响其余。
+        """
+        handlers = list(self._handlers.get(event, ()))
+        for pattern, hlist in self._patterns.items():
+            if fnmatch.fnmatchcase(event, pattern):
+                handlers.extend(h for h in hlist if h not in handlers)
+        for handler in handlers:
             try:
                 await handler(payload)
             except Exception as e:

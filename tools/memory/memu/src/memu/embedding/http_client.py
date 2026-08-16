@@ -15,6 +15,7 @@ from memu.embedding.backends.jina import JinaEmbeddingBackend
 from memu.embedding.backends.openai import OpenAIEmbeddingBackend
 from memu.embedding.backends.openrouter import OpenRouterEmbeddingBackend
 from memu.embedding.backends.voyage import VoyageEmbeddingBackend
+from memu.vector import reduce_embedding_dimensions
 
 
 def is_loopback_url(url: str) -> bool:
@@ -90,6 +91,7 @@ class HTTPEmbeddingClient:
         provider: str = "openai",
         endpoint_overrides: dict[str, str] | None = None,
         timeout: int = 60,
+        embed_dimensions: int | None = None,
     ):
         # Ensure base_url ends with "/" so httpx doesn't discard the path
         # component when joining with endpoint paths.
@@ -99,6 +101,7 @@ class HTTPEmbeddingClient:
         self.embed_model = embed_model
         self.provider = provider.lower()
         self.backend = self._load_backend(self.provider)
+        self.embed_dimensions = embed_dimensions
         overrides = endpoint_overrides or {}
         raw_embedding_ep = (
             overrides.get("embeddings")
@@ -136,7 +139,10 @@ class HTTPEmbeddingClient:
             resp.raise_for_status()
             data = resp.json()
         logger.debug("HTTP embedding response: %s", data)
-        return self.backend.parse_embedding_response(data), data
+        vectors = self.backend.parse_embedding_response(data)
+        if self.embed_dimensions:
+            vectors = [reduce_embedding_dimensions(v, self.embed_dimensions) for v in vectors]
+        return vectors, data
 
     async def embed_multimodal(
         self,
@@ -201,7 +207,10 @@ class HTTPEmbeddingClient:
             data = resp.json()
 
         logger.debug("HTTP multimodal embedding response: %s", data)
-        return self.backend.parse_multimodal_embedding_response(data)
+        vectors = self.backend.parse_multimodal_embedding_response(data)
+        if self.embed_dimensions:
+            vectors = [reduce_embedding_dimensions(v, self.embed_dimensions) for v in vectors]
+        return vectors
 
     def _headers(self) -> dict[str, str]:
         return self.backend.default_headers(self.api_key)

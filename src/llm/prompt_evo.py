@@ -28,14 +28,16 @@ from datetime import datetime
 
 from openai import AsyncOpenAI
 
+from src.llm.client.factory import get_async_openai_client
+from src.llm.jsonutil import parse_json_object
 from src.utils import config, console
 
 # 生效策略段文件：llm_brain 每轮读取注入系统提示（GEPA 择优后的当前版本）
-_POLICY_PATH = os.path.join(config.cfg.PROJECT_ROOT, "data", "evolution_policy.json")
+_POLICY_PATH = os.path.join(config.cfg.DATA_ROOT, "evolution_policy.json")
 
 # 策略版本历史存档（追加写，供用户审阅每次进化的成败）
 _POLICY_HISTORY_PATH = os.path.join(
-    config.cfg.PROJECT_ROOT, "data", "evolution_policy_history.md")
+    config.cfg.DATA_ROOT, "evolution_policy_history.md")
 
 # 候选策略段最大字符数：超限截断，防止策略膨胀失控稀释系统提示
 _POLICY_MAX_CHARS = 400
@@ -69,26 +71,6 @@ def _format_turns(turns: list[dict]) -> str:
     """把对话轮次格式化为进化素材文本（与 evolution.py 同一格式，区分三方角色）。"""
     from tools.memory import memory
     return memory.format_turns_text(turns)
-
-
-def _parse_json(content: str) -> dict:
-    """容错解析 JSON 对象：直接解析失败后截取首个 { 到末尾 } 兜底。"""
-    try:
-        data = json.loads(content)
-        return data if isinstance(data, dict) else {}
-    except (json.JSONDecodeError, TypeError):
-        pass
-    start = content.find("{")
-    if start < 0:
-        return {}
-    end = content.rfind("}")
-    if end <= start:
-        return {}
-    try:
-        data = json.loads(content[start:end + 1])
-        return data if isinstance(data, dict) else {}
-    except (json.JSONDecodeError, TypeError):
-        return {}
 
 
 def _load_policy() -> str:
@@ -140,8 +122,8 @@ class PolicyEvolver:
             self._model = (config.cfg.LLM_MODEL or "").strip()
             if not (base_url and api_key and self._model):
                 return None
-            self._client = AsyncOpenAI(
-                base_url=base_url, api_key=api_key, timeout=60.0)
+            self._client = get_async_openai_client(
+                api_key=api_key, base_url=base_url, timeout=60.0)
         return self._client
 
     async def maybe_evolve(self, turns: list[dict]) -> None:
@@ -195,7 +177,7 @@ class PolicyEvolver:
             console.warn(f"[GEPA] 变异调用失败：{e}")
             return
         content = (resp.choices[0].message.content or "").strip()
-        data = _parse_json(content)
+        data = parse_json_object(content)
         candidate = (data.get("candidate") or "").strip()
         if not candidate:
             console.dim("[GEPA] 当前策略已足够好，无改进，跳过本次")
@@ -225,7 +207,7 @@ class PolicyEvolver:
         except Exception as e:
             console.warn(f"[GEPA] 评审调用失败：{e}")
             return
-        judge = _parse_json((resp.choices[0].message.content or "").strip())
+        judge = parse_json_object(resp.choices[0].message.content or "")
         try:
             score_current = float(judge.get("score_current") or 0)
             score_candidate = float(judge.get("score_candidate") or 0)

@@ -49,8 +49,10 @@ _MEMORY_TTL_DAYS = int(os.getenv("MEMORY_TTL_DAYS", "60"))
 # 语义去重阈值（向量余弦相似度）：新记忆与同归属者已有记忆的相似度达到
 # 该值视为近似重复跳过——防止同一事实的不同说法反复入库污染检索
 _SEMANTIC_DUP_THRESHOLD = 0.9
-# 图谱快照路径（控制中心跨进程只读）
-_GRAPH_EXPORT_REL = os.path.join("data", "memory_graph.json")
+# 索引后台重建防抖窗口（s）：写后延迟合并调度一次重建，把每次对话轮次
+# 检索前的冷重建（全表 + numpy，~200ms 阻塞事件循环）挪到写入后的空闲
+# 窗口内在线程完成，保证下次 retrieve 直接命中暖索引
+_INDEX_REBUILD_DEBOUNCE_S = 0.3
 
 # 检索结果注入 prompt 的固定说明（llm_brain 组装 system prompt 用）
 STANDING_INSTRUCTION = """\
@@ -94,8 +96,11 @@ _AI_ROLES = {ROLE_ASSISTANT.lower(), ROLE_AI_ALIAS.lower(), "assistant", "ai"}
 # 设计动机：memU 的 progressive_retrieve 每次都走 SQL 拉全表 segments
 # + JSON 反序列化全部 embedding + 重建 numpy 矩阵。检索是每轮对话必跑
 # 的热路径，写入相对稀疏（一次 commit 一批），因此维护一个常驻的进程内
-# 索引，把热路径上的 SQL/JSON/numpy 重建全部省掉，写入路径只做一个
-# dirty 标记 + 下次检索前 lazy 重建。
+# 索引，把热路径上的 SQL/JSON/numpy 重建全部省掉；写入路径做增量维护：
+# 提交成功的文件先移除旧段再追加当前段（_refresh_index_segments，只处理
+# 受影响文件，O(新增段数)），索引始终新鲜，下次检索直接命中快路径；
+# 删除 / 衰减等低频写仍走 dirty 标记 + 后台去抖重建（_notify_index_dirty
+# → _rebuild_thread）兜底，retrieve 的 dirty 检查仅作保险。
 #
 # 这些类只依赖 numpy（pyproject 已声明），不依赖任何 memU 内部状态；
 # 第三方库升级时不会受影响。
@@ -124,8 +129,10 @@ class _SegmentIndex:
       后立即释放锁，再做矩阵乘等耗时计算，不阻塞其它 retrieve。
 
     - rebuild(segments, file_user_map): 从 `list_segments()` 重建
+    - add_segments(segments, file_user_map): 增量追加（新文件提交）
+    - remove_segments_for_files(file_ids): 批量移除（删除 / 更新对账）
     - search(query_vec, k, user_filter) -> [(seg_id, score, file_id, text), ...]
-    - mark_dirty() / is_dirty(): 写入路径标脏，下次 retrieve 前重建
+    - mark_dirty() / is_dirty(): 低频写标脏，后台兜底重建
     """
 
     __slots__ = ("_lock", "_dirty", "_matrix", "_ids", "_file_ids", "_users",
@@ -206,6 +213,79 @@ class _SegmentIndex:
             self._users_arr = new_users_arr
             self._texts = texts
             self._dirty = False
+
+    def add_segments(self, segments: list, file_user_map: dict[str, str]) -> None:
+        """增量追加 segment 向量（写入路径调用），避免写后全量重建。
+
+        过滤规则与 `rebuild` 一致（有 embedding、可查归属、范数非 0）；
+        索引未就绪时直接以新行建矩阵；dirty 时跳过（等待兜底重建）。
+        追加只 extend 列表、vstack 新矩阵（不原地改），与 search 锁内
+        快照兼容：search 只访问旧长度范围内的下标。
+        """
+        np = _np()
+        rows: list[tuple] = []
+        for seg in segments:
+            if not seg.embedding:
+                continue
+            owner = file_user_map.get(seg.recall_file_id)
+            if owner is None:
+                continue
+            arr = np.asarray(seg.embedding, dtype=np.float32)
+            # 范数=0 的 embedding（空 / 退化）跳过：归一化时分母为 0 会爆 NaN
+            if float(np.linalg.norm(arr)) == 0.0:
+                continue
+            rows.append((arr, seg.id, seg.recall_file_id, owner, seg.text or ""))
+        if not rows:
+            return
+        new_matrix = np.vstack([r[0] for r in rows]).astype(np.float32, copy=False)
+        norms = np.linalg.norm(new_matrix, axis=1, keepdims=True)
+        new_matrix = (new_matrix / norms).astype(np.float32, copy=False)
+        new_ids = [r[1] for r in rows]
+        new_file_ids = [r[2] for r in rows]
+        new_users = [r[3] for r in rows]
+        new_texts = [r[4] for r in rows]
+        with self._lock:
+            if self._dirty:
+                return  # 已标脏需全量重建，不再追加
+            if self._matrix is None:
+                self._matrix = new_matrix
+                self._ids = new_ids
+                self._file_ids = new_file_ids
+                self._users = new_users
+                self._texts = new_texts
+                self._users_arr = np.array(new_users, dtype=object)
+            else:
+                self._matrix = np.vstack(
+                    [self._matrix, new_matrix]
+                ).astype(np.float32, copy=False)
+                self._ids.extend(new_ids)
+                self._file_ids.extend(new_file_ids)
+                self._users.extend(new_users)
+                self._texts.extend(new_texts)
+                self._users_arr = np.array(self._users, dtype=object)
+
+    def remove_segments_for_files(self, file_ids: set[str]) -> None:
+        """按 recall_file_id 批量移除向量（删除 / 更新文件时调用）。
+
+        与 `add_segments` 配套：更新场景先移除旧段再追加当前段，实现
+        drop-and-add 对账，避免全量重建。O(N) 掩码过滤（N=段总数），
+        dirty / 未就绪时跳过（交给 `_rebuild_thread` 兜底重建）。
+        """
+        if not file_ids:
+            return
+        with self._lock:
+            if self._dirty or self._matrix is None:
+                return
+            keep = [i for i, fid in enumerate(self._file_ids) if fid not in file_ids]
+            if len(keep) == len(self._file_ids):
+                return
+            np = _np()
+            self._matrix = self._matrix[keep].astype(np.float32, copy=False)
+            self._ids = [self._ids[i] for i in keep]
+            self._file_ids = [self._file_ids[i] for i in keep]
+            self._users = [self._users[i] for i in keep]
+            self._texts = [self._texts[i] for i in keep]
+            self._users_arr = np.array(self._users, dtype=object)
 
     def search(
         self,
@@ -504,6 +584,26 @@ class MemoryManager:
         # Embedding 批量合并：合并短时间窗内多个 embed 请求到一次 API 调用
         # （弹幕 burst / evolution 并发复盘场景下省 N-1 次 RTT）
         self._embed_batcher = _EmbedBatcher()
+        # Mem0 判决链（MEMORY_LIFECYCLE_ENABLED 才启用，懒创建）
+        self._lifecycle: Any = None
+        # 索引后台重建协调（写后标脏 → 去抖调度线程重建，避免下次 retrieve
+        # 同步冷重建阻塞事件循环）：_rebuild_pending 防抖合并、_rebuild_running
+        # 互斥（同一时刻最多一个重建线程）
+        self._rebuild_lock = threading.Lock()
+        self._rebuild_pending = False
+        self._rebuild_running = False
+
+    # ---------- 归属者公开 API（替代外部访问模块私有 _USER_SELF/_USER_DEFAULT） ----------
+
+    @property
+    def self_user_id(self) -> str:
+        """主播自己（self）的归属者 id。"""
+        return _USER_SELF
+
+    @property
+    def default_user_id(self) -> str:
+        """默认观众归属者 id（MEMORY_USER_DEFAULT 环境变量可覆盖）。"""
+        return _USER_DEFAULT
 
     # ---------- service 生命周期 ----------
 
@@ -553,7 +653,7 @@ class MemoryManager:
 
             user: str | None = None
 
-        db_dir = os.path.join(config.cfg.PROJECT_ROOT, "data")
+        db_dir = config.cfg.DATA_ROOT
         os.makedirs(db_dir, exist_ok=True)
         db_dsn = f"sqlite:///{os.path.join(db_dir, 'memu.sqlite3')}"
         embedding = EmbeddingConfig(
@@ -563,6 +663,7 @@ class MemoryManager:
             api_key=config.cfg.EMBEDDING_API_KEY or "local",
             embed_model=config.cfg.EMBEDDING_MODEL,
             embed_batch_size=8,
+            embed_dimensions=config.cfg.EMBEDDING_DIMENSIONS,
         )
         return MemoryService(
             database_config=DatabaseConfig(
@@ -646,26 +747,116 @@ class MemoryManager:
     def _build_index(self) -> None:
         """(Re)build in-memory segment vector index and file pool from SQLite.
 
-        - 读 SQLite 不持 `_io_lock`：SQLite WAL 模式下读与单写可并发
-          （busy_timeout 兜底），把检索从全局串行中解放出来
-        - 写后第一次 retrieve 触发 lazy 重建：写路径只 mark_dirty()，
-          不重算；O(1) 写代价换 O(N) 重建只发生在检索前
+        - 持 `_io_lock` 保护进程内 `_files` / `_index` 结构：重建（后台
+          线程 / retrieve 兜底）与写路径的增量维护（_files.update/remove）
+          串行，避免并发改坏字典
+        - 写后由 `_schedule_index_rebuild()` 后台去抖重建（写路径只
+          mark_dirty 不重算）；retrieve 的 dirty 检查仅作兜底
         - 失败保持 dirty 状态：下次重试或回退 memU 慢路径
         """
-        try:
-            files = self._walk_files()
-        except Exception:
+        with self._io_lock:
+            try:
+                files = self._walk_files()
+            except Exception:
+                return
+            self._files.rebuild(files)
+            file_user_map = {
+                f["id"]: f.get("user") or _USER_DEFAULT for f in files if f.get("id")
+            }
+            try:
+                service = self._ensure_service()
+                segments = service.database.recall_file_segment_repo.list_segments()
+            except Exception:
+                return
+            self._index.rebuild(segments, file_user_map)
+
+    def _notify_index_dirty(self) -> None:
+        """写路径统一入口：标记索引脏并调度后台重建。
+
+        写后立刻让索引保持新鲜，避免每次对话轮次检索前同步冷重建
+        （全表 + numpy，~200ms 阻塞事件循环）——重建挪到写入后的空闲
+        窗口内在线程完成。
+        """
+        self._index.mark_dirty()
+        self._schedule_index_rebuild()
+
+    def _refresh_index_segments(self, owner_by_file: dict[str, str]) -> None:
+        """写路径增量维护段索引（须在 `_io_lock` 内调用，commit 已持有）。
+
+        对提交成功的文件先移除旧段（更新场景 drop-and-add 对账），再按
+        文件批量查询当前段追加（新增场景无旧段可移，等于纯追加），全程
+        只处理受影响文件，不重建全表。索引已标脏 / 未就绪时自动跳过，
+        交给后台 `_rebuild_thread` 兜底；增量失败则标脏同样兜底，保证
+        索引要么新鲜要么走重建，不会静默缺段。
+        """
+        if not owner_by_file:
             return
-        self._files.rebuild(files)
-        file_user_map = {
-            f["id"]: f.get("user") or _USER_DEFAULT for f in files if f.get("id")
-        }
+        file_ids = list(owner_by_file)
+        self._index.remove_segments_for_files(set(file_ids))
         try:
             service = self._ensure_service()
-            segments = service.database.recall_file_segment_repo.list_segments()
+            segments = service.database.recall_file_segment_repo.list_segments(
+                {"recall_file_id__in": file_ids}
+            )
         except Exception:
+            self._index.mark_dirty()
+            self._schedule_index_rebuild()
             return
-        self._index.rebuild(segments, file_user_map)
+        by_file: dict[str, list] = {}
+        for seg in segments:
+            by_file.setdefault(seg.recall_file_id, []).append(seg)
+        for fid in file_ids:
+            segs = by_file.get(fid) or []
+            if segs:
+                self._index.add_segments(segs, {fid: owner_by_file[fid]})
+
+    def _schedule_index_rebuild(self) -> None:
+        """去抖调度一次后台重建（有事件循环走 async 任务，否则直接起线程）。
+
+        防抖窗口内的多次写合并成一次重建；重建进行中的新写入由
+        `_rebuild_thread` 收尾时兜底重调度。
+        """
+        with self._rebuild_lock:
+            if self._rebuild_pending or self._rebuild_running:
+                return
+            self._rebuild_pending = True
+        try:
+            asyncio.get_running_loop()
+        except RuntimeError:
+            # 无事件循环（sync 调用方线程，如 to_thread 里的 forget/decay）
+            threading.Thread(target=self._rebuild_thread, daemon=True).start()
+            return
+        asyncio.get_running_loop().create_task(self._rebuild_async())
+
+    async def _rebuild_async(self) -> None:
+        """防抖等待后在后台线程重建（不阻塞事件循环）。"""
+        try:
+            await asyncio.sleep(_INDEX_REBUILD_DEBOUNCE_S)
+            await asyncio.to_thread(self._rebuild_thread)
+        except asyncio.CancelledError:
+            with self._rebuild_lock:
+                self._rebuild_pending = False
+            raise
+
+    def _rebuild_thread(self) -> None:
+        """后台重建 worker（互斥）：索引 dirty 才重建；失败保持 dirty。
+
+        重建期间若又有新写入（dirty 再次置位），收尾时补一次调度，
+        保证最新记忆及时进索引。
+        """
+        with self._rebuild_lock:
+            if self._rebuild_running:
+                return
+            self._rebuild_running = True
+        try:
+            if self._index.is_dirty():
+                self._build_index()
+        finally:
+            with self._rebuild_lock:
+                self._rebuild_running = False
+                self._rebuild_pending = False
+        if self._index.is_dirty():
+            self._schedule_index_rebuild()
 
     def new_session(self) -> None:
         """开启新一轮会话：清空进程内轮次并记录起始时间。"""
@@ -898,7 +1089,8 @@ class MemoryManager:
         2. 语义去重：与同用户已有记忆向量相似度 ≥ 阈值（近似重复）跳过
            （改走内存索引，不再调 memU `progressive_retrieve`）。
 
-        写后标 dirty，索引在下次 retrieve 前 lazy 重建。
+        写后段索引增量维护（新增纯追加 / 更新 drop-and-add 对账），
+        索引保持新鲜，下次 retrieve 直接命中快路径。
         """
         if not self._ensure_embedding():
             return {"recall_files": []}
@@ -921,7 +1113,21 @@ class MemoryManager:
                 content = (item.get("content") or "").strip()
                 if not content or content in existing.get(owner, set()):
                     continue  # 空内容或同用户已有相同内容 → 跳过
-                if await self._semantic_duplicate(content, owner):
+                if self._ensure_lifecycle() is not None:
+                    # Mem0 判决链接管去重：LLM 判定 ADD/UPDATE/DELETE/IGNORE
+                    verdict, target_id = await self._lifecycle.judge(content, owner=owner)
+                    if verdict == "IGNORE":
+                        console.dim(f"[记忆] 判决 IGNORE，跳过：{content[:24]}")
+                        continue
+                    if verdict == "DELETE" and target_id:
+                        self.delete_memories([target_id])
+                        console.dim(f"[记忆] 判决 DELETE，删除旧记忆 {target_id}")
+                        continue
+                    if verdict == "UPDATE" and target_id:
+                        # 用「删旧补新」实现内容更新：删掉旧条目，新内容随后落库
+                        self.delete_memories([target_id])
+                        console.dim(f"[记忆] 判决 UPDATE，更新旧记忆 {target_id}")
+                elif await self._semantic_duplicate(content, owner):
                     console.dim(f"[记忆] 与已有记忆近似重复，跳过：{content[:24]}")
                     continue
                 existing.setdefault(owner, set()).add(content)  # 同批内也去重
@@ -929,6 +1135,7 @@ class MemoryManager:
             if not grouped:
                 return {"recall_files": []}
             committed: list[dict] = []
+            owner_by_file: dict[str, str] = {}
             for owner, items in grouped.items():
                 result = await service.commit_results(recall_files=items, user=self._scope(owner))
                 committed.extend(result.get("recall_files") or [])
@@ -942,8 +1149,11 @@ class MemoryManager:
                         "track": c.get("track") or "memory",
                         "content": "",  # 内容由 segment 覆盖，pool 不存 content
                     })
-        # 写后标脏（segment 表由 memU 内部管理，下次 retrieve 重建）
-        self._index.mark_dirty()
+                    if c.get("id"):
+                        owner_by_file[c.get("id")] = owner
+            # 段索引增量维护（新文件纯追加；更新文件先移除旧段再追加）：
+            # 索引保持新鲜，下次 retrieve 直接命中，不再全量重建
+            self._refresh_index_segments(owner_by_file)
         export_graph_data()
         return {"recall_files": committed}
 
@@ -973,6 +1183,59 @@ class MemoryManager:
             return False
         return hits[0][1] >= _SEMANTIC_DUP_THRESHOLD
 
+    # ---------- Mem0 判决链（MEMORY_LIFECYCLE_ENABLED 才启用） ----------
+
+    def _ensure_lifecycle(self) -> Any | None:
+        """懒创建判决引擎；配置关闭或导入失败时返回 None（走原去重路径）。"""
+        if self._lifecycle is not None:
+            return self._lifecycle
+        if not config.cfg.MEMORY_LIFECYCLE_ENABLED:
+            return None
+        from src.llm.memory.lifecycle import LifecycleEngine
+
+        self._lifecycle = LifecycleEngine(
+            recall_similar=self._recall_similar_structured,
+            threshold=config.cfg.MEMORY_LIFECYCLE_THRESHOLD,
+        )
+        return self._lifecycle
+
+    async def _recall_similar_structured(
+        self, content: str, owner: str, top_k: int = 3
+    ) -> list[dict]:
+        """结构化召回相似记忆，供判决链使用：[{"id", "content", "similarity"}]。
+
+        复用内存段索引（与 `_retrieve_fast` 同源）：同归属者段内向量 top-k，
+        按 file 聚合取最高分；索引未就绪 / embedding 失败返回空列表
+        （判决引擎收到空列表会直接 ADD，不影响主流程）。
+        """
+        if self._index.is_dirty():
+            try:
+                self._build_index()
+            except Exception:
+                return []
+        if not self._index.is_ready() or self._index.size() == 0:
+            return []
+        qvec = self._query_cache.get(content)
+        if qvec is None:
+            try:
+                service = self._ensure_service()
+                qvec = await self._embed_batcher.embed(service, content)
+            except Exception:
+                return []
+            self._query_cache.put(content, qvec)
+        hits = self._index.search(qvec, top_k * 2, {owner})
+        best: dict[str, tuple[float, str]] = {}
+        for _seg_id, score, file_id, text in hits:
+            t = (text or "").strip()
+            if not t:
+                continue
+            if file_id not in best or score > best[file_id][0]:
+                best[file_id] = (score, t)
+        return [
+            {"id": fid, "content": text, "similarity": score}
+            for fid, (score, text) in best.items()
+        ]
+
     async def delete_memories_async(self, ids: list[str]) -> int:
         """异步删除（供 async 调用方，内部走线程池）。"""
         return await asyncio.to_thread(self.delete_memories, ids)
@@ -992,7 +1255,7 @@ class MemoryManager:
             )
         for fid in id_list:
             self._files.remove(fid)
-        self._index.mark_dirty()
+        self._notify_index_dirty()
         export_graph_data()
         return len(deleted)
 
@@ -1025,7 +1288,7 @@ class MemoryManager:
             return
         service = self._ensure_service()
         with self._io_lock:
-            await service.commit_results(
+            result = await service.commit_results(
                 recall_files=[{
                     "name": (key or "").strip()[:64] or "记忆",
                     "track": "memory",
@@ -1034,7 +1297,11 @@ class MemoryManager:
                 }],
                 user=self._scope(_USER_SELF),
             )
-        self._index.mark_dirty()
+            committed = result.get("recall_files") or []
+            # 段索引增量维护（同 name 重写是更新场景：先移除旧段再追加）
+            self._refresh_index_segments({
+                c.get("id"): _USER_SELF for c in committed if c.get("id")
+            })
         export_graph_data()
 
     def forget_phrase(self, keyword: str) -> int:
@@ -1062,7 +1329,7 @@ class MemoryManager:
             )
         for fid in id_list:
             self._files.remove(fid)
-        self._index.mark_dirty()
+        self._notify_index_dirty()
         export_graph_data()
         return len(id_list)
 
@@ -1088,7 +1355,7 @@ class MemoryManager:
             )
         for fid in id_list:
             self._files.remove(fid)
-        self._index.mark_dirty()
+        self._notify_index_dirty()
         export_graph_data()
         return len(id_list)
 
@@ -1107,7 +1374,7 @@ class MemoryManager:
         service = self._ensure_service()
         name = f"会话归档 {period_start or period_end or datetime.now().strftime('%Y-%m-%d %H:%M')}"
         with self._io_lock:
-            await service.commit_results(
+            result = await service.commit_results(
                 recall_files=[{
                     "name": name[:64],
                     "track": "memory",
@@ -1116,7 +1383,11 @@ class MemoryManager:
                 }],
                 user=self._scope(_USER_SELF),
             )
-        self._index.mark_dirty()
+            committed = result.get("recall_files") or []
+            # 段索引增量维护（同 name 归档重写是更新场景：先移除旧段再追加）
+            self._refresh_index_segments({
+                c.get("id"): _USER_SELF for c in committed if c.get("id")
+            })
         export_graph_data()
 
 
@@ -1173,10 +1444,11 @@ async def retrieve(query: str, top_k: int = 8, user: str = _USER_DEFAULT) -> str
         console.dim(f"[记忆检索] 无 embedding，关键词回退 {elapsed_ms:.0f}ms")
         return text
 
-    # 2) 索引 dirty（写后第一次读）→ 重建。重建只在 SQLite 拉全表 + numpy
-    #    堆叠，通常 <50ms / 万段；命中快路径后的稳态不再触发
+    # 2) 索引 dirty（写后重建尚未在后台完成）→ 兜底重建。重建在线程内执行，
+    #    不阻塞事件循环（asyncio.wait_for 超时仍可熔断）；写路径已通过
+    #    _notify_index_dirty() 后台去抖重建，这里仅在窗口未到 / 重建失败时触发
     if manager._index.is_dirty() or manager._files.is_dirty():
-        manager._build_index()
+        await asyncio.to_thread(manager._rebuild_thread)
 
     # 3) 快路径
     if manager._index.is_ready() and manager._index.size() > 0:
@@ -1262,7 +1534,7 @@ def _do_export_graph() -> str | None:
     """实际导出图谱快照（debounce worker 与 flush 共用）。"""
     try:
         files, _ = get_manager().graph_data(limit=2000)
-        path = os.path.join(config.cfg.PROJECT_ROOT, _GRAPH_EXPORT_REL)
+        path = os.path.join(config.cfg.DATA_ROOT, "memory_graph.json")
         os.makedirs(os.path.dirname(path), exist_ok=True)
         tmp = path + ".tmp"
         with open(tmp, "w", encoding="utf-8") as f:

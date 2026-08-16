@@ -34,6 +34,13 @@ class EmbeddingConfig(BaseModel):
         default=1,
         description="Maximum batch size for embedding API calls (used by the SDK client backend).",
     )
+    embed_dimensions: int | None = Field(
+        default=None,
+        description=(
+            "Optional MRL truncation: keep the first N embedding dimensions "
+            "(re-normalized). None keeps the model's native dimension."
+        ),
+    )
     client_backend: str = Field(
         default="sdk",
         description=(

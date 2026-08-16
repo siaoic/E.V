@@ -32,10 +32,11 @@ import time
 
 from openai import OpenAI
 
+from src.llm.client.factory import get_openai_client
 from src.utils import config, console
 
 # 路由统计持久化文件：name -> {tries, wins, latency_sum, last_at}
-_STATE_PATH = os.path.join(config.cfg.PROJECT_ROOT, "data", "model_router.json")
+_STATE_PATH = os.path.join(config.cfg.DATA_ROOT, "model_router.json")
 
 
 def _parse_servers() -> list[dict]:
@@ -117,9 +118,9 @@ class ModelRouter:
         with self._lock:
             client = self._clients.get(name)
             if client is None:
-                client = OpenAI(
-                    api_key=service["api_key"] or "not-needed",
-                    base_url=service["base_url"] or None,
+                client = get_openai_client(
+                    api_key=service["api_key"],
+                    base_url=service["base_url"],
                     timeout=120.0,
                     max_retries=2,
                 )

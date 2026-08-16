@@ -61,4 +61,21 @@ def cosine_topk(
     return [(ids[i], float(scores[i])) for i in topk_indices]
 
 
-__all__ = ["cosine_topk"]
+def reduce_embedding_dimensions(vector: list[float], dimensions: int | None) -> list[float]:
+    """MRL 截断降维：取前 N 维并重归一化（dimensions 为空则原样返回）。
+
+    Qwen3-Embedding 等 MRL（Matryoshka）模型官方支持输出子向量：截取前
+    dimensions 维后重新 L2 归一化，余弦相似度语义保持一致。服务端忽略
+    dimensions 参数（如 llama.cpp）时在客户端统一截断，保证写入与查询
+    向量维度一致。
+    """
+    if not dimensions or len(vector) <= dimensions:
+        return vector
+    arr = np.asarray(vector[:dimensions], dtype=np.float32)
+    norm = float(np.linalg.norm(arr))
+    if norm == 0.0:
+        return list(arr)
+    return (arr / norm).astype(np.float32).tolist()
+
+
+__all__ = ["cosine_topk", "reduce_embedding_dimensions"]

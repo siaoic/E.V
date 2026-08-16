@@ -24,7 +24,7 @@ _MAX_TOOL_HISTORY_LOG = 500
 # 生效话术建议文件：进化引擎写入（data/evolution_advice_active.json），
 # 到期后由进化复盘回评续期/移除，这里只读取未到期条目注入系统提示
 _ADVICE_ACTIVE_PATH = os.path.join(
-    config.cfg.PROJECT_ROOT, "data", "evolution_advice_active.json")
+    config.cfg.DATA_ROOT, "evolution_advice_active.json")
 
 # 生效话术建议读取缓存时长（秒）：避免每轮对话都读文件
 _ADVICE_CACHE_TTL = 30
@@ -32,7 +32,7 @@ _ADVICE_CACHE_TTL = 30
 # 观众画像文件：进化引擎复盘提炼（data/evolution_profile.json），
 # 本模块每轮按关键词召回注入系统提示（对标 hermes 的 USER.md/MEMORY.md）
 _PROFILE_PATH = os.path.join(
-    config.cfg.PROJECT_ROOT, "data", "evolution_profile.json")
+    config.cfg.DATA_ROOT, "evolution_profile.json")
 
 # 画像读取缓存时长（秒）：避免每轮对话都读文件
 _PROFILE_CACHE_TTL = 30
@@ -43,7 +43,7 @@ _PROFILE_INJECT_MAX = 3
 # GEPA 进化策略段文件：prompt_evo.py 择优落盘（data/evolution_policy.json），
 # 本模块每轮读取注入系统提示（对标 hermes GEPA 的 prompt 进化层）
 _POLICY_PATH = os.path.join(
-    config.cfg.PROJECT_ROOT, "data", "evolution_policy.json")
+    config.cfg.DATA_ROOT, "evolution_policy.json")
 
 # 策略段读取缓存时长（秒）：避免每轮对话都读文件
 _POLICY_CACHE_TTL = 30

@@ -107,8 +107,8 @@ class TTS:
         self.cnhubert_path = Path(self.models_dir) / "chinese-hubert-base"
         self.cnroberta_path = Path(self.models_dir) / "chinese-roberta-wwm-ext-large"
         self.sv_path = Path(self.models_dir) / "sv" / "pretrained_eres2netv2w24s4ep4.ckpt"
-        self.default_gpt_path = Path(self.models_dir) / "Neuro-e15.ckpt"
-        self.default_sovits_path = Path(self.models_dir) / "Neuro_e8_s1712.pth"
+        self.default_gpt_path = Path(self.models_dir) / "流萤-e10.ckpt"
+        self.default_sovits_path = Path(self.models_dir) / "流萤_e10_s250.pth"
 
         check_pretrained_models(self.models_dir)
         

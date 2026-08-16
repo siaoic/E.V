@@ -14,9 +14,12 @@ set_subtitle_callback/apply_ref(_extras) + _wav_cache / _cleanup_output。
 """
 
 import asyncio
+import hashlib
 import io
+import json
 import os
 import re
+import time
 from typing import Optional, Tuple
 
 import httpx
@@ -92,9 +95,146 @@ def _decode_wav_bytes(content: bytes) -> Tuple[np.ndarray, int]:
     data, sr = sf.read(io.BytesIO(content), dtype="float32")
     return data, int(sr)
 
-# 服务端默认地址（fastapi_server_example.py 监听 0.0.0.0:8000），可用
+# 服务端默认地址（fastapi_server_example.py 监听 0.0.0.0:8167），可用
 # TTS_SERVER_URL 覆盖
 _SERVER_DEFAULT_URL = "http://127.0.0.1:8167"
+
+# ---------- 磁盘音频缓存（相同文本+参考+参数只合成一次） ----------
+#
+# 直播中同一句高频话（打招呼/口头禅）会反复触发合成，服务端 GPU 推理
+# 是主要开销。以「文本+参考音频+参考文本+合成参数」的 md5 为键缓存 wav
+# 到 data/tts_cache/，命中直接解码播放，跳过 HTTP 合成。
+# 缓存是优化不是依赖：读写/清理任何失败都静默降级，不影响正常合成。
+_TTS_CACHE_SUBDIR = "tts_cache"
+_TTS_CACHE_TTL_SEC = 7 * 24 * 3600        # 7 天过期（参考音频变更由 key 自然失效）
+_TTS_CACHE_MAX_BYTES = 512 * 1024 * 1024  # 容量上限 512MB，超出按 mtime 淘汰最旧
+_CACHE_EVICT_EVERY = 64                   # 每写入 64 次触发一次容量清理
+
+_cache_write_count = 0
+
+
+def _tts_cache_dir() -> str:
+    """磁盘缓存目录（<DATA_ROOT>/tts_cache），懒创建；失败返回空串（禁用缓存）。"""
+    from src.utils import config as _config
+    root = getattr(_config.cfg, "DATA_ROOT", "") or os.getcwd()
+    d = os.path.join(root, _TTS_CACHE_SUBDIR)
+    try:
+        os.makedirs(d, exist_ok=True)
+    except OSError:
+        return ""
+    return d
+
+
+def _tts_cache_key(text: str, speaker_audio: str, prompt_audio: str,
+                   prompt_text: str) -> str:
+    """缓存键：文本 + 参考参数 + 合成参数（排序序列化，保证确定性）。"""
+    payload = {
+        "text": text,
+        "speaker_audio": speaker_audio,
+        "prompt_audio": prompt_audio,
+        "prompt_text": prompt_text,
+        **_SYNTH_PARAMS,
+    }
+    raw = json.dumps(payload, ensure_ascii=False, sort_keys=True)
+    return hashlib.md5(raw.encode("utf-8")).hexdigest()
+
+
+def _cache_load(key: str) -> Optional[bytes]:
+    """读取缓存 wav 字节；TTL 过期 / 读取失败视为未命中（过期即删）。"""
+    d = _tts_cache_dir()
+    if not d:
+        return None
+    path = os.path.join(d, f"{key}.wav")
+    try:
+        if time.time() - os.path.getmtime(path) > _TTS_CACHE_TTL_SEC:
+            os.remove(path)
+            return None
+        with open(path, "rb") as f:
+            return f.read()
+    except OSError:
+        return None
+
+
+def _cache_delete(key: str) -> None:
+    """删除单条缓存（退化产物 / 命中后检测异常时清理）。"""
+    d = _tts_cache_dir()
+    if not d:
+        return
+    try:
+        os.remove(os.path.join(d, f"{key}.wav"))
+    except OSError:
+        pass
+
+
+def _cache_save(key: str, content: bytes) -> None:
+    """写入缓存：先写临时文件再 os.replace（原子，防半截 wav 被读到）；
+    周期性触发容量清理，防长会话缓存无限膨胀。失败静默。"""
+    global _cache_write_count
+    d = _tts_cache_dir()
+    if not d or not content:
+        return
+    tmp = os.path.join(d, f"{key}.tmp")
+    try:
+        with open(tmp, "wb") as f:
+            f.write(content)
+        os.replace(tmp, os.path.join(d, f"{key}.wav"))
+        _cache_write_count += 1
+        if _cache_write_count % _CACHE_EVICT_EVERY == 0:
+            evict_tts_cache()
+    except OSError:
+        try:
+            os.remove(tmp)
+        except OSError:
+            pass
+
+
+def evict_tts_cache() -> Tuple[int, int]:
+    """清理磁盘音频缓存：删 TTL 过期文件；超容量按 mtime 淘汰最旧。
+
+    幂等、失败静默（缓存是优化不是依赖）。启动后台调用 + 写入周期检查共用。
+    Returns: (删除文件数, 释放字节数)。
+    """
+    d = _tts_cache_dir()
+    if not d:
+        return (0, 0)
+    entries: list[Tuple[float, str, int]] = []
+    try:
+        for name in os.listdir(d):
+            if not name.endswith(".wav"):
+                continue
+            path = os.path.join(d, name)
+            try:
+                entries.append((os.path.getmtime(path), path, os.path.getsize(path)))
+            except OSError:
+                continue
+    except OSError:
+        return (0, 0)
+    now = time.time()
+    removed: list[str] = []
+    freed = 0
+    # 1) TTL 过期
+    keep: list[Tuple[float, str, int]] = []
+    for mtime, path, size in entries:
+        if now - mtime > _TTS_CACHE_TTL_SEC:
+            removed.append(path)
+            freed += size
+        else:
+            keep.append((mtime, path, size))
+    # 2) 超容量：按最旧优先淘汰，直到低于上限
+    total = sum(size for _, _, size in keep)
+    if total > _TTS_CACHE_MAX_BYTES:
+        for mtime, path, size in sorted(keep):  # mtime 升序 = 最旧在前
+            if total <= _TTS_CACHE_MAX_BYTES:
+                break
+            removed.append(path)
+            freed += size
+            total -= size
+    for path in removed:
+        try:
+            os.remove(path)
+        except OSError:
+            pass
+    return (len(removed), freed)
 
 # 每批最多合成句数：LLM 流式产句远快于服务端合成，批量收拢攒不满反而
 # 拖累首声（服务端 infer_batched_async 整批合成完才返回，8 句可能等
@@ -198,6 +338,8 @@ class TTSEngine(BaseTTSAdapter):
         self._pending = asyncio.Queue()
         self._ready = True
         console.ok(f"TTS 服务端已连接（{self._server_url}）")
+        # 启动后后台清理过期/超容量磁盘音频缓存（不阻塞启动，失败静默）
+        asyncio.create_task(asyncio.to_thread(evict_tts_cache))
         return True
 
     async def _close_client(self) -> None:
@@ -434,6 +576,10 @@ class TTSEngine(BaseTTSAdapter):
         时放弃剩余音频下载。单句音频退化（时长异常=拖长音怪叫）时走
         _synth_one 重试一次，仍异常则丢弃该句（宁缺毋怪）。整批请求
         失败（服务端偶发 500/网络抖动）时转逐句重试，不再整批丢弃。
+
+        磁盘缓存（data/tts_cache，md5 键）先行：同文本+参考+参数命中即
+        解码播放，跳过服务端合成（直播高频话术只合成一次）；命中后仍走
+        退化检测，异常产物删缓存并降级为 HTTP 重合成。
         """
         speaker_audio, prompt_audio, prompt_text = self._ref_params()
         payload = {
@@ -443,15 +589,41 @@ class TTSEngine(BaseTTSAdapter):
             "prompt_text": prompt_text,
             **_SYNTH_PARAMS,
         }
+        keys = [_tts_cache_key(t, speaker_audio, prompt_audio, prompt_text)
+                for t in texts]
+        # 缓存快路径：命中即解码播放（仍走退化检测，异常产物删缓存作废）；
+        # 未命中的句子索引进 misses，仅对它们请求服务端合成。
+        misses: list[int] = []
+        for i, (text, key) in enumerate(zip(texts, keys)):
+            cached = await asyncio.to_thread(_cache_load, key)
+            if cached is None:
+                misses.append(i)
+                continue
+            if gen != self._gen:
+                return  # 打断：放弃剩余
+            audio = await asyncio.to_thread(_decode_wav_bytes, cached)
+            audio_data, sr = audio
+            if _is_degraded_audio(len(audio_data) / sr, len(text)):
+                # 缓存里存了退化产物：删掉并重合成
+                await asyncio.to_thread(_cache_delete, key)
+                misses.append(i)
+                continue
+            # 缓存音频无词级时间戳，字幕回退整句显示
+            self._player.emit(audio_data, sr, text,
+                              _fallback_subtitles(text), gen)
+        if not misses:
+            return  # 全部命中
+        miss_texts = [texts[i] for i in misses]
         try:
             resp = await self._client.post(
-                f"{self._server_url}/tts/batch", json=payload)
+                f"{self._server_url}/tts/batch",
+                json={**payload, "texts": miss_texts})
             resp.raise_for_status()
             data = resp.json()
         except Exception as e:
             # 整批失败（偶发 500）：逐句重试（_synth_one 内部带 2 次尝试）
             console.warn(f"TTS 批量合成失败（{e}），逐句重试…")
-            for text in texts:
+            for text in miss_texts:
                 if gen != self._gen:
                     return  # 打断：放弃剩余
                 retried = await self._synth_one(text, gen)
@@ -463,22 +635,27 @@ class TTSEngine(BaseTTSAdapter):
                                   _fallback_subtitles(text), gen)
             return
         subtitles_list = data.get("subtitles") or []
-        for i, (text, filename) in enumerate(zip(texts, data.get("filenames", []))):
+        filenames = data.get("filenames") or []
+        for j, text in enumerate(miss_texts):
             if gen != self._gen:
                 return  # 打断：放弃剩余音频
-            audio = await self._download_audio(filename)
+            if j >= len(filenames):
+                continue
+            audio = await self._download_audio(filenames[j], keys[misses[j]])
             if audio is None:
                 continue
             audio_data, sr = audio
             degraded = _is_degraded_audio(len(audio_data) / sr, len(text))
             if degraded:
+                # 退化产物不入缓存
+                await asyncio.to_thread(_cache_delete, keys[misses[j]])
                 retried = await self._synth_one(text, gen)
                 if retried is None:
                     continue  # 重试仍退化/失败：放弃该句，不播怪叫
                 audio_data, sr = retried
             # 重试的音频无词级时间戳，字幕回退整句显示
-            subs = (subtitles_list[i] if not degraded
-                    and i < len(subtitles_list) else None)
+            subs = (subtitles_list[j] if not degraded
+                    and j < len(subtitles_list) else None)
             self._player.emit(audio_data, sr, text,
                               subs if subs else _fallback_subtitles(text), gen)
 
@@ -488,7 +665,7 @@ class TTSEngine(BaseTTSAdapter):
         合成失败（服务端偶发 500/网络抖动）或音频退化（时长异常 =
         拖长音怪叫，与文本无关的 GPT 采样随机崩坏）时都重试一次——GSV
         采样随机，重试大概率正常；两次仍失败返回 None，由调用方放弃
-        该句，绝不把怪叫播出去。
+        该句，绝不把怪叫播出去。命中磁盘缓存时跳过合成直接解码。
         """
         speaker_audio, prompt_audio, prompt_text = self._ref_params()
         payload = {
@@ -498,6 +675,14 @@ class TTSEngine(BaseTTSAdapter):
             "prompt_text": prompt_text,
             **_SYNTH_PARAMS,
         }
+        key = _tts_cache_key(text, speaker_audio, prompt_audio, prompt_text)
+        cached = await asyncio.to_thread(_cache_load, key)
+        if cached is not None:
+            audio = await asyncio.to_thread(_decode_wav_bytes, cached)
+            audio_data, sr = audio
+            if not _is_degraded_audio(len(audio_data) / sr, len(text)):
+                return audio_data, sr
+            await asyncio.to_thread(_cache_delete, key)  # 退化缓存作废
         for _ in range(2):
             if gen != self._gen:
                 return None
@@ -512,30 +697,34 @@ class TTSEngine(BaseTTSAdapter):
             if not filenames:
                 return None
             for filename in filenames:
-                audio = await self._download_audio(filename)
+                audio = await self._download_audio(filename, key)
                 if audio is None:
                     continue
                 audio_data, sr = audio
                 if not _is_degraded_audio(len(audio_data) / sr, len(text)):
                     return audio_data, sr
+                await asyncio.to_thread(_cache_delete, key)  # 退化产物不入缓存
                 console.warn(
                     f"TTS 检测到异常合成（文本 {len(text)} 字、音频 "
                     f"{len(audio_data) / sr:.1f}s），重试…")
                 break  # 当前句退化：重新合成
         return None
 
-    async def _download_audio(self, filename: str) -> Optional[Tuple[np.ndarray, int]]:
+    async def _download_audio(self, filename: str, cache_key: str = "") -> Optional[Tuple[np.ndarray, int]]:
         """下载 wav 字节流并解码为 (1D float32, 采样率)。失败返回 None。
 
         sf.read 是同步 IO，单个 16k 浮点 wav 解码 ~5-15ms，期间会阻塞整个
         asyncio 事件循环（LLM 流、弹幕处理、字幕推送全部停摆）。改走
         to_thread 把解码扔进默认 executor，事件循环继续派发其它协程。
+        传入 cache_key 时把原始 wav 字节写入磁盘缓存（命中后续合成）。
         """
         try:
             resp = await self._client.get(
                 f"{self._server_url}/audio/{filename}")
             resp.raise_for_status()
             content = resp.content
+            if cache_key:
+                await asyncio.to_thread(_cache_save, cache_key, content)
             # soundfile.read 是阻塞 syscall + numpy 解码，必须放线程池
             data, sr = await asyncio.to_thread(
                 _decode_wav_bytes, content)

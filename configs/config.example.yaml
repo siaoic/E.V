@@ -41,6 +41,11 @@
 
 # ===== 记忆系统 =====
 # MEMORY_ENABLED: true
+# Mem0 判决链：新提取事实由 LLM 判定 ADD/UPDATE/DELETE/IGNORE，
+# 防止近似重复入库与事实冲突。默认关闭（现有语义去重路径不变）。
+# MEMORY_LIFECYCLE_ENABLED: false
+# MEMORY_LIFECYCLE_MODEL: ""            # 留空用 BUTLER_MODEL / LLM_MODEL
+# MEMORY_LIFECYCLE_THRESHOLD: 0.6       # 相似记忆召回阈值（低于视为全新主题直接 ADD）
 
 # ===== ButlerAgent 管家模型（留空 = 与主对话共用） =====
 # BUTLER_BASE_URL: ""
@@ -52,6 +57,18 @@
 # ===== 人设（SYSTEM_PROMPT_FILE 优先于 yaml/UI 人设） =====
 # SYSTEM_PROMPT_FILE: ""
 # SYSTEM_PROMPT: ""
+
+# ===== 知识库（防幻觉：data/knowledge 权威设定按信号闸门命中才注入） =====
+# KNOWLEDGE_ENABLED: true
+# KNOWLEDGE_MAX_CHARS: 1200   # 单次知识注入的字符预算（闲聊不注入，省 Token）
+
+# ===== Agent 任务执行（阶段 4，默认不启用，!agent 命令触发） =====
+# AGENT_ENABLED: false
+# AGENT_MODEL: ""             # 留空用 LLM_MODEL
+# AGENT_MAX_STEPS: 8
+# AGENT_MAX_TOKENS: 50000
+# AGENT_WORKSPACE: ""         # 留空 = 项目根（Agent 只能在此目录内读写）
+# AGENT_ALLOW_SHELL: false    # shell 高风险操作门禁，默认拒绝
 
 # ===== Function Calling 工具 =====
 # OPENWEATHERMAP_API_KEY: ""

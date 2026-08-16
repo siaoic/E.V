@@ -13,7 +13,6 @@
 from __future__ import annotations
 
 import asyncio
-import json
 import os
 import re
 from datetime import datetime
@@ -21,6 +20,12 @@ from typing import Any
 
 from openai import AsyncOpenAI
 
+from src.llm.client.factory import (
+    build_thinking_extra_body,
+    get_async_openai_client,
+)
+from src.llm.jsonutil import parse_json_array
+from src.llm.memory.lore_guard import is_lore_leak
 from tools.memory import memory
 from src.utils import config, console
 from src.utils.constants import ROLE_ASSISTANT, ROLE_AI_ALIAS
@@ -165,53 +170,6 @@ _PROACTIVE_PROMPT_TEMPLATE = (
 # 记忆提取后台 worker 数量（密集对话时并行消费，避免提取堆积）
 _EXTRACT_WORKERS = 3
 
-_JSON_FENCE_RE = re.compile(r"^```(?:json)?\s*|\s*```$", re.IGNORECASE)
-
-# 全角字符 → 半角（模型输出 JSON 时常见全角冒号/引号/括号导致解析失败）
-_FULLWIDTH_MAP = str.maketrans(
-    {
-        "，": ",",
-        "：": ":",
-        "；": ";",
-        "？": "?",
-        "！": "!",
-        "。": ".",
-        "“": '"',
-        "”": '"',
-        "‘": "'",
-        "’": "'",
-        "（": "(",
-        "）": ")",
-        "【": "[",
-        "】": "]",
-        "　": " ",
-    }
-    | {chr(code): chr(code - 0xFEE0) for code in range(0xFF10, 0xFF1A)}
-)  # 全角数字 ０-９ → 半角 0-9
-
-
-def _extract_json_array(content: str) -> list | None:
-    """容错解析 JSON 数组：直接解析失败后截取首个 [ 到末尾 ] 兜底。
-
-    对标 NagaAgent json5 容错解析：模型输出混入前后缀文字时也能取到数组。
-    """
-    try:
-        data = json.loads(content)
-        return data if isinstance(data, list) else None
-    except (json.JSONDecodeError, TypeError):
-        pass
-    start = content.find("[")
-    if start < 0:
-        return None
-    end = content.rfind("]")
-    if end <= start:
-        return None
-    try:
-        data = json.loads(content[start : end + 1])
-        return data if isinstance(data, list) else None
-    except (json.JSONDecodeError, TypeError):
-        return None
-
 
 class ButlerAgent:
     """记忆提取 / 会话摘要 / 蒸馏 / 主动发言构造。"""
@@ -221,6 +179,9 @@ class ButlerAgent:
         self._model = ""
         self._queue: asyncio.Queue = asyncio.Queue(maxsize=16)
         self._worker_tasks: list[asyncio.Task] = []
+        # 实时强信号捕获：待入库条目 + 后台消费任务（合并小批写入）
+        self._instant_pending: list[dict] = []
+        self._instant_task: asyncio.Task | None = None
 
     # ---------- 客户端 ----------
 
@@ -234,7 +195,8 @@ class ButlerAgent:
                 return None
             # 明确超时：记忆提取/摘要等后台任务不设限会无限等待（agent 后台
             # 静默卡死），超时后放弃本次调用由调用方静默跳过
-            self._client = AsyncOpenAI(base_url=base_url, api_key=api_key, timeout=45.0)
+            self._client = get_async_openai_client(
+                api_key=api_key, base_url=base_url, timeout=45.0)
         return self._client
 
     async def _complete(self, messages: list[dict], temperature: float):
@@ -251,7 +213,7 @@ class ButlerAgent:
                         model=self._model,
                         messages=messages,
                         temperature=temperature,
-                        extra_body={"thinking": {"type": "disabled"}},
+                        extra_body=build_thinking_extra_body(False),
                     ),
                     timeout=45.0,
                 )
@@ -288,9 +250,7 @@ class ButlerAgent:
         if response is None:
             return []
         content = self._message_text(response.choices[0].message)
-        content = _JSON_FENCE_RE.sub("", content)
-        content = content.translate(_FULLWIDTH_MAP)  # 全角字符标准化
-        data = _extract_json_array(content)
+        data = parse_json_array(content)
         if data is None:
             return []
         return [
@@ -334,6 +294,9 @@ class ButlerAgent:
         """把新轮次加入后台提取队列（立即返回；队列满则丢弃）。"""
         if not new_turns:
             return
+        # 实时强信号捕获：正则直接命中稳定事实即后台立即入库，不等 LLM 批量
+        # 提取——直播高并发下批量提取可能延迟/丢队，强信号事实不值得等待。
+        self._submit_instant_capture(new_turns)
         try:
             self._queue.put_nowait((new_turns, recent_turns))
         except asyncio.QueueFull:
@@ -392,6 +355,35 @@ class ButlerAgent:
             )
         await memory.get_manager().commit_recall_files(files)
 
+    # ---------- 实时强信号捕获（正则先行，不等 LLM 批量提取） ----------
+
+    def _submit_instant_capture(self, new_turns: list[dict]) -> None:
+        """正则命中稳定事实即后台立即入库（异步调度，不阻塞调用方）。
+
+        批量提取（extract_and_store）依赖 LLM 且走队列，直播高并发时可能
+        延迟/丢队；明确喜好/关系/年龄等强信号事实不值得等待，这里用确定性
+        规则先行捕获。写入仍走 commit_recall_files（精确/语义去重 + 判决链），
+        配合 lore_guard 预筛防误写。
+        """
+        entries = _instant_memory_entries(new_turns)
+        if not entries:
+            return
+        self._instant_pending.extend(entries)
+        if self._instant_task is None or self._instant_task.done():
+            self._instant_task = asyncio.create_task(self._commit_instant())
+
+    async def _commit_instant(self) -> None:
+        """消费待入库的实时捕获条目（合并小批写入，失败静默跳过）。"""
+        while True:
+            batch, self._instant_pending = (
+                self._instant_pending[:16], self._instant_pending[16:])
+            if not batch:
+                break
+            try:
+                await memory.get_manager().commit_recall_files(batch)
+            except Exception as e:
+                console.warn(f"[ButlerAgent] 实时记忆捕获失败：{e}")
+
     # ---------- 会话摘要与蒸馏 ----------
 
     async def summarize_session(self, turns: list[dict]) -> str:
@@ -443,7 +435,7 @@ class ButlerAgent:
         if not (base_url and api_key and model):
             console.warn("[ButlerAgent] 记忆整合：主模型未配置，跳过")
             return None
-        client = AsyncOpenAI(base_url=base_url, api_key=api_key, timeout=60.0)
+        client = get_async_openai_client(api_key=api_key, base_url=base_url, timeout=60.0)
         recs: list[dict] = []
         batches = [files[i : i + batch] for i in range(0, len(files), batch)]
         for part in batches:
@@ -484,14 +476,12 @@ class ButlerAgent:
                 except Exception as e:
                     console.warn(f"[ButlerAgent] 记忆整合调用失败：{e}")
                     break
-                content = _JSON_FENCE_RE.sub("", resp.choices[0].message.content or "")
-                content = content.translate(_FULLWIDTH_MAP)
-                data = _extract_json_array(content)
-                if data:
+                content = parse_json_array(resp.choices[0].message.content or "")
+                if content:
                     break
             clean = [
                 e
-                for e in (data or [])
+                for e in (content or [])
                 if isinstance(e, dict) and e.get("name") and e.get("content")
             ]
             if not clean:
@@ -525,7 +515,8 @@ class ButlerAgent:
             return ""
         # 依次尝试：主模型优先，失败（不支持图片输入等）时回退下一候选
         for base_url, api_key, model in candidates:
-            client = AsyncOpenAI(base_url=base_url, api_key=api_key, timeout=60.0)
+            client = get_async_openai_client(
+                api_key=api_key, base_url=base_url, timeout=60.0)
             try:
                 resp = await asyncio.wait_for(
                     client.chat.completions.create(
@@ -601,6 +592,122 @@ class ButlerAgent:
 # 而提取/蒸馏外部构造的轮次用字面量 "assistant"，统一转小写后对比，避免误把 AI 回复
 # 当作观众/主播轮次，导致记忆归属全部塌缩成默认用户。
 _AI_ROLES = {ROLE_ASSISTANT.lower(), ROLE_AI_ALIAS.lower(), "assistant", "ai"}
+
+
+# ---------- 实时强信号捕获（正则先行） ----------
+#
+# 弱宾语：代词/泛指词（喜欢这个/那个人）不算稳定事实，命中即跳过；
+# 这类表达由 LLM 批量提取自行判断是否值得记录。
+_WEAK_OBJS = {
+    "这个", "那个", "这些", "那些", "这样", "那样", "这里", "那里",
+    "这个人", "那个人", "你", "你们", "他", "她", "它", "他们", "她们",
+    "大家", "自己", "上", "一下", "人", "事", "东西", "玩",
+}
+
+# 稳定事实捕获规则（确定性，不依赖 LLM）。每组：
+# (正则, 主题名, content 模板, 三元组模板)；正则 obj 组 = 事实主体，
+# rel 组（仅关系规则） = 亲属/称谓。正则以「我/我的」口吻出现在弹幕或
+# 主播发言中；「我喜欢」前置 (?<!不) 负向断言防止「我不喜欢」误捕获为喜好。
+_INSTANT_PATTERNS: tuple[tuple[re.Pattern, str, str, str], ...] = (
+    (
+        re.compile(
+            r"(?<!不)(?:我最喜欢|我超喜欢|我好喜欢|我很喜欢|我特别喜欢|"
+            r"我喜欢|我超爱|我爱吃|我爱喝|最爱|我爱|超爱)"
+            r"\s*(?P<obj>[^，。！？!?；;、\s]{1,24})"
+        ),
+        "喜好", "{subject}喜欢{obj}", "{subject} 喜欢 {obj}",
+    ),
+    (
+        re.compile(
+            r"(?:我不太喜欢|我不喜欢|我讨厌|我不爱|我不吃)"
+            r"\s*(?P<obj>[^，。！？!?；;、\s]{1,24})"
+        ),
+        "厌恶", "{subject}不喜欢{obj}", "{subject} 不喜欢 {obj}",
+    ),
+    (
+        re.compile(
+            r"(?P<obj>[^，。！？!?；;、\s]{1,16})\s*是我"
+            r"(?P<rel>姐姐|妹妹|哥哥|弟弟|老婆|老公|女朋友|男朋友|对象|"
+            r"室友|闺蜜|兄弟|师傅|师父|同学|朋友)"
+        ),
+        "关系", "{subject}的{rel}是{obj}", "{obj} 是 {subject} 的 {rel}",
+    ),
+    (
+        re.compile(r"我今年?\s*(?P<obj>\d{1,3})\s*岁"),
+        "年龄", "{subject}今年{obj}岁", "{subject} 年龄 {obj}岁",
+    ),
+    (
+        re.compile(r"我(?:住在|住)\s*(?P<obj>[^，。！？!?；;、\s]{1,12})"),
+        "所在地", "{subject}住在{obj}", "{subject} 住在 {obj}",
+    ),
+    (
+        re.compile(
+            r"我在(?P<obj>[^，。！？!?；;、\s]{1,12})(?:工作|上班|上学|读书|生活)"
+        ),
+        "所在地", "{subject}在{obj}工作/上学", "{subject} 在 {obj} 工作/上学",
+    ),
+    (
+        re.compile(r"我养了(?:一只|一条|只|条)?\s*(?P<obj>[^，。！？!?；;、\s]{1,12})"),
+        "宠物", "{subject}养了{obj}", "{subject} 养了 {obj}",
+    ),
+    (
+        re.compile(r"我(?:的)?生日(?:是|在)?\s*(?P<obj>[^，。！？!?；;、\s]{1,16})"),
+        "生日", "{subject}的生日是{obj}", "{subject} 生日 {obj}",
+    ),
+    (
+        re.compile(r"(?:我叫|我的名字叫|本名|名字叫)\s*(?P<obj>[^，。！？!?；;、\s]{1,12})"),
+        "名字", "{subject}的名字是{obj}", "{subject} 名字 {obj}",
+    ),
+)
+
+
+def _split_turn(turn: dict) -> tuple[str, str]:
+    """从轮次提取（归属者, 正文）：弹幕按 [弹幕@名] 归属其观众，其余非 AI
+    轮次归主播；AI 自述轮次返回 (self, "") 由调用方跳过（走 LLM 批量提取）。"""
+    role = str(turn.get("role") or "").lower()
+    if role in _AI_ROLES:
+        return (memory._USER_SELF, "")
+    content = str(turn.get("content") or "").strip()
+    if not content:
+        return (memory._USER_DEFAULT, "")
+    m = re.match(r"^\[弹幕@([^\]]+)\]\s*(.*)$", content, re.S)
+    if m:
+        return (m.group(1).strip()[:32] or memory._USER_DEFAULT, m.group(2).strip())
+    return (memory._USER_DEFAULT, content)
+
+
+def _instant_memory_entries(turns: list[dict]) -> list[dict]:
+    """从轮次文本中正则捕获稳定事实（仅用户侧；AI 自述走批量提取）。
+
+    返回可直接 commit_recall_files 的条目；命中 lore 词库（世界观讨论）或
+    弱宾语（这个/那个等）跳过；一条轮次只取首个命中模式，避免同句多条碎片。
+    """
+    entries: list[dict] = []
+    for turn in turns:
+        subject, body = _split_turn(turn)
+        if not body or is_lore_leak(body):
+            continue
+        for pattern, kind, content_tpl, triple_tpl in _INSTANT_PATTERNS:
+            m = pattern.search(body)
+            if not m:
+                continue
+            obj = (m.group("obj") or "").strip()
+            obj = re.sub(r"[吗呢啊吧]$", "", obj)  # 剥句末语气词（喜欢猫吗→猫）
+            if not obj or obj in _WEAK_OBJS:
+                continue
+            rel = m.groupdict().get("rel") or ""
+            content = content_tpl.format(subject=subject, obj=obj, rel=rel)
+            triple = triple_tpl.format(subject=subject, obj=obj, rel=rel)
+            entries.append(
+                {
+                    "name": f"{subject}的{kind}",
+                    "description": f"core/实体记忆：{triple}",
+                    "content": content,
+                    "user": subject,
+                }
+            )
+            break  # 一句只捕获一条最强信号
+    return entries
 
 
 def _pick_owner(recent_turns: list[dict] | None, new_turns: list[dict] | None) -> str:

@@ -164,7 +164,13 @@ class STTEngine(BaseInputAdapter):
     # ---------- 生命周期 ----------
 
     def start(self) -> None:
-        """在 asyncio 主循环内调用：记录 loop，启动采集/处理线程。"""
+        """在 asyncio 主循环内调用：记录 loop，启动采集/处理线程。
+
+        VAD 模型在返回前同步加载完成：保证主循环第一次 _wait_input 等待
+        STT 结果时识别链路已就绪。否则用户在首轮提示符后开口时，首句话
+        要等 VAD 加载完成（数秒）才识别，表现为「第一次使用 STT 没反应」。
+        监听线程先启动：加载期间的麦克风音频照常入队缓冲，不丢失。
+        """
         self._loop = asyncio.get_running_loop()
         if self._listener is not None and self._listener.is_alive():
             return
@@ -172,6 +178,9 @@ class STTEngine(BaseInputAdapter):
         self._listener = threading.Thread(
             target=self._listen_loop, name="stt-listener", daemon=True)
         self._listener.start()
+        # VAD 就绪后再启动处理/流式线程（加载失败静默降级，处理线程兜底重试）
+        console.dim("[STT] 正在加载语音检测模型（fsmn-vad）…")
+        self._load_vad_model()
         self._processor = threading.Thread(
             target=self._process_loop, name="stt-processor", daemon=True)
         self._processor.start()
@@ -182,14 +191,14 @@ class STTEngine(BaseInputAdapter):
         self.preheat()
 
     def preheat(self) -> None:
-        """预热语音识别链路（VAD 模型 + 本地 ASR 空会话），失败静默。
+        """预热本地 ASR 服务空会话（后端线程），失败静默。
 
-        动机：fsmn-vad 是处理线程首次说话才懒加载（funasr 导入 + 模型
-        加载可能卡数百 ms）；本地 ASR 服务端的首次推理也有初始化开销。
-        启动时后台预热，用户开口即用，首句识别延迟最低。
+        动机：VAD 模型已由 start() 同步加载（首轮 _wait_input 即就绪）；
+        此处仅针对本地引擎预热 ASR 服务端首次推理路径——服务端首块
+        feed 有初始化开销，后台跑一个空会话烧热，真实首块 feed 不再有
+        初始化开销。云端引擎此方法为空操作。
 
-        只做一次（模型与链路常驻进程）；任何一步失败都只丢预热，
-        不影响后续正常识别。
+        只做一次；任何一步失败都只丢预热，不影响后续正常识别。
         """
         if self._preheat_done:
             return

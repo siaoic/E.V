@@ -37,7 +37,7 @@ class FaceHandler:
             return env_path
         name = ("emotion_map_vts.json" if self._current_mode() == "vtuber"
                 else "emotion_map.json")
-        return os.path.join(self.cfg.PROJECT_ROOT, "data", name)
+        return os.path.join(self.cfg.DATA_ROOT, name)
 
     def _entry(self, emotion: str) -> dict:
         """情绪映射条目（惰性创建）。"""
@@ -49,6 +49,8 @@ class FaceHandler:
 
         只在拖拽结束（drag.exec 返回）后调用：Qt 规范禁止在拖拽进行中
         修改源 widget 可见性，否则布局刷新被吞、按钮「又显示出来」。
+        恢复显示的按钮需清理视觉残留（拖拽期间收不到 Leave 事件，
+        WA_UnderMouse 残留会导致 QSS :hover 样式残留、按钮变暗）。
         """
         expr_binds = {emo: _as_list((self._map_data.get(emo) or {}).get("expression"))
                       for emo in self._emotions}
@@ -57,11 +59,17 @@ class FaceHandler:
         for emo, card in getattr(self, "_expr_cards", {}).items():
             card.set_bound(expr_binds[emo])
         for name, btn in getattr(self, "_expr_buttons", {}).items():
-            btn.setVisible(not any(name in items for items in expr_binds.values()))
+            visible = not any(name in items for items in expr_binds.values())
+            btn.setVisible(visible)
+            if visible:
+                self._clear_btn_visual(btn)
         for emo, card in getattr(self, "_motion_zone_cards", {}).items():
             card.set_bound(motion_binds[emo])
         for name, btn in getattr(self, "_motion_cards", {}).items():
-            btn.setVisible(not any(name in items for items in motion_binds.values()))
+            visible = not any(name in items for items in motion_binds.values())
+            btn.setVisible(visible)
+            if visible:
+                self._clear_btn_visual(btn)
 
     def _on_bind_expr(self, emotion: str, expr: str) -> None:
         """拖拽绑定表情：同一情绪可绑定多个表情（再拖同名项 = 解除），

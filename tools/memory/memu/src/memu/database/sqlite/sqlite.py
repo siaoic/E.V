@@ -29,6 +29,27 @@ from memu.database.state import DatabaseState
 logger = logging.getLogger(__name__)
 
 
+# 迁移脚本（按序追加，逐条幂等）：create_all 只建新表、不会给旧表补列，
+# 老库（早于当前 schema 版本）在此补列 / 兜底脏数据。
+# 单条失败（列已存在 / 表不存在）由 _run_migrations 吞掉并继续，可重复执行。
+_MIGRATIONS: list[str] = [
+    # 老库升级：补 memU ADR 0003 user 作用域列（旧库缺列时 ORM 查询会崩）
+    "ALTER TABLE memu_recall_files ADD COLUMN user_id VARCHAR",
+    "ALTER TABLE memu_recall_files ADD COLUMN agent_id VARCHAR",
+    "ALTER TABLE memu_recall_files ADD COLUMN user VARCHAR",
+    "ALTER TABLE memu_recall_file_segments ADD COLUMN user_id VARCHAR",
+    "ALTER TABLE memu_recall_file_segments ADD COLUMN agent_id VARCHAR",
+    "ALTER TABLE memu_recall_file_segments ADD COLUMN user VARCHAR",
+    "ALTER TABLE memu_resources ADD COLUMN user_id VARCHAR",
+    "ALTER TABLE memu_resources ADD COLUMN agent_id VARCHAR",
+    "ALTER TABLE memu_resources ADD COLUMN user VARCHAR",
+    # created_at 兜底：历史 NULL 补为 updated_at（保证排序 / 时间衰减可用）
+    "UPDATE memu_recall_files SET created_at = updated_at WHERE created_at IS NULL",
+    "UPDATE memu_recall_file_segments SET created_at = updated_at WHERE created_at IS NULL",
+    "UPDATE memu_resources SET created_at = updated_at WHERE created_at IS NULL",
+]
+
+
 class SQLiteStore(Database):
     """SQLite database store implementation.
 
@@ -113,11 +134,28 @@ class SQLiteStore(Database):
         self.segments = self._state.segments
 
     def _create_tables(self) -> None:
-        """Create SQLite tables if they don't exist."""
+        """Create SQLite tables if they don't exist, then apply idempotent migrations."""
         SQLModel.metadata.create_all(self._sessions.engine)
-        # Also create tables from our custom metadata
         self._sqla_models.Base.metadata.create_all(self._sessions.engine)
+        self._run_migrations()
         logger.debug("SQLite tables created/verified")
+
+    def _run_migrations(self) -> None:
+        """按序执行迁移脚本，单条失败（列已存在 / 表不存在）忽略后继续。
+
+        用异常而非版本号判断是否已迁移，保证可重复执行；单条失败后回滚
+        事务再继续下一条，新库表已齐全时全部静默跳过。
+        """
+        from sqlalchemy import text
+
+        with self._sessions.engine.connect() as conn:
+            for sql in _MIGRATIONS:
+                try:
+                    conn.execute(text(sql))
+                except Exception:
+                    conn.rollback()
+                    logger.debug("迁移跳过（可能已应用）：%s", sql)
+            conn.commit()
 
     def close(self) -> None:
         """Close the database connection and release resources."""

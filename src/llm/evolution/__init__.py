@@ -1,0 +1,10 @@
+"""自我进化引擎包（原 src/llm/evolution.py 拆分）。
+
+对外保持 `from src.llm.evolution import EvolutionEngine` 兼容；
+模块内部按职责拆分：engine（调度）/ skills / topics / advice / profile
+/ prompts / _utils / metrics。
+"""
+
+from .engine import EvolutionEngine
+
+__all__ = ["EvolutionEngine"]

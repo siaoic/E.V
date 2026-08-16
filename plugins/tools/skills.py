@@ -28,7 +28,7 @@ from src.utils import config, console
 # 技能使用统计持久化文件：record_usage 记录 load 次数与最近使用时间，
 # 复盘时注入进化引擎，让技能修补/清理有真实使用数据支撑（对标 hermes 的
 # skill usage counters——但 hermes 明确 use=0 不作为归档依据，这里同样只供参考）
-_USAGE_PATH = os.path.join(config.cfg.PROJECT_ROOT, "data", "skill_usage.json")
+_USAGE_PATH = os.path.join(config.cfg.DATA_ROOT, "skill_usage.json")
 
 _SKILL_FILENAME = "SKILL.md"
 """技能定义文件名"""
@@ -38,6 +38,34 @@ _DESCRIPTION_MAX_CHARS = 200
 
 _FRONTMATTER_PATTERN = re.compile(r"\A---\s*\n(.*?)\n---\s*(?:\n|\Z)", re.DOTALL)
 """匹配文件开头的 YAML frontmatter 块"""
+
+_PHRASE_SPLIT_RE = re.compile(r"[，。、；：！？\s,.;:!?]+")
+"""意图匹配用的描述/消息短语切分符（中英文标点 + 空白）"""
+
+
+def _text_ngrams(text: str, n: int) -> set:
+    """取文本的全部连续 n 字子串（n-gram），用于中文/英文关键词特征匹配。"""
+    return {text[i:i + n] for i in range(len(text) - n + 1)}
+
+
+def _score_intent(description: str, message: str) -> int:
+    """按消息意图给单个技能描述打分（§3.5.3 get_skill_for_intent 的匹配核心）。
+
+    两路加权，与标点分词无关，对中文自然语句友好：
+    1. 消息的 2~4 字连续子串（n-gram）在描述中出现的加权计数——抓"新闻"
+       "日记"这类分散关键词特征（n 越大权重越高）；
+    2. 描述切出的短语整体出现在消息中，权重最高（长短语命中 = 强意图）。
+    """
+    desc = description.lower()
+    msg = message.lower()
+    score = 0
+    for n in (4, 3, 2):
+        score += n * sum(1 for gram in _text_ngrams(msg, n) if gram in desc)
+    for phrase in _PHRASE_SPLIT_RE.split(desc):
+        phrase = phrase.strip()
+        if len(phrase) >= 2 and phrase in msg:
+            score += len(phrase) * 4
+    return score
 
 
 @dataclass(frozen=True)
@@ -270,6 +298,22 @@ class SkillManager:
         ]
         lines.extend(f"- {s.name}: {s.description}" for s in skills)
         return "\n".join(lines)
+
+    def match_intent(self, message: str) -> Optional[AgentSkill]:
+        """按消息意图选择最匹配的技能（§3.5.3 get_skill_for_intent）。
+
+        对每个技能描述与消息做双向子串加权打分（_score_intent），
+        返回得分最高的技能；无任何命中返回 None。零依赖、纯本地。
+        """
+        if not message:
+            return None
+        best_skill: Optional[AgentSkill] = None
+        best_score = 0
+        for skill in self.skills:
+            score = _score_intent(skill.description, message)
+            if score > best_score:
+                best_score, best_skill = score, skill
+        return best_skill
 
     def stop_watcher(self) -> None:
         """停止文件监视器"""

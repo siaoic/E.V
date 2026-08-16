@@ -20,7 +20,35 @@ from src.llm.utils.bigram import _bigram_set
 
 
 class _InjectionMixin:
-    """话术建议 / 观众画像 / 进化策略段注入。"""
+    """话术建议 / 观众画像 / 进化策略 / 知识库段注入。"""
+
+    # ---------- Author's Note 尾部人设锚点（近因效应） ----------
+
+    def _tail_anchor_section(self) -> str:
+        """返回 Author's Note 人设锚点文本（追加在 messages 末尾的 system 尾注）。
+
+        对标 Firefly build_authors_note：利用 LLM 近因效应，把角色语气/格式
+        铁律放在 user 消息之后，比放在 system prompt 开头更有效。
+        默认空（.env 未配置 AUTHOR_NOTE）= 不注入，行为与历史完全一致。
+        """
+        return (getattr(self.cfg, "AUTHOR_NOTE", "") or "").strip()
+
+    # ---------- 知识库注入（防幻觉，对标 Firefly 知识金字塔） ----------
+
+    def _knowledge_section(self, user_text: str) -> str:
+        """按信号闸门返回应注入的知识段（data/knowledge 权威设定）。
+
+        闲聊与无关消息返回空串（不注入，省 Token）；知识数据懒加载，
+        进程内缓存一次。KNOWLEDGE_ENABLED 关闭时完全不注入。
+        """
+        if not getattr(self.cfg, "KNOWLEDGE_ENABLED", True):
+            return ""
+        from src.llm.knowledge import get_knowledge_service
+
+        return get_knowledge_service().section(
+            user_text,
+            max_total_chars=getattr(self.cfg, "KNOWLEDGE_MAX_CHARS", 1200),
+        )
 
     # ---------- 生效话术建议注入 ----------
 

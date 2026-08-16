@@ -22,7 +22,7 @@ from tools.memory import memory
 
 # 失败重试队列：写入失败的事实先落盘，进程启动时由 main 调 _drain_retry_queue。
 # 避免 LLM 调 remember_fact 失败时只回一句 "AI 没记住" 草草了事。
-_RETRY_QUEUE_PATH = os.path.join(config.cfg.PROJECT_ROOT, "data", "memory_retry.json")
+_RETRY_QUEUE_PATH = os.path.join(config.cfg.DATA_ROOT, "memory_retry.json")
 _RETRY_QUEUE_MAX = 200  # 兜底条数：超过即截断最早的，防队列无限膨胀
 
 

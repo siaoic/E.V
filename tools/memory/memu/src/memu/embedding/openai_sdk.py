@@ -6,6 +6,7 @@ from openai.types import CreateEmbeddingResponse
 
 from memu.embedding.http_client import proxy_bypass_mounts
 from memu.env import env as memu_env
+from memu.vector import reduce_embedding_dimensions
 
 logger = logging.getLogger(__name__)
 
@@ -13,11 +14,20 @@ logger = logging.getLogger(__name__)
 class OpenAIEmbeddingSDKClient:
     """OpenAI embedding client that relies on the official Python SDK."""
 
-    def __init__(self, *, base_url: str, api_key: str, embed_model: str, batch_size: int = 1):
+    def __init__(
+        self,
+        *,
+        base_url: str,
+        api_key: str,
+        embed_model: str,
+        batch_size: int = 1,
+        embed_dimensions: int | None = None,
+    ):
         self.base_url = base_url.rstrip("/")
         self.api_key = api_key or ""
         self.embed_model = embed_model
         self.batch_size = batch_size
+        self.embed_dimensions = embed_dimensions
         # The SDK's default transport trusts env proxies; a loopback target
         # (local Ollama & co.) must bypass them — the proxy is on another host,
         # where "localhost" no longer means the caller. Unmounting the target
@@ -52,7 +62,8 @@ class OpenAIEmbeddingSDKClient:
         if len(inputs) <= self.batch_size:
             # Single batch - direct call
             response = await self.client.embeddings.create(model=self.embed_model, input=inputs)
-            return [cast(list[float], d.embedding) for d in response.data], response
+            embeddings = [cast(list[float], d.embedding) for d in response.data]
+            return self._reduce(embeddings), response
 
         # Multiple batches - split and merge
         all_embeddings: list[list[float]] = []
@@ -63,4 +74,10 @@ class OpenAIEmbeddingSDKClient:
             all_embeddings.extend([cast(list[float], d.embedding) for d in response.data])
             last_response = response
 
-        return all_embeddings, last_response
+        return self._reduce(all_embeddings), last_response
+
+    def _reduce(self, vectors: list[list[float]]) -> list[list[float]]:
+        """MRL 截断降维：embed_dimensions 为空时原样返回。"""
+        if not self.embed_dimensions:
+            return vectors
+        return [reduce_embedding_dimensions(v, self.embed_dimensions) for v in vectors]

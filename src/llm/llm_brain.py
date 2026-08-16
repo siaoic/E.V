@@ -54,6 +54,10 @@ from src.llm.cleaners.content import (
     _remove_tool_calls_from_content,
 )
 from src.llm.cleaners.sentence import _find_sentence_end_from, _split_sentences
+from src.llm.client.factory import (
+    build_thinking_extra_body,
+    get_openai_client,
+)
 from src.llm.client.retry import _parse_retry_after
 from src.llm.constants import (
     _MAX_429_WAIT,
@@ -69,6 +73,9 @@ from src.llm.utils.content_check import has_content
 from src.llm.tool_message_utils import trim_messages_preserving_tool_rounds
 from src.utils.perf_tracker import PerfTracker
 
+# 记忆召回硬超时（秒）：超时熔断跳过注入，保障首字延迟不被检索拖垮
+_MEMORY_RECALL_TIMEOUT = 1.5
+
 
 class LLMBrain(BaseLLMAdapter, _InjectionMixin, _SummaryMixin):
     """LLM 流式大脑：支持多轮工具调用，按句 yield 纯对话文本。"""
@@ -76,10 +83,9 @@ class LLMBrain(BaseLLMAdapter, _InjectionMixin, _SummaryMixin):
     def __init__(self, mcp=None) -> None:
         self.cfg = config.cfg
         # 延迟导入，避免缺包时整个程序无法启动提示
-        from openai import OpenAI
-        self.client = OpenAI(
-            api_key=self.cfg.LLM_API_KEY or "not-needed",
-            base_url=self.cfg.LLM_BASE_URL or None,
+        self.client = get_openai_client(
+            api_key=self.cfg.LLM_API_KEY,
+            base_url=self.cfg.LLM_BASE_URL,
             timeout=120.0,
             # 重试次数必须小：免费档限流(429)时，SDK 会按 1s/2s/4s…指数退避
             # 悄悄重试，max_retries=5 最多可干等 ~30s 才报错——正是"很慢"的元凶。
@@ -124,11 +130,10 @@ class LLMBrain(BaseLLMAdapter, _InjectionMixin, _SummaryMixin):
         API Key / Base URL / 模型名变化时 client 需重建；LLM_MODEL 变化
         也会随 cfg 单例在下一轮对话读取时自动生效。
         """
-        from openai import OpenAI
         self.cfg = config.cfg  # 指向 reload 后的最新单例
-        self.client = OpenAI(
-            api_key=self.cfg.LLM_API_KEY or "not-needed",
-            base_url=self.cfg.LLM_BASE_URL or None,
+        self.client = get_openai_client(
+            api_key=self.cfg.LLM_API_KEY,
+            base_url=self.cfg.LLM_BASE_URL,
             timeout=120.0,
             max_retries=2,
         )
@@ -195,8 +200,7 @@ class LLMBrain(BaseLLMAdapter, _InjectionMixin, _SummaryMixin):
             max_tokens=2048,
             temperature=0.95,
         )
-        extra_body = {"thinking": {"type": "enabled"
-                                   if self.cfg.LLM_THINKING else "disabled"}}
+        extra_body = build_thinking_extra_body(self.cfg.LLM_THINKING)
         try:
             try:
                 resp = self.client.chat.completions.create(**kwargs, extra_body=extra_body)
@@ -226,6 +230,19 @@ class LLMBrain(BaseLLMAdapter, _InjectionMixin, _SummaryMixin):
             return max(1, int(config.cfg.TOOL_MAX_ITERATIONS or _MAX_TOOL_ITERATIONS))
         except (TypeError, ValueError, AttributeError):
             return _MAX_TOOL_ITERATIONS
+
+    def _skill_intent_hint(self, user_text: str) -> str:
+        """本地技能意图预判（match_intent，零依赖）：命中时返回「优先加载」提示段。
+
+        不命中返回空串（行为与未接入前完全一致）。提示段作为独立 system 消息
+        追加在 user 之后（近因效应），要求模型先用 load_skill 加载命中技能，
+        不再只依赖模型从常驻技能列表里自觉想起。
+        """
+        hit = get_skill_manager().match_intent(user_text)
+        if hit is None:
+            return ""
+        return (f"【技能预判】检测到用户输入与技能「{hit.name}」的触发时机匹配，"
+                f"请先用 load_skill 加载该技能，再严格按其指令执行。")
 
     async def chat_stream(self, user_text: str, *, proactive: bool = False,
                           history: Optional[list] = None) -> AsyncGenerator[str, None]:
@@ -276,9 +293,20 @@ class LLMBrain(BaseLLMAdapter, _InjectionMixin, _SummaryMixin):
             mcp_desc = self._describe_mcp_servers(self.mcp)
             if mcp_desc:
                 sys_content += "\n\n### 可用的联网服务器\n" + mcp_desc
+        # 知识库注入：信号闸门命中才追加权威设定段（防幻觉；闲聊/无关消息
+        # 返回空串不注入，省 Token）。数据懒加载，进程内缓存一次。
+        knowledge_section = self._knowledge_section(user_text)
+        if knowledge_section:
+            sys_content += "\n\n" + knowledge_section
         if self.cfg.MEMORY_ENABLED:
             sys_content += "\n\n" + memory.STANDING_INSTRUCTION
-            mem_ctx = await memory.retrieve(user_text)
+            try:
+                # 硬超时熔断：召回超过 1.5s 直接跳过注入，优先保障响应速度
+                mem_ctx = await asyncio.wait_for(
+                    memory.retrieve(user_text), timeout=_MEMORY_RECALL_TIMEOUT)
+            except asyncio.TimeoutError:
+                console.warn("[记忆检索] 召回超时（>1.5s），熔断跳过本次注入")
+                mem_ctx = ""
             # 记忆写入完全交给管家模型（ButlerAgent 每轮从对话提取，参照
             # <memory> 标签（曾在此注入写标签指令，主模型经常漏写/写错）
             if mem_ctx:
@@ -324,6 +352,21 @@ class LLMBrain(BaseLLMAdapter, _InjectionMixin, _SummaryMixin):
         # agent 主动发言：只带精简历史快照（最近 N 条），降低 token 消耗
         messages.extend(history if history is not None else self.history)
         messages.append({"role": "user", "content": user_text})
+        # 技能意图预判（本地 match_intent，零依赖）：命中时在 user 后追加
+        # 提示段（近因效应），要求模型优先 load_skill——主动发言是 AI 内部
+        # 指令非用户输入，不参与预判，避免误匹配。
+        if not proactive:
+            skill_hint = self._skill_intent_hint(user_text)
+            if skill_hint:
+                messages.append({"role": "system", "content": skill_hint})
+        # Author's Note 尾部人设锚点（近因效应）：追加在 user 消息之后，
+        # 比 system prompt 开头更有效锁定语气/格式；默认空 = 不注入。
+        anchor = self._tail_anchor_section()
+        if anchor:
+            messages.append({
+                "role": "system",
+                "content": f"【人设锚点（务必遵守）】{anchor}",
+            })
 
         # 插件钩子：on_llm_request（可在请求发出前修改 messages）
         if self.plugin_manager is not None:
@@ -478,8 +521,7 @@ class LLMBrain(BaseLLMAdapter, _InjectionMixin, _SummaryMixin):
                     waited = 0.0
                     while True:
                         try:
-                            extra_body = {"thinking": {"type": "enabled"
-                                                       if self.cfg.LLM_THINKING else "disabled"}}
+                            extra_body = build_thinking_extra_body(self.cfg.LLM_THINKING)
                             _drain_start = time.perf_counter()
                             _drain(_create())
                             # 路由服务调用成功 → 记录奖励与耗时（供 UCB1 择优）；

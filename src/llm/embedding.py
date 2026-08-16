@@ -101,6 +101,7 @@ class SiliconFlowEmbeddingProvider:
                             api_key=self.api_key or "local",
                             embed_model=self.model,
                             embed_batch_size=8,
+                            embed_dimensions=config.cfg.EMBEDDING_DIMENSIONS,
                         )
                         self._client = build_embedding_client(cfg)
                     except Exception as e:

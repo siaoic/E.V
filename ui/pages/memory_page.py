@@ -14,7 +14,7 @@ from ui.dialogs.memory_list import MemoryListDialog
 
 # 主程序导出的图谱快照（跨进程 ChromaDB HNSW 索引读不到向量，改走文件）
 _GRAPH_EXPORT_FILE = os.path.join(
-    config.cfg.PROJECT_ROOT, "data", "memory_graph.json")
+    config.cfg.DATA_ROOT, "memory_graph.json")
 
 
 def _load_graph_export():
