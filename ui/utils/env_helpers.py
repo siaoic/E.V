@@ -5,9 +5,21 @@ launcher 启动时写 RUN_MODE / PET_MODEL_PATH，控制中心保存配置写全
 """
 
 import os
+import re
 from typing import Dict
 
 from src.utils import config
+
+
+def _env_key_re(key: str) -> re.Pattern:
+    """匹配 .env 中 KEY 的配置行（行首、允许 = 前有对齐空格）。
+
+    主块配置是「KEY    = value」对齐格式，旧实现用 startswith(key + "=")
+    只认紧凑的「KEY=」，主块永远匹配不上 → 每次保存都追加一份重复块到
+    文件末尾（历史重复块的根因）。锚定行首避免误匹配前缀相似的 key
+    （如 LLM 不会命中 LLM_THINKING）。
+    """
+    return re.compile(rf"^\s*{re.escape(key)}\s*=")
 
 
 def _format_env_value(value: str) -> str:
@@ -28,6 +40,10 @@ def _format_env_value(value: str) -> str:
 def _update_env(key: str, value: str, root: str = "") -> None:
     """把 .env 中 key 的值改为 value（保留注释；不存在则追加在末尾）。
 
+    同名 key 出现多处时全部更新——主程序热更新（reload_config）按
+    last-wins 读 .env，若只改第一个匹配，残留的重复 key 会让热更新
+    读到旧值（曾因 .env 末尾历史重复块导致切开关不生效）。
+
     root 指定 .env 所在目录；留空用 config.cfg.PROJECT_ROOT。
     打包后的 UI（sys.frozen）PROJECT_ROOT 是 exe 目录，而主程序读的是
     项目根的 .env——启动主程序时必须显式传项目根，见 ProcessHandler._start。
@@ -40,11 +56,11 @@ def _update_env(key: str, value: str, root: str = "") -> None:
     except OSError:
         lines = []
     found = False
+    key_re = _env_key_re(key)
     for i, line in enumerate(lines):
-        if line.strip().startswith(key + "="):
+        if key_re.match(line):
             lines[i] = f"{key}={value}\n"
             found = True
-            break
     if not found:
         if lines and not lines[-1].endswith("\n"):
             lines.append("\n")
@@ -77,7 +93,8 @@ def _remove_env_key(key: str) -> None:
             lines = f.read().splitlines(keepends=True)
     except OSError:
         return
-    kept = [line for line in lines if not line.strip().startswith(key + "=")]
+    key_re = _env_key_re(key)
+    kept = [line for line in lines if not key_re.match(line)]
     if len(kept) == len(lines):
         return
     try:

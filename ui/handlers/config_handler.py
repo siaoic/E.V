@@ -29,6 +29,8 @@ def _save_ui_system_prompt(text: str) -> None:
                 frontmatter = raw[: end + 4] + "\n"
     except OSError:
         pass
+    if frontmatter + text == raw:
+        return  # 内容未变，不重写文件（增量保存：只写修改过的选项）
     try:
         os.makedirs(os.path.dirname(path), exist_ok=True)
         with open(path, "w", encoding="utf-8") as f:
@@ -40,13 +42,32 @@ def _save_ui_system_prompt(text: str) -> None:
 class ConfigHandler:
     """配置保存：一次保存 LLM + 设置页全部字段，并热通知运行中的主程序。"""
 
+    # —— 增量保存辅助：只写「被修改过」的配置项 ——
+    def _env_save_if_changed(self, key: str, ui_value: str, cfg_value) -> None:
+        """UI 值 ≠ 启动时 cfg 值（用户改过）才写 .env；未修改跳过，
+        避免点「更新配置」把全部行无条件重写（覆盖手动改动/刷新写盘）。"""
+        v = (ui_value or "").strip()
+        if v == (str(cfg_value or "") or "").strip():
+            return
+        env_helpers._update_env(key, v)
+
+    def _env_bool_save_if_changed(
+            self, key: str, ui_checked: bool, cfg_value) -> None:
+        """布尔开关版本：勾选状态没变不写。"""
+        if ui_checked != bool(cfg_value):
+            env_helpers._update_env(key, "true" if ui_checked else "false")
+
+    def _env_save_skip_default_if_changed(
+            self, key: str, ui_value: str, cfg_value, default: str) -> None:
+        """skip_default 版本：未修改跳过；修改过按默认值语义写（=默认移除行）。"""
+        if (ui_value or "").strip() == (str(cfg_value or "") or "").strip():
+            return
+        env_helpers._update_env_skip_default(key, ui_value, default)
+
     def _save_config(self) -> None:
         """底部「更新配置」：一次保存 LLM 配置 + 设置页全部字段到 .env，
         并把表情绑定映射一并写入当前模式的映射文件。
         """
-
-        def _bool(key: str, value: bool) -> None:
-            env_helpers._update_env(key, "true" if value else "false")
 
         # B站直播弹幕：房间号/端口必须是纯数字。非数字会被写进 .env，主程序
         # reload_config 里 int() 解析直接抛 ValueError（_dispatch 未捕获 → 崩溃
@@ -63,18 +84,27 @@ class ConfigHandler:
         _tools_changed = False   # 工具总开关变化才发 !tools 热启停/重启工具
         _emb_changed = False   # Embedding/管家模型变化：无法热更新，需重启主程序
         try:
-            # LLM 配置
-            env_helpers._update_env("LLM_API_KEY", self.ed_key.text().strip())
-            env_helpers._update_env("LLM_BASE_URL", self.ed_url.text().strip())
-            env_helpers._update_env("LLM_MODEL", self.ed_model.text().strip())
+            # LLM 配置（未修改跳过，避免全量重写 .env）
+            self._env_save_if_changed("LLM_API_KEY", self.ed_key.text().strip(),
+                                      self.cfg.LLM_API_KEY)
+            self._env_save_if_changed("LLM_BASE_URL", self.ed_url.text().strip(),
+                                      self.cfg.LLM_BASE_URL)
+            self._env_save_if_changed("LLM_MODEL", self.ed_model.text().strip(),
+                                      self.cfg.LLM_MODEL)
             # Embedding 配置（记忆检索/情绪嵌入）
-            env_helpers._update_env("EMBEDDING_BASE_URL", self.ed_emb_url.text().strip())
-            env_helpers._update_env("EMBEDDING_MODEL", self.ed_emb_model.text().strip())
-            env_helpers._update_env("EMBEDDING_API_KEY", self.ed_emb_key.text().strip())
+            self._env_save_if_changed("EMBEDDING_BASE_URL", self.ed_emb_url.text().strip(),
+                                      self.cfg.EMBEDDING_BASE_URL)
+            self._env_save_if_changed("EMBEDDING_MODEL", self.ed_emb_model.text().strip(),
+                                      self.cfg.EMBEDDING_MODEL)
+            self._env_save_if_changed("EMBEDDING_API_KEY", self.ed_emb_key.text().strip(),
+                                      self.cfg.EMBEDDING_API_KEY)
             # 管家模型（ButlerAgent 记忆管家）
-            env_helpers._update_env("BUTLER_BASE_URL", self.ed_butler_url.text().strip())
-            env_helpers._update_env("BUTLER_MODEL", self.ed_butler_model.text().strip())
-            env_helpers._update_env("BUTLER_API_KEY", self.ed_butler_key.text().strip())
+            self._env_save_if_changed("BUTLER_BASE_URL", self.ed_butler_url.text().strip(),
+                                      self.cfg.BUTLER_BASE_URL)
+            self._env_save_if_changed("BUTLER_MODEL", self.ed_butler_model.text().strip(),
+                                      self.cfg.BUTLER_MODEL)
+            self._env_save_if_changed("BUTLER_API_KEY", self.ed_butler_key.text().strip(),
+                                      self.cfg.BUTLER_API_KEY)
             _emb_changed = (
                 self.ed_emb_url.text().strip() != (self.cfg.EMBEDDING_BASE_URL or "")
                 or self.ed_emb_model.text().strip() != (self.cfg.EMBEDDING_MODEL or "")
@@ -88,11 +118,17 @@ class ConfigHandler:
             # （python-dotenv 每次启动刷几百条 could not parse statement）。
             if not str(self.cfg.SYSTEM_PROMPT_FILE or "").strip():
                 _save_ui_system_prompt(self.ed_prompt.toPlainText().strip())
-            # 设置
-            _bool("TOOLS_ENABLED", self.cb_mcp.isChecked())
-            _bool("PROACTIVE_ENABLED", self.cb_proactive.isChecked())
-            _bool("PROFANITY_FILTER_ENABLED", self.cb_filter.isChecked())
-            _bool("STT_ENABLED", self.cb_stt.isChecked())
+            # 设置（未修改跳过）
+            self._env_bool_save_if_changed(
+                "TOOLS_ENABLED", self.cb_mcp.isChecked(), self.cfg.TOOLS_ENABLED)
+            self._env_bool_save_if_changed(
+                "PROACTIVE_ENABLED", self.cb_proactive.isChecked(),
+                self.cfg.PROACTIVE_ENABLED)
+            self._env_bool_save_if_changed(
+                "PROFANITY_FILTER_ENABLED", self.cb_filter.isChecked(),
+                self.cfg.PROFANITY_FILTER_ENABLED)
+            self._env_bool_save_if_changed(
+                "STT_ENABLED", self.cb_stt.isChecked(), self.cfg.STT_ENABLED)
             # 语音识别相关变化（开关 / Key / URL / 模型）：变化才发 !stt 热重启引擎。
             # 空字段 = 回退代码默认（Key 空 = 回退共用 SiliconFlow；URL/模型空 =
             # 用代码默认），比较前先归一化为默认值——否则「留空恒不等于 cfg 里的
@@ -107,38 +143,55 @@ class ConfigHandler:
                 or (self.ed_stt_model.text().strip() or _defaults["STT_MODEL"])
                 != (self.cfg.STT_MODEL or ""))
             # Key 留空 = 回退共用 SiliconFlow：等于默认（空）时不写入 .env
-            env_helpers._update_env_skip_default(
-                "STT_API_KEY", self.ed_stt_key.text().strip(), "")
+            self._env_save_skip_default_if_changed(
+                "STT_API_KEY", self.ed_stt_key.text().strip(),
+                self.cfg.STT_API_KEY, "")
             # 语音识别 URL / 模型：默认值不写入 .env（.env 只保留自定义配置）
-            env_helpers._update_env_skip_default(
+            self._env_save_skip_default_if_changed(
                 "STT_BASE_URL", self.ed_stt_url.text().strip(),
-                _defaults["STT_BASE_URL"])
-            env_helpers._update_env_skip_default(
+                self.cfg.STT_BASE_URL, _defaults["STT_BASE_URL"])
+            self._env_save_skip_default_if_changed(
                 "STT_MODEL", self.ed_stt_model.text().strip(),
-                _defaults["STT_MODEL"])
-            _bool("EMOTION_ACTOR_ENABLED", self.cb_emotion_actor.isChecked())
-            env_helpers._update_env("GPTSOVITS_REF_AUDIO", self.ed_tts_audio.text().strip())
-            env_helpers._update_env("GPTSOVITS_PROMPT_TEXT", self.ed_tts_text.text().strip())
-            env_helpers._update_env("GPTSOVITS_REF_AUDIOS", self.ed_tts_audios.text().strip())
-            # B站直播弹幕：值等于代码默认 → 不写入 .env
-            env_helpers._update_env_skip_default(
-                "BILI_ENABLED",
-                "true" if self.cb_bili_enabled.isChecked() else "false",
-                _defaults["BILI_ENABLED"])
-            env_helpers._update_env_skip_default(
-                "BILI_ROOM_ID",
-                self.ed_bili_room.text().strip() or "0",
-                _defaults["BILI_ROOM_ID"])
-            env_helpers._update_env_skip_default(
+                self.cfg.STT_MODEL, _defaults["STT_MODEL"])
+            self._env_bool_save_if_changed(
+                "EMOTION_ACTOR_ENABLED", self.cb_emotion_actor.isChecked(),
+                self.cfg.EMOTION_ACTOR_ENABLED)
+            self._env_save_if_changed(
+                "GPTSOVITS_REF_AUDIO", self.ed_tts_audio.text().strip(),
+                self.cfg.GPTSOVITS_REF_AUDIO)
+            self._env_save_if_changed(
+                "GPTSOVITS_PROMPT_TEXT", self.ed_tts_text.text().strip(),
+                self.cfg.GPTSOVITS_PROMPT_TEXT)
+            self._env_save_if_changed(
+                "GPTSOVITS_REF_AUDIOS", self.ed_tts_audios.text().strip(),
+                self.cfg.GPTSOVITS_REF_AUDIOS)
+            # B站直播弹幕：值等于代码默认 → 不写入 .env；未修改跳过
+            if self.cb_bili_enabled.isChecked() != bool(self.cfg.BILI_ENABLED):
+                env_helpers._update_env_skip_default(
+                    "BILI_ENABLED",
+                    "true" if self.cb_bili_enabled.isChecked() else "false",
+                    _defaults["BILI_ENABLED"])
+            self._env_save_skip_default_if_changed(
+                "BILI_ROOM_ID", self.ed_bili_room.text().strip(),
+                self.cfg.BILI_ROOM_ID, _defaults["BILI_ROOM_ID"])
+            self._env_save_skip_default_if_changed(
                 "BILI_SESSDATA", self.ed_bili_sessdata.text().strip(),
-                _defaults["BILI_SESSDATA"])
-            env_helpers._update_env_skip_default(
-                "BILI_SERVER_PORT",
-                self.ed_bili_port.text().strip() or "8766",
-                _defaults["BILI_SERVER_PORT"])
+                self.cfg.BILI_SESSDATA, _defaults["BILI_SESSDATA"])
+            self._env_save_skip_default_if_changed(
+                "BILI_SERVER_PORT", self.ed_bili_port.text().strip(),
+                self.cfg.BILI_SERVER_PORT, _defaults["BILI_SERVER_PORT"])
             # 工具总开关变化（!tools 热启停/重启 MCP 服务器并重新合并工具）
             _tools_changed = (
                 self.cb_mcp.isChecked() != bool(self.cfg.TOOLS_ENABLED))
+            # TTS 参考音频/文本/辅助参考变化：!tts_audio 等热更新会重载参考并打断
+            # 当前合成/播放，未变化时不发命令，避免点保存无故打断 TTS 播放
+            _tts_changed = (
+                self.ed_tts_audio.text().strip()
+                != (self.cfg.GPTSOVITS_REF_AUDIO or "")
+                or self.ed_tts_text.text().strip()
+                != (self.cfg.GPTSOVITS_PROMPT_TEXT or "")
+                or self.ed_tts_audios.text().strip()
+                != (self.cfg.GPTSOVITS_REF_AUDIOS or ""))
             _saved = True
         except OSError as e:
             console.error(f"保存失败：{e}")
@@ -148,9 +201,10 @@ class ConfigHandler:
         # 空 = 自动（智能匹配待机）：等于默认值时不写入 .env（.env 只保留自定义配置）。
         # 情绪 → 表情/动作绑定已实时写入 _map_data（拖拽即更新），随映射一并保存。
         try:
-            env_helpers._update_env_skip_default(
+            self._env_save_skip_default_if_changed(
                 "PET_IDLE_MOTION",
-                str(self.combo_idle_motion.currentData() or "").strip(), "")
+                str(self.combo_idle_motion.currentData() or "").strip(),
+                self.cfg.PET_IDLE_MOTION, "")
         except OSError as e:
             console.error(f"保存默认待机动作失败：{e}")
         # 表情/动作绑定映射（与 .env 一起保存，点底部「更新配置」即可热生效）
@@ -170,14 +224,17 @@ class ConfigHandler:
             # Embedding/管家模型：嵌入器与 ButlerAgent 仅在启动时构建，无法热更新
             if _emb_changed:
                 self._log("[控制中心] Embedding/管家模型已保存，重启主程序后生效\n")
-            # TTS 参考音频/文本/辅助参考（立即生效，无需重启）
-            self.proc.write(
-                f"!tts_audio {self.ed_tts_audio.text().strip()}\n".encode("utf-8"))
-            self.proc.write(
-                f"!tts_text {self.ed_tts_text.text().strip()}\n".encode("utf-8"))
-            self.proc.write(
-                f"!tts_audios {self.ed_tts_audios.text().strip()}\n".encode("utf-8"))
-            self._log("[控制中心] TTS 参考音频/文本/辅助参考已热更新（立即生效）\n")
+            # TTS 参考音频/文本/辅助参考：变化才热更新（未变化跳过，避免打断播放）
+            if _tts_changed:
+                self.proc.write(
+                    f"!tts_audio {self.ed_tts_audio.text().strip()}\n".encode("utf-8"))
+                self.proc.write(
+                    f"!tts_text {self.ed_tts_text.text().strip()}\n".encode("utf-8"))
+                self.proc.write(
+                    f"!tts_audios {self.ed_tts_audios.text().strip()}\n".encode("utf-8"))
+                self._log("[控制中心] TTS 参考音频/文本/辅助参考已热更新（立即生效）\n")
+            else:
+                self._log("[控制中心] TTS 参考音频未变化，跳过热更新\n")
             # 语音识别开关（!stt）：开关或 Key 变化时热启停/重启 STT 引擎
             if _stt_changed:
                 self.proc.write(b"!stt\n")

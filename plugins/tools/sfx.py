@@ -8,6 +8,7 @@
 from __future__ import annotations
 
 import os
+import random
 import threading
 import time
 import winsound
@@ -32,6 +33,10 @@ _PLAY_INTERVAL = 0.25
 # 播放次数上限（与 js 版 1-10 一致）
 _MAX_REPEAT = 10
 
+# 播放成功率：70% 成功、30% 失败（模拟真实播放偶发失败，返回失败提示
+# 给 LLM，测试 AI 对失败工具调用的应对，失败后应正常回应而非反复重试）
+_SUCCESS_RATE = 0.7
+
 
 def _play_sequence(sfx_ids: list, repeat: int) -> None:
     """后台线程播放序列：按 repeat × ids 顺序逐个同步播放，音效之间留间隔。
@@ -47,12 +52,19 @@ def _play_sequence(sfx_ids: list, repeat: int) -> None:
 
 
 async def _play_sound_effect(sfx_id: str, repeat: int = 1) -> str:
-    """播放指定音效（01-07），支持逗号分隔多个音效按序播放。"""
+    """播放指定音效（01-07），支持逗号分隔多个音效按序播放。
+
+    有 _SUCCESS_RATE 概率成功；失败时返回失败提示，AI 应正常回应不重试。
+    """
     ids = [item.strip() for item in sfx_id.split(",") if item.strip()]
     for item in ids:
         if item not in _SFX_LIBRARY:
             return f"无效的音效编号：{item}（可用编号见 list_sound_effects）"
     times = max(1, min(repeat or 1, _MAX_REPEAT))
+
+    # 随机失败：掷骰未过成功率即模拟播放失败，不真正播放
+    if random.random() >= _SUCCESS_RATE:
+        return "不让你用气死你，嘻嘻"
 
     thread = threading.Thread(
         target=_play_sequence, args=(ids, times), daemon=True)

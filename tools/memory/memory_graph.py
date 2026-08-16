@@ -20,12 +20,14 @@
 from __future__ import annotations
 
 import math
+import os
 import random
 from typing import Optional
 
 from PySide6.QtCore import QPointF, QRectF, Qt, Signal
-from PySide6.QtGui import QColor, QFontMetricsF, QPainter, QPen, QRadialGradient
-from PySide6.QtWidgets import QWidget
+from PySide6.QtGui import (QColor, QFontMetricsF, QLinearGradient,
+                           QPainter, QPainterPath, QPen)
+from PySide6.QtWidgets import QSizePolicy, QWidget
 
 from tools.memory.memory import _USER_DEFAULT, _USER_SELF
 
@@ -63,6 +65,10 @@ _EDGE_COLOR = QColor(120, 120, 120)       # 用户连边：灰色
 _MIN_SCALE = 0.2
 _MAX_SCALE = 8.0
 
+# 容器圆角：与 .ui 的 #graph_memory border-radius 保持一致（圆角背景填充，
+# 避免方角 fillRect 在圆角边框外露出米色直角）
+_CONTAINER_RADIUS = 10
+
 
 def _content_summary(content: str, max_chars: int = 6) -> str:
     """节点标签：记忆内容摘要（去换行，超长省略）。
@@ -89,9 +95,16 @@ def _node_color(item: dict) -> QColor:
     return _TRACK_COLORS.get(item.get("track") or "memory", _OTHER_COLOR)
 
 
+# AI 名字：AI 自身记忆（user="self"）在图谱/列表上的显示名，.env AI_NAME 配置
+_AI_NAME = (os.getenv("AI_NAME") or "").strip()
+
+
 def _display_user(user: str) -> str:
     """把内部 user 标识映射为 UI 显示名。"""
-    mapping = {_USER_SELF: "我自己", _USER_DEFAULT: "你"}
+    mapping = {
+        _USER_SELF: _AI_NAME or "我自己",
+        _USER_DEFAULT: "你",
+    }
     return mapping.get(str(user), str(user))
 
 
@@ -127,6 +140,13 @@ class MemoryGraphWidget(QWidget):
         self._pan_start: QPointF = QPointF()
         self._pan_offset0: QPointF = QPointF()
         self.setMouseTracking(True)
+        # 占满父布局剩余空间（QWidget 默认 Preferred 会收缩成 sizeHint，
+        # 导致图谱显示区域变小；原 QStackedWidget 容器天然撑满）
+        self.setSizePolicy(QSizePolicy.Policy.Expanding,
+                           QSizePolicy.Policy.Expanding)
+        # objectName 对齐 .ui 的 QSS 选择器 #graph_memory：自绘背景（米色）
+        # 由 paintEvent 填充，QSS 只负责容器边框/圆角（background 设为 transparent）
+        self.setObjectName("graph_memory")
 
     # ---------- 数据 ----------
 
@@ -305,15 +325,26 @@ class MemoryGraphWidget(QWidget):
         """绘制背景、用户连边、用户簇心与记忆节点。"""
         painter = QPainter(self)
         painter.setRenderHint(QPainter.Antialiasing)
-        # 背景：暖白底 + 中心放射柔光（对齐旧版图谱的视觉风格）
-        painter.fillRect(self.rect(), QColor(250, 249, 245))
-        center = QPointF(self.width() / 2, self.height() / 2)
-        radius = max(self.width(), self.height()) * 0.6
-        grad = QRadialGradient(center, radius)
-        grad.setColorAt(0.0, QColor(140, 100, 200, 50))
-        grad.setColorAt(0.35, QColor(90, 140, 210, 18))
-        grad.setColorAt(1.0, QColor(0, 0, 0, 0))
+        # 背景：与侧边栏（QFrame#sidebar）一致的米色对角渐变——同一套
+        # 色标（253,248,238 → 248,243,230 → 243,237,222），视觉同调。
+        # 圆角路径裁剪填充，四角不露出方角（与 QSS 容器边框圆角一致）
+        _bg = QPainterPath()
+        _bg.addRoundedRect(QRectF(self.rect()), _CONTAINER_RADIUS,
+                           _CONTAINER_RADIUS)
+        painter.setClipPath(_bg)
+        grad = QLinearGradient(0, 0, self.width(), self.height())
+        grad.setColorAt(0.0, QColor(253, 248, 238, 200))
+        grad.setColorAt(0.5, QColor(248, 243, 230, 200))
+        grad.setColorAt(1.0, QColor(243, 237, 222, 200))
         painter.fillRect(self.rect(), grad)
+        # 容器边框：自绘圆角描边（对齐侧边栏 QFrame#sidebar 的暖棕描边
+        # rgba(200,185,158,200)）。不用 QSS border——paintEvent 的背景
+        # fillRect 会把它覆盖掉，导致边框不显示
+        painter.setPen(QPen(QColor(200, 185, 158, 200), 1))
+        painter.setBrush(Qt.NoBrush)
+        painter.drawRoundedRect(
+            QRectF(self.rect()).adjusted(0.5, 0.5, -0.5, -0.5),
+            _CONTAINER_RADIUS, _CONTAINER_RADIUS)
 
         clusters = self._clusters
 
@@ -328,7 +359,9 @@ class MemoryGraphWidget(QWidget):
                                      self._to_screen(node_pos))
 
         for user_pos, owner, nodes in clusters:
-            # 用户簇心：暖青色半透明圆 + 同色描边，白字显示归属名
+            # 用户簇心：暖青色半透明圆 + 同色描边，白字显示归属名。
+            # 固定半径绘制（最初版本行为）：记忆再多、布局再挤也不缩小，
+            # 缩小时圆可能互相遮挡属正常取舍
             uc = self._to_screen(user_pos)
             painter.save()
             fill = QColor(_USER_COLOR)
@@ -354,7 +387,7 @@ class MemoryGraphWidget(QWidget):
             )
             painter.restore()
             # 记忆节点：分层色半透明圆 + 同色描边，白字显示内容摘要（截断）；
-            # 不显示节点时跳过
+            # 不显示节点时跳过。固定半径（最初版本行为）
             if not self.show_memory_nodes:
                 continue
             fm = QFontMetricsF(painter.font())

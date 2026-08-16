@@ -94,7 +94,7 @@ def _decode_wav_bytes(content: bytes) -> Tuple[np.ndarray, int]:
 
 # 服务端默认地址（fastapi_server_example.py 监听 0.0.0.0:8000），可用
 # TTS_SERVER_URL 覆盖
-_SERVER_DEFAULT_URL = "http://127.0.0.1:8000"
+_SERVER_DEFAULT_URL = "http://127.0.0.1:8167"
 
 # 每批最多合成句数：LLM 流式产句远快于服务端合成，批量收拢攒不满反而
 # 拖累首声（服务端 infer_batched_async 整批合成完才返回，8 句可能等
@@ -432,7 +432,8 @@ class TTSEngine(BaseTTSAdapter):
 
         服务端返回 output 目录文件名列表（与输入同序）；打断（gen 变化）
         时放弃剩余音频下载。单句音频退化（时长异常=拖长音怪叫）时走
-        _synth_one 重试一次，仍异常则丢弃该句（宁缺毋怪）。
+        _synth_one 重试一次，仍异常则丢弃该句（宁缺毋怪）。整批请求
+        失败（服务端偶发 500/网络抖动）时转逐句重试，不再整批丢弃。
         """
         speaker_audio, prompt_audio, prompt_text = self._ref_params()
         payload = {
@@ -442,10 +443,25 @@ class TTSEngine(BaseTTSAdapter):
             "prompt_text": prompt_text,
             **_SYNTH_PARAMS,
         }
-        resp = await self._client.post(
-            f"{self._server_url}/tts/batch", json=payload)
-        resp.raise_for_status()
-        data = resp.json()
+        try:
+            resp = await self._client.post(
+                f"{self._server_url}/tts/batch", json=payload)
+            resp.raise_for_status()
+            data = resp.json()
+        except Exception as e:
+            # 整批失败（偶发 500）：逐句重试（_synth_one 内部带 2 次尝试）
+            console.warn(f"TTS 批量合成失败（{e}），逐句重试…")
+            for text in texts:
+                if gen != self._gen:
+                    return  # 打断：放弃剩余
+                retried = await self._synth_one(text, gen)
+                if retried is None:
+                    continue  # 重试仍失败：放弃该句
+                audio_data, sr = retried
+                # 重试的音频无词级时间戳，字幕回退整句显示
+                self._player.emit(audio_data, sr, text,
+                                  _fallback_subtitles(text), gen)
+            return
         subtitles_list = data.get("subtitles") or []
         for i, (text, filename) in enumerate(zip(texts, data.get("filenames", []))):
             if gen != self._gen:
@@ -469,9 +485,10 @@ class TTSEngine(BaseTTSAdapter):
     async def _synth_one(self, text: str, gen: int):
         """单独合成一句并下载解码，返回 (audio_data, sr)。
 
-        音频退化（时长异常 = 拖长音怪叫，与文本无关的 GPT 采样随机崩坏）
-        时自动重试一次——GSV 采样随机，重试大概率正常；重试仍退化或
-        合成/下载失败返回 None，由调用方放弃该句，绝不把怪叫播出去。
+        合成失败（服务端偶发 500/网络抖动）或音频退化（时长异常 =
+        拖长音怪叫，与文本无关的 GPT 采样随机崩坏）时都重试一次——GSV
+        采样随机，重试大概率正常；两次仍失败返回 None，由调用方放弃
+        该句，绝不把怪叫播出去。
         """
         speaker_audio, prompt_audio, prompt_text = self._ref_params()
         payload = {
@@ -489,8 +506,8 @@ class TTSEngine(BaseTTSAdapter):
                     f"{self._server_url}/tts/batch", json=payload)
                 resp.raise_for_status()
             except Exception as e:
-                console.dim(f"TTS 合成失败：{e}")
-                return None
+                console.dim(f"TTS 合成失败（{e}），重试…")
+                continue
             filenames = resp.json().get("filenames") or []
             if not filenames:
                 return None

@@ -37,8 +37,8 @@ class MemoryPage:
         """记忆页：仅图谱视图（表格视图已移除）。
 
         图谱替换 .ui 里的占位 QGraphicsView 为自绘用户分簇放射星状图；
-        表格/图谱切换控件（stack_memory 的表格页、切换按钮）不再使用，
-        启动直接落在图谱页。
+        .ui 里 graph_memory 直接作为唯一显示容器（废弃表格页/切换按钮
+        已从 .ui 删除，不再有外层 stack 双层框）。
         """
         self.btn_memory_refresh.clicked.connect(self._refresh_memory)
         # 图谱：.ui 里 graph_memory 是占位 QGraphicsView，替换为自绘力导向网状图谱
@@ -57,9 +57,6 @@ class MemoryPage:
         # 布局不再被其 sizeHint 撑大（文本超宽自动裁切，不撑宽窗口）
         self.label_memory_status.setSizePolicy(
             QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Preferred)
-        # 表格视图已移除：隐藏切换按钮、直接显示图谱页
-        self.btn_memory_view_toggle.setVisible(False)
-        self.stack_memory.setCurrentIndex(1)
         self._deleted_ids: set = set()  # 本会话已删除的记忆 id（跨进程快照会残留，过滤掉）
         self._refresh_memory()
 

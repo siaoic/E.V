@@ -1747,3 +1747,19 @@ topics:
   - streaming
   - troubleshooting
   cooldown_minutes: 3
+- id: learned_7b275cec
+  category: learned
+  concept: 主播在游戏对局中调侃人机比例，引发观众对游戏机制的讨论
+  tags:
+  - game_analysis
+  - community_engagement
+  - live_chat
+  cooldown_minutes: 3
+- id: learned_24d959e0
+  category: learned
+  concept: 观众用弹幕吐槽主播反应慢，主播用幽默化解并反向拉近关系
+  tags:
+  - humor
+  - audience_relation
+  - live_reaction
+  cooldown_minutes: 3
