@@ -11,7 +11,7 @@ project_root = Path(__file__).parent.parent
 sys.path.insert(0, str(project_root))
 
 from fastapi import FastAPI, HTTPException
-from fastapi.responses import FileResponse
+from fastapi.responses import FileResponse, StreamingResponse
 from pydantic import BaseModel
 from typing import List, Optional
 from gsv_tts import TTS
@@ -22,6 +22,7 @@ import tempfile
 import logging
 import threading
 import time
+import numpy as np
 
 app = FastAPI(title="GSV-TTS 异步 API", version="1.1")
 
@@ -120,6 +121,9 @@ class TTSBatchRequest(BaseModel):
     cut_minlen: int = 10
     cut_mute: float = 0.3
     cut_mute_scale_map: dict = {}
+    # 流式 token 块大小：首块产出速度与 SoVITS 解码稳定性的权衡点
+    # （默认 12 与旧硬编码一致；调大如 25 首块更慢但短序列更稳）
+    stream_chunk: int = 12
 
 
 @app.on_event("startup")
@@ -258,6 +262,74 @@ async def tts_batch(request: TTSBatchRequest):
             "subtitles": subtitles_list,
             "prompt_text_used": prompt_text,
         }
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.post("/tts/stream")
+async def tts_stream(request: TTSBatchRequest):
+    """流式 TTS：token 级流式合成，响应体为 int16 PCM 块（单声道 32k）。
+
+    首块在 GPT 解码约 12 token 后即产出（boost_first_chunk，约 0.5s 音频），
+    远早于整句合成完成，客户端可边收边播压低首字延迟——stream_chunk 越小
+    首块解码越快，但块过小（<8 token）SoVITS 解码短序列易退化，12 为平衡值。
+    流式合成逐块有重叠混音（SOLA），不返回词级字幕，字幕走整句显示。
+    """
+    try:
+        speaker_audio = request.speaker_audio
+        prompt_audio = request.prompt_audio
+        prompt_text = request.prompt_text
+
+        if is_url(speaker_audio):
+            speaker_audio = await download_audio(speaker_audio)
+
+        if is_url(prompt_audio):
+            prompt_audio = await download_audio(prompt_audio)
+
+        if prompt_text is None or prompt_text == "":
+            raise HTTPException(
+                status_code=400,
+                detail="未提供 prompt_text（服务端已不加载 ASR 模型）"
+            )
+
+        async def stream():
+            async for clip in tts.infer_stream_async(
+                spk_audio_path=speaker_audio,
+                prompt_audio_path=prompt_audio,
+                prompt_audio_text=prompt_text,
+                text=request.texts[0],
+                return_subtitles=False,
+                is_cut_text=True,
+                cut_minlen=request.cut_minlen,
+                cut_mute=request.cut_mute,
+                cut_mute_scale_map=request.cut_mute_scale_map or {},
+                stream_mode="token",
+                stream_chunk=request.stream_chunk,
+                overlap_len=5,
+                boost_first_chunk=True,
+                top_k=request.top_k,
+                top_p=request.top_p,
+                temperature=request.temperature,
+                repetition_penalty=request.repetition_penalty,
+                noise_scale=request.noise_scale,
+                speed=request.speed,
+                debug=False,
+            ):
+                # float32[-1,1] → int16 需缩放，直接 astype 会全变 0；
+                # 末尾奇数样本补 1 字节 0，保证块长偶数（客户端按 int16 解析）
+                audio = np.clip(clip.audio_data * 32767.0, -32768, 32767)
+                chunk = audio.astype("<i2").tobytes()
+                if len(chunk) % 2:
+                    chunk += b"\x00"
+                yield chunk
+
+        return StreamingResponse(
+            stream(),
+            media_type="application/octet-stream",
+            headers={"X-Sample-Rate": str(tts.samplerate)},
+        )
     except HTTPException:
         raise
     except Exception as e:

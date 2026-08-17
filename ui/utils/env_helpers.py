@@ -43,6 +43,8 @@ def _update_env(key: str, value: str, root: str = "") -> None:
     同名 key 出现多处时全部更新——主程序热更新（reload_config）按
     last-wins 读 .env，若只改第一个匹配，残留的重复 key 会让热更新
     读到旧值（曾因 .env 末尾历史重复块导致切开关不生效）。
+    无生效行但存在被注释的同 key 行（`# KEY = ...`）时，原地启用该行
+    （替换为生效行），避免追加重复行让用户误以为配置「没变化」。
 
     root 指定 .env 所在目录；留空用 config.cfg.PROJECT_ROOT。
     打包后的 UI（sys.frozen）PROJECT_ROOT 是 exe 目录，而主程序读的是
@@ -57,8 +59,13 @@ def _update_env(key: str, value: str, root: str = "") -> None:
         lines = []
     found = False
     key_re = _env_key_re(key)
+    commented_re = re.compile(rf"^\s*#\s*{re.escape(key)}\s*=")
     for i, line in enumerate(lines):
         if key_re.match(line):
+            lines[i] = f"{key}={value}\n"
+            found = True
+        elif not found and commented_re.match(line):
+            # 被注释的同 key 行 → 原地启用（替换为生效行）
             lines[i] = f"{key}={value}\n"
             found = True
     if not found:
@@ -80,7 +87,7 @@ def _env_defaults() -> Dict[str, str]:
         "BILI_ROOM_ID": "0",
         "BILI_SESSDATA": "",
         "BILI_SERVER_PORT": "8766",
-        "STT_BASE_URL": cfg.SILICONFLOW_BASE_URL or "https://api.siliconflow.cn/v1",
+        "STT_BASE_URL": "",  # 空 = 本地流式 ASR 服务（与 config.py 默认一致）
         "STT_MODEL": "FunAudioLLM/SenseVoiceSmall",
     }
 

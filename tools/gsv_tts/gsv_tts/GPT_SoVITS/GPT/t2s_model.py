@@ -4,7 +4,7 @@ import torch
 from torch import nn
 from torch.nn import functional as F
 from torch.nn.utils.rnn import pad_sequence
-from torch.nn.attention import sdpa_kernel
+from torch.nn.attention import sdpa_kernel, SDPBackend
 from ...Config import SDPBACKEND
 from tqdm import tqdm
 
@@ -51,7 +51,11 @@ class T2SBlock(nn.Module):
         k_cache[:, :, :L] = k
         v_cache[:, :, :L] = v
 
-        with sdpa_kernel(SDPBACKEND):
+        # 预填充注意力固定用 EFFICIENT 内核：CUDNN_ATTENTION 会对每个新的
+        # 序列形状做一次性启发式搜索（实测新文本首块多花 ~500ms），而预填充
+        # 长度随文本变化，逐句触发搜索拖垮首字延迟；EFFICIENT 无逐形状开销，
+        # 解码循环仍走 CUDNN CUDA 图（形状固定，不受影响）。
+        with sdpa_kernel(SDPBackend.EFFICIENT_ATTENTION):
             x = F.scaled_dot_product_attention(q, k, v, attn_mask=attn_mask)
 
         x = x.transpose(1, 2).reshape(B, L, self.hidden_dim)
@@ -663,7 +667,11 @@ class Text2SemanticDecoder(nn.Module):
                 # 对齐单句 infer（L448-449）的修复
                 suppress_mask = decode_steps < initial_suppression_steps
                 if suppress_mask.any():
-                    logits[torch.where(suppress_mask)[0], self.suppressed_tokens] = -float("Inf")
+                    # 行索引须升维为 (N,1) 才能与列索引 (3,) 广播成 (N,3) 全部组合；
+                    # 直接 (N,) 配 (3,) 在 N≠1/3 时（如批量 2/4/8）报
+                    # "shape mismatch: indexing tensors could not be broadcast"
+                    logits[torch.where(suppress_mask)[0][:, None],
+                           self.suppressed_tokens] = -float("Inf")
 
                 # 启用 repetition_penalty（对齐单句 infer）：惩罚已生成 token
                 # 的重复，抑制 GPT 卡进循环 token 无限生成（28s 怪音）。

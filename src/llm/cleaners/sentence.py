@@ -4,7 +4,7 @@ from typing import List
 
 # 句子边界：遇符号立即切分。
 # 中文：。！？…换行；英文：句号 '.' 仅在后跟空格/结尾时算边界（避开 '...'、小数）。
-_SENTENCE_ENDS = "。！？!?\n…，,；;"
+_SENTENCE_ENDS = "。！？!?\n…"
 
 
 def _find_sentence_end_from(text: str, start: int) -> int:
@@ -22,6 +22,23 @@ def _find_sentence_end_from(text: str, start: int) -> int:
             # 英文句号：后跟空格或到结尾才算一句（'...'、小数、缩写不切）
             if i == len(text) - 1 or text[i + 1] == " ":
                 return i
+    return -1
+
+
+# 停顿边界（逗号/顿号）：优先级低于句末标点。流式切段（llm_brain）在
+# 无句末标点时按停顿点切分长句，配调用方的最短段长阈值防「啊，嗯，」被单切。
+_PAUSE_ENDS = "，、,"
+
+
+def _find_pause_end_from(text: str, start: int) -> int:
+    """返回 text 中从 start 起第一个停顿标点（逗号/顿号）的下标；找不到返回 -1。
+
+    流式切段的次优边界：句末标点缺失时按停顿标点切。与 _find_sentence_end_from
+    不同，停顿标点可能落在更早未切完的区域，调用方通常从 0 全扫。
+    """
+    for i in range(start, len(text)):
+        if text[i] in _PAUSE_ENDS:
+            return i
     return -1
 
 
@@ -45,5 +62,5 @@ def _split_sentences(text: str) -> List[str]:
                 sentences.append(buffer)
             break
         sentences.append(buffer[: idx + 1])
-        buffer = buffer[idx + 1:]
+        buffer = buffer[idx + 1 :]
     return sentences

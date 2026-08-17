@@ -53,7 +53,11 @@ from src.llm.cleaners.content import (
     _filter_thinking_content,
     _remove_tool_calls_from_content,
 )
-from src.llm.cleaners.sentence import _find_sentence_end_from, _split_sentences
+from src.llm.cleaners.sentence import (
+    _find_pause_end_from,
+    _find_sentence_end_from,
+    _split_sentences,
+)
 from src.llm.client.factory import (
     build_thinking_extra_body,
     get_openai_client,
@@ -75,6 +79,18 @@ from src.utils.perf_tracker import PerfTracker
 
 # 记忆召回硬超时（秒）：超时熔断跳过注入，保障首字延迟不被检索拖垮
 _MEMORY_RECALL_TIMEOUT = 1.5
+
+# 段落早产切分（压 TTS 首句延迟，让「从 LLM 第一个字开始合成」落地）：
+# LLM 流式产字不等句末，尽早切出可合成段交 TTS（首块 ~200ms 即出声）——
+# - 句末标点（。！？…）必切（原有行为，最自然边界）；
+# - 停顿标点（逗号/顿号）且当前段 ≥ _PAUSE_SEGMENT_MIN_CHARS 字时切：
+#   逗号是中文自然停顿点，切成独立段合成播放不显突兀；
+# - 首段早产：首个可合成段攒够 _FIRST_SEGMENT_MIN_CHARS 字就硬切（LLM 还在
+#   继续吐），不等待整句生成完；
+# - 无标点超长段（≥ _MAX_SEGMENT_CHARS）强制切，防播放头被长句拖住。
+_FIRST_SEGMENT_MIN_CHARS = 6    # 首段早产字数（太小 GSV 短文本合成不稳）
+_PAUSE_SEGMENT_MIN_CHARS = 4    # 停顿标点切段的最短段长（防"啊，嗯，"被单切）
+_MAX_SEGMENT_CHARS = 30         # 无标点强制切段上限
 
 
 class LLMBrain(BaseLLMAdapter, _InjectionMixin, _SummaryMixin):
@@ -600,10 +616,24 @@ class LLMBrain(BaseLLMAdapter, _InjectionMixin, _SummaryMixin):
                     return
                 buffer += item
 
-                # 增量切句：每 chunk 只扫描新增区域（scanned 之后），
-                # 切出句子后剩余 buffer 从头开始；行为与原全量扫描一致。
+                # 增量切段（压 TTS 首句延迟）：每 chunk 只扫描新增区域
+                # （scanned 之后），切出段后剩余 buffer 从头开始。
+                # 边界优先级：句末标点 > 停顿标点（逗号/顿号） > 首段早产 > 超长兜底，
+                # 保证 LLM 第一个字到达后尽早产出可合成段，TTS 首块即出声。
                 while True:
                     idx = _find_sentence_end_from(buffer, scanned)
+                    if idx < 0:
+                        if len(buffer) >= _PAUSE_SEGMENT_MIN_CHARS:
+                            # 从 0 全扫：句末标点才保证 scanned 前无边界，
+                            # 逗号可能出现在旧 buffer（不足 4 字时未切）中
+                            idx = _find_pause_end_from(buffer, 0)
+                        if idx < 0 and not round_content \
+                                and len(buffer) >= _FIRST_SEGMENT_MIN_CHARS:
+                            # 首段早产：首个可合成段攒够字数即切（不等句末），
+                            # 让 TTS 与 LLM 并行——边生成边合成，首声只等首块
+                            idx = len(buffer) - 1
+                        if idx < 0 and len(buffer) >= _MAX_SEGMENT_CHARS:
+                            idx = len(buffer) - 1  # 无标点超长段兜底
                     if idx < 0:
                         break
                     sentence = buffer[: idx + 1]

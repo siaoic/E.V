@@ -36,6 +36,7 @@
 | 变量 | 默认值 | 说明 |
 |---|---|---|
 | `TTS_SERVER_URL` | `http://127.0.0.1:8000` | **外部 TTS 合成服务**（`tts.bat` 启动的 fastapi_server_example.py） |
+| `TTS_OUTPUT_DEVICE` | 空 | 低延迟输出设备名子串（如 `Voicemeeter In`）：走 WASAPI 独占直达混音台，首句出声 ~120ms→几 ms；留空用系统默认输出（缓冲 50ms） |
 | `GPTSOVITS_REF_AUDIO` | 空 | 主参考音频（音色 + 发音参考）；**为空则语音合成关闭** |
 | `GPTSOVITS_REF_AUDIOS` | 空 | 辅助参考音频，多条 `\|` 分隔（服务端仅支持单说话人，当前忽略） |
 | `GPTSOVITS_PROMPT_TEXT` | 空 | 参考音频对应文本 |

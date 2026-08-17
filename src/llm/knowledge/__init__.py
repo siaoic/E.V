@@ -14,12 +14,14 @@
 from __future__ import annotations
 
 import threading
+import time
 from typing import Optional
 
 from src.llm.knowledge.format import format_for_injection
 from src.llm.knowledge.gate import KnowledgeGate
 from src.llm.knowledge.loader import KnowledgeBase, load_knowledge
 from src.llm.knowledge.recall import KnowledgeRecall
+from src.utils import console
 
 __all__ = [
     "KnowledgeBase",
@@ -67,11 +69,19 @@ class KnowledgeService:
         self._ensure_loaded()
         if self._gate is None or self._recall is None:
             return ""
+        t0 = time.perf_counter()
         if not self._gate.should_inject(user_text):
+            # 耗时回显到控制中心工具日志栏，便于监控每轮知识开销
+            console.dim(
+                f"[知识库] 闸门未命中，不注入 "
+                f"({(time.perf_counter() - t0) * 1000:.1f}ms)")
             return ""
+        t1 = time.perf_counter()
         level = self._gate.level(user_text)
+        t2 = time.perf_counter()
         recalled = self._recall.recall(user_text, level=level)
-        return format_for_injection(
+        t3 = time.perf_counter()
+        text = format_for_injection(
             recalled,
             level=level,
             max_total_chars=max_total_chars,
@@ -79,6 +89,13 @@ class KnowledgeService:
             # 普通实体提及（level 1）不强制注入，避免每轮都带约束噪音
             fail_closed=level >= 2,
         )
+        t4 = time.perf_counter()
+        hits = " ".join(f"{k}{len(v)}" for k, v in recalled.items() if v) or "0"
+        console.dim(
+            f"[知识库] 判定={(t1 - t0) * 1000:.1f}ms 层级={level} "
+            f"检索={(t3 - t2) * 1000:.1f}ms(命中{hits}) "
+            f"格式化={(t4 - t3) * 1000:.2f}ms 共{(t4 - t0) * 1000:.1f}ms")
+        return text
 
 
 _service: Optional[KnowledgeService] = None

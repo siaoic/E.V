@@ -42,25 +42,49 @@ def _save_ui_system_prompt(text: str) -> None:
 class ConfigHandler:
     """配置保存：一次保存 LLM + 设置页全部字段，并热通知运行中的主程序。"""
 
+    # 保存基准字段：控制中心启动时的 .env 值（首次保存时固化）。
+    # 判断「用户是否改过该字段」的对比基准必须用快照，不能用 self.cfg
+    # （=config.cfg 单例）——reload_config() 每次保存后会原地刷新单例，
+    # 第二次保存基准就变成「当前 .env」，而 UI 字段仍是启动时的旧值 →
+    # 未动过的字段被误判为「已变化」→ 把外部手动改的 .env 用旧 UI 值
+    # 回写覆盖（曾覆盖 STT_BASE_URL/STT_MODEL 的云端配置）。
+    _ENV_SNAPSHOT_FIELDS = (
+        "LLM_API_KEY", "LLM_BASE_URL", "LLM_MODEL",
+        "EMBEDDING_BASE_URL", "EMBEDDING_MODEL", "EMBEDDING_API_KEY",
+        "BUTLER_BASE_URL", "BUTLER_MODEL", "BUTLER_API_KEY",
+        "TOOLS_ENABLED", "PROACTIVE_ENABLED", "PROFANITY_FILTER_ENABLED",
+        "STT_ENABLED", "STT_API_KEY", "STT_BASE_URL", "STT_MODEL",
+        "EMOTION_ACTOR_ENABLED",
+        "GPTSOVITS_REF_AUDIO", "GPTSOVITS_PROMPT_TEXT", "GPTSOVITS_REF_AUDIOS",
+        "BILI_ENABLED", "BILI_ROOM_ID", "BILI_SESSDATA", "BILI_SERVER_PORT",
+        "PET_IDLE_MOTION", "SYSTEM_PROMPT_FILE",
+    )
+
+    def _env_base(self) -> dict:
+        """保存对比基准（懒固化一次）：控制中心启动时的 .env 字段值。"""
+        if getattr(self, "_env_base_snapshot", None) is None:
+            self._env_base_snapshot = {
+                k: getattr(config.cfg, k) for k in self._ENV_SNAPSHOT_FIELDS}
+        return self._env_base_snapshot
+
     # —— 增量保存辅助：只写「被修改过」的配置项 ——
-    def _env_save_if_changed(self, key: str, ui_value: str, cfg_value) -> None:
-        """UI 值 ≠ 启动时 cfg 值（用户改过）才写 .env；未修改跳过，
+    def _env_save_if_changed(self, key: str, ui_value: str) -> None:
+        """UI 值 ≠ 启动时快照值（用户改过）才写 .env；未修改跳过，
         避免点「更新配置」把全部行无条件重写（覆盖手动改动/刷新写盘）。"""
         v = (ui_value or "").strip()
-        if v == (str(cfg_value or "") or "").strip():
+        if v == (str(self._env_base().get(key) or "") or "").strip():
             return
         env_helpers._update_env(key, v)
 
-    def _env_bool_save_if_changed(
-            self, key: str, ui_checked: bool, cfg_value) -> None:
+    def _env_bool_save_if_changed(self, key: str, ui_checked: bool) -> None:
         """布尔开关版本：勾选状态没变不写。"""
-        if ui_checked != bool(cfg_value):
+        if ui_checked != bool(self._env_base().get(key)):
             env_helpers._update_env(key, "true" if ui_checked else "false")
 
     def _env_save_skip_default_if_changed(
-            self, key: str, ui_value: str, cfg_value, default: str) -> None:
+            self, key: str, ui_value: str, default: str) -> None:
         """skip_default 版本：未修改跳过；修改过按默认值语义写（=默认移除行）。"""
-        if (ui_value or "").strip() == (str(cfg_value or "") or "").strip():
+        if (ui_value or "").strip() == (str(self._env_base().get(key) or "") or "").strip():
             return
         env_helpers._update_env_skip_default(key, ui_value, default)
 
@@ -85,26 +109,23 @@ class ConfigHandler:
         _emb_changed = False   # Embedding/管家模型变化：无法热更新，需重启主程序
         try:
             # LLM 配置（未修改跳过，避免全量重写 .env）
-            self._env_save_if_changed("LLM_API_KEY", self.ed_key.text().strip(),
-                                      self.cfg.LLM_API_KEY)
-            self._env_save_if_changed("LLM_BASE_URL", self.ed_url.text().strip(),
-                                      self.cfg.LLM_BASE_URL)
-            self._env_save_if_changed("LLM_MODEL", self.ed_model.text().strip(),
-                                      self.cfg.LLM_MODEL)
+            self._env_save_if_changed("LLM_API_KEY", self.ed_key.text().strip())
+            self._env_save_if_changed("LLM_BASE_URL", self.ed_url.text().strip())
+            self._env_save_if_changed("LLM_MODEL", self.ed_model.text().strip())
             # Embedding 配置（记忆检索/情绪嵌入）
-            self._env_save_if_changed("EMBEDDING_BASE_URL", self.ed_emb_url.text().strip(),
-                                      self.cfg.EMBEDDING_BASE_URL)
-            self._env_save_if_changed("EMBEDDING_MODEL", self.ed_emb_model.text().strip(),
-                                      self.cfg.EMBEDDING_MODEL)
-            self._env_save_if_changed("EMBEDDING_API_KEY", self.ed_emb_key.text().strip(),
-                                      self.cfg.EMBEDDING_API_KEY)
+            self._env_save_if_changed(
+                "EMBEDDING_BASE_URL", self.ed_emb_url.text().strip())
+            self._env_save_if_changed(
+                "EMBEDDING_MODEL", self.ed_emb_model.text().strip())
+            self._env_save_if_changed(
+                "EMBEDDING_API_KEY", self.ed_emb_key.text().strip())
             # 管家模型（ButlerAgent 记忆管家）
-            self._env_save_if_changed("BUTLER_BASE_URL", self.ed_butler_url.text().strip(),
-                                      self.cfg.BUTLER_BASE_URL)
-            self._env_save_if_changed("BUTLER_MODEL", self.ed_butler_model.text().strip(),
-                                      self.cfg.BUTLER_MODEL)
-            self._env_save_if_changed("BUTLER_API_KEY", self.ed_butler_key.text().strip(),
-                                      self.cfg.BUTLER_API_KEY)
+            self._env_save_if_changed(
+                "BUTLER_BASE_URL", self.ed_butler_url.text().strip())
+            self._env_save_if_changed(
+                "BUTLER_MODEL", self.ed_butler_model.text().strip())
+            self._env_save_if_changed(
+                "BUTLER_API_KEY", self.ed_butler_key.text().strip())
             _emb_changed = (
                 self.ed_emb_url.text().strip() != (self.cfg.EMBEDDING_BASE_URL or "")
                 or self.ed_emb_model.text().strip() != (self.cfg.EMBEDDING_MODEL or "")
@@ -116,19 +137,15 @@ class ConfigHandler:
             # 未配置时，人设保存到 ui/data/system_prompt.txt（config 自动读取），
             # 不再写入 .env——多行未加引号会把 .env 撑成 5000+ 行无法解析
             # （python-dotenv 每次启动刷几百条 could not parse statement）。
-            if not str(self.cfg.SYSTEM_PROMPT_FILE or "").strip():
+            if not str(self._env_base().get("SYSTEM_PROMPT_FILE") or "").strip():
                 _save_ui_system_prompt(self.ed_prompt.toPlainText().strip())
             # 设置（未修改跳过）
+            self._env_bool_save_if_changed("TOOLS_ENABLED", self.cb_mcp.isChecked())
             self._env_bool_save_if_changed(
-                "TOOLS_ENABLED", self.cb_mcp.isChecked(), self.cfg.TOOLS_ENABLED)
+                "PROACTIVE_ENABLED", self.cb_proactive.isChecked())
             self._env_bool_save_if_changed(
-                "PROACTIVE_ENABLED", self.cb_proactive.isChecked(),
-                self.cfg.PROACTIVE_ENABLED)
-            self._env_bool_save_if_changed(
-                "PROFANITY_FILTER_ENABLED", self.cb_filter.isChecked(),
-                self.cfg.PROFANITY_FILTER_ENABLED)
-            self._env_bool_save_if_changed(
-                "STT_ENABLED", self.cb_stt.isChecked(), self.cfg.STT_ENABLED)
+                "PROFANITY_FILTER_ENABLED", self.cb_filter.isChecked())
+            self._env_bool_save_if_changed("STT_ENABLED", self.cb_stt.isChecked())
             # 语音识别相关变化（开关 / Key / URL / 模型）：变化才发 !stt 热重启引擎。
             # 空字段 = 回退代码默认（Key 空 = 回退共用 SiliconFlow；URL/模型空 =
             # 用代码默认），比较前先归一化为默认值——否则「留空恒不等于 cfg 里的
@@ -144,42 +161,38 @@ class ConfigHandler:
                 != (self.cfg.STT_MODEL or ""))
             # Key 留空 = 回退共用 SiliconFlow：等于默认（空）时不写入 .env
             self._env_save_skip_default_if_changed(
-                "STT_API_KEY", self.ed_stt_key.text().strip(),
-                self.cfg.STT_API_KEY, "")
+                "STT_API_KEY", self.ed_stt_key.text().strip(), "")
             # 语音识别 URL / 模型：默认值不写入 .env（.env 只保留自定义配置）
             self._env_save_skip_default_if_changed(
                 "STT_BASE_URL", self.ed_stt_url.text().strip(),
-                self.cfg.STT_BASE_URL, _defaults["STT_BASE_URL"])
+                _defaults["STT_BASE_URL"])
             self._env_save_skip_default_if_changed(
                 "STT_MODEL", self.ed_stt_model.text().strip(),
-                self.cfg.STT_MODEL, _defaults["STT_MODEL"])
+                _defaults["STT_MODEL"])
             self._env_bool_save_if_changed(
-                "EMOTION_ACTOR_ENABLED", self.cb_emotion_actor.isChecked(),
-                self.cfg.EMOTION_ACTOR_ENABLED)
+                "EMOTION_ACTOR_ENABLED", self.cb_emotion_actor.isChecked())
             self._env_save_if_changed(
-                "GPTSOVITS_REF_AUDIO", self.ed_tts_audio.text().strip(),
-                self.cfg.GPTSOVITS_REF_AUDIO)
+                "GPTSOVITS_REF_AUDIO", self.ed_tts_audio.text().strip())
             self._env_save_if_changed(
-                "GPTSOVITS_PROMPT_TEXT", self.ed_tts_text.text().strip(),
-                self.cfg.GPTSOVITS_PROMPT_TEXT)
+                "GPTSOVITS_PROMPT_TEXT", self.ed_tts_text.text().strip())
             self._env_save_if_changed(
-                "GPTSOVITS_REF_AUDIOS", self.ed_tts_audios.text().strip(),
-                self.cfg.GPTSOVITS_REF_AUDIOS)
+                "GPTSOVITS_REF_AUDIOS", self.ed_tts_audios.text().strip())
             # B站直播弹幕：值等于代码默认 → 不写入 .env；未修改跳过
-            if self.cb_bili_enabled.isChecked() != bool(self.cfg.BILI_ENABLED):
+            if self.cb_bili_enabled.isChecked() != bool(
+                    self._env_base().get("BILI_ENABLED")):
                 env_helpers._update_env_skip_default(
                     "BILI_ENABLED",
                     "true" if self.cb_bili_enabled.isChecked() else "false",
                     _defaults["BILI_ENABLED"])
             self._env_save_skip_default_if_changed(
                 "BILI_ROOM_ID", self.ed_bili_room.text().strip(),
-                self.cfg.BILI_ROOM_ID, _defaults["BILI_ROOM_ID"])
+                _defaults["BILI_ROOM_ID"])
             self._env_save_skip_default_if_changed(
                 "BILI_SESSDATA", self.ed_bili_sessdata.text().strip(),
-                self.cfg.BILI_SESSDATA, _defaults["BILI_SESSDATA"])
+                _defaults["BILI_SESSDATA"])
             self._env_save_skip_default_if_changed(
                 "BILI_SERVER_PORT", self.ed_bili_port.text().strip(),
-                self.cfg.BILI_SERVER_PORT, _defaults["BILI_SERVER_PORT"])
+                _defaults["BILI_SERVER_PORT"])
             # 工具总开关变化（!tools 热启停/重启 MCP 服务器并重新合并工具）
             _tools_changed = (
                 self.cb_mcp.isChecked() != bool(self.cfg.TOOLS_ENABLED))
@@ -203,8 +216,7 @@ class ConfigHandler:
         try:
             self._env_save_skip_default_if_changed(
                 "PET_IDLE_MOTION",
-                str(self.combo_idle_motion.currentData() or "").strip(),
-                self.cfg.PET_IDLE_MOTION, "")
+                str(self.combo_idle_motion.currentData() or "").strip(), "")
         except OSError as e:
             console.error(f"保存默认待机动作失败：{e}")
         # 表情/动作绑定映射（与 .env 一起保存，点底部「更新配置」即可热生效）

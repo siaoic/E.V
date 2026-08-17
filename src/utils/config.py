@@ -324,14 +324,15 @@ class VoiceConfig:
     GPTSOVITS_TIMEOUT: float = 120
     GPTSOVITS_MODELS_DIR: str = ""
     TTS_SERVER_URL: str = "http://127.0.0.1:8000"
+    TTS_OUTPUT_DEVICE: str = ""
     STT_ENABLED: bool = False
-    STT_ENGINE: str = "cloud"
     STT_MODEL: str = "FunAudioLLM/SenseVoiceSmall"
     STT_LOCAL_MODEL_PATH: str = ""
     STT_LOCAL_MODEL_REVISION: str = "v2.0.4"
     STT_SERVER_URL: str = "http://127.0.0.1:8487"
     STT_API_KEY: str = ""
-    STT_BASE_URL: str = "https://api.siliconflow.cn/v1"
+    # 转写 API 地址：填了 = 走该 API（整段上传转写）；留空 = 本地流式 ASR 服务
+    STT_BASE_URL: str = ""
     STT_LEVEL_THRESHOLD: float = 500
     STT_VAD_MODE: int = 2
     STT_SILENCE_SECONDS: float = 0.6
@@ -513,15 +514,14 @@ _VOICE_LOADERS = {
     "GPTSOVITS_TIMEOUT": lambda: float(os.getenv("GPTSOVITS_TIMEOUT", "120")),
     "GPTSOVITS_MODELS_DIR": lambda: os.getenv("GPTSOVITS_MODELS_DIR", ""),
     "TTS_SERVER_URL": lambda: os.getenv("TTS_SERVER_URL", "http://127.0.0.1:8000"),
+    "TTS_OUTPUT_DEVICE": lambda: os.getenv("TTS_OUTPUT_DEVICE", ""),
     "STT_ENABLED": lambda: _get_bool("STT_ENABLED", False),
-    "STT_ENGINE": lambda: os.getenv("STT_ENGINE") or "cloud",
     "STT_MODEL": lambda: os.getenv("STT_MODEL") or "FunAudioLLM/SenseVoiceSmall",
     "STT_LOCAL_MODEL_PATH": lambda: os.getenv("STT_LOCAL_MODEL_PATH") or "",
     "STT_LOCAL_MODEL_REVISION": lambda: os.getenv("STT_LOCAL_MODEL_REVISION") or "v2.0.4",
     "STT_SERVER_URL": lambda: os.getenv("STT_SERVER_URL") or "http://127.0.0.1:8487",
     "STT_API_KEY": lambda: os.getenv("STT_API_KEY") or "",
-    "STT_BASE_URL": lambda: os.getenv("STT_BASE_URL") or (
-        os.getenv("SILICONFLOW_BASE_URL") or "https://api.siliconflow.cn/v1"),
+    "STT_BASE_URL": lambda: os.getenv("STT_BASE_URL") or "",
     "STT_LEVEL_THRESHOLD": lambda: float(os.getenv("STT_LEVEL_THRESHOLD") or "500"),
     "STT_VAD_MODE": lambda: int(os.getenv("STT_VAD_MODE") or "2"),
     "STT_SILENCE_SECONDS": lambda: float(os.getenv("STT_SILENCE_SECONDS") or "0.6"),
@@ -649,7 +649,7 @@ _TOOL_HOT_FIELDS = (
     "EVOLUTION_EVAL_ENABLED", "EVOLUTION_EVAL_CASES",
     "EVOLUTION_PROMPT_EVO_ENABLED", "EVOLUTION_PROMPT_EVO_INTERVAL",
     "LLM_SERVERS", "LLM_ROUTER_ENABLED", "LLM_ROUTER_EPSILON",
-    "STT_ENABLED", "STT_ENGINE", "STT_MODEL",
+    "STT_ENABLED", "STT_MODEL",
     "STT_LOCAL_MODEL_PATH", "STT_LOCAL_MODEL_REVISION",
     "STT_SERVER_URL", "STT_API_KEY", "STT_BASE_URL",
 )
@@ -1015,12 +1015,12 @@ class Config:
         return self.voice.TTS_SERVER_URL
 
     @property
-    def STT_ENABLED(self) -> bool:
-        return self.voice.STT_ENABLED
+    def TTS_OUTPUT_DEVICE(self) -> str:
+        return self.voice.TTS_OUTPUT_DEVICE
 
     @property
-    def STT_ENGINE(self) -> str:
-        return self.voice.STT_ENGINE
+    def STT_ENABLED(self) -> bool:
+        return self.voice.STT_ENABLED
 
     @property
     def STT_MODEL(self) -> str:

@@ -121,19 +121,35 @@ class STTEngine(BaseInputAdapter):
     """
 
     def __init__(self, cfg) -> None:
-        # 转写引擎：local（本地 ASR 服务 asr.bat，8487 端口）/ cloud（SiliconFlow 云端）
-        self.engine = str(getattr(cfg, "STT_ENGINE", None) or "cloud").lower()
+        # 转写 API 地址：STT_BASE_URL 填了 = 走该 API（整段上传转写）；
+        # 留空 = 走本地流式 ASR 服务（asr.bat，STT_SERVER_URL）。
+        # 不再区分 STT_ENGINE 开关——URL 填了就按它来。
+        self.base_url = str(getattr(cfg, "STT_BASE_URL", None) or "").strip()
         # 本地 ASR 服务地址（src/asr/asr_server.py 独立进程）
         self.server_url = (
             getattr(cfg, "STT_SERVER_URL", None)
             or "http://127.0.0.1:8487").rstrip("/")
+        if self.base_url:
+            base_url = self.base_url.rstrip("/")
+            # 防呆：误把本地 ASR 服务地址填进 STT_BASE_URL 时（本地服务无
+            # OpenAI 兼容接口 /audio/transcriptions），自动降级为本地引擎，
+            # 避免整段上传打 404 导致转写失败。
+            is_local_url = (
+                base_url.lower() == self.server_url.lower()
+                or base_url.lower() in (
+                    "http://127.0.0.1:8487", "http://localhost:8487"))
+            if is_local_url:
+                self.engine = "local"
+                self.base_url = ""
+            else:
+                self.engine = "cloud"
+                self.base_url = base_url
+        else:
+            self.engine = "local"
         # 独立 STT key 优先，留空回退复用 SiliconFlow 主 key（与嵌入同源）
         self.api_key = (
             getattr(cfg, "STT_API_KEY", None) or cfg.SILICONFLOW_API_KEY or ""
         )
-        self.base_url = (
-            getattr(cfg, "STT_BASE_URL", None) or cfg.SILICONFLOW_BASE_URL
-            or "https://api.siliconflow.cn/v1").rstrip("/")
         self.model = getattr(cfg, "STT_MODEL", None) or "FunAudioLLM/SenseVoiceSmall"
         self.silence_seconds = float(
             getattr(cfg, "STT_SILENCE_SECONDS", None) or 0.6)

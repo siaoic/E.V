@@ -21,6 +21,32 @@ import sounddevice as sd
 import soundfile as sf
 
 from src.utils import console
+from src.utils import config
+
+
+def _find_wasapi_device(name: str) -> Optional[int]:
+    """按设备名子串匹配 WASAPI 输出端点（低延迟专用，返回 index）。
+
+    Windows 默认输出通常走 MME（最老 API，即使 latency='low' 缓冲仍
+    90ms，首句出声晚）。WASAPI 独占端点实测首声延迟可再降一半——
+    TTS_OUTPUT_DEVICE 配置混音台/虚拟设备名（如「Voicemeeter In」）时
+    自动改用其 WASAPI 端点；匹配不到或非 Windows 返回 None（走默认）。
+    """
+    name = (name or "").strip().lower()
+    if not name:
+        return None
+    try:
+        for i, d in enumerate(sd.query_devices()):
+            if d["max_output_channels"] <= 0:
+                continue
+            hostapi = sd.query_hostapis()[d["hostapi"]]["name"]
+            if "wasapi" not in hostapi.lower():
+                continue
+            if name in d["name"].lower():
+                return i
+    except Exception:
+        return None
+    return None
 
 # 本地播放入队块长（秒）：整段音频按固定时长分块，块间由设备缓冲衔接无缝播放。
 # 过大延迟首块出声，过小口型回调过于频繁，0.5s 为平衡值。
@@ -60,13 +86,42 @@ class _AudioQueue:
         self._on_idle = on_idle
         self._idle_fired = True     # 初始空闲不触发；put 后置 False，播空触发一次
         try:
-            self.stream = sd.OutputStream(
-                samplerate=samplerate, channels=1, dtype="float32")
+            # 显式 50ms 缓冲替代 'low'：'low' 在 Windows 默认 MME 下仍高达
+            # ~90ms，首句出声明显偏晚；50ms 是播放稳定与低延迟的平衡值
+            # （CPU 偶发抖动也不易爆音）。配置 TTS_OUTPUT_DEVICE 时改走
+            # WASAPI 独占端点（如混音台 Voicemeeter），首声延迟再降一半。
+            self.stream = self._open_stream(samplerate)
             self.stream.start()
         except Exception:
             self.stream = None      # 无声卡/设备占用：仅消费队列不写设备
         self.t = threading.Thread(target=self._run, daemon=True)
         self.t.start()
+
+    def _open_stream(self, samplerate: int):
+        """创建输出流：配置了 TTS_OUTPUT_DEVICE 时优先 WASAPI 独占（低延迟）。
+
+        WASAPI 独占要求设备支持目标采样率（GSV 32000 实测可用）且未被
+        其它程序占用；任一失败回退默认设备（保持旧行为，仅缓冲降至 50ms）。
+        """
+        kwargs: dict = {"latency": 0.05}
+        device_name = str(getattr(config.cfg, "TTS_OUTPUT_DEVICE", "") or "")
+        if device_name:
+            idx = _find_wasapi_device(device_name)
+            if idx is not None:
+                # WASAPI 独占必须显式指定 blocksize（缓冲大小即延迟，
+                # 512 帧 @32000Hz = 16ms），latency 参数在独占模式下被忽略
+                kwargs.update(device=idx, blocksize=512)
+                try:
+                    kwargs["extra_settings"] = sd.WasapiSettings(exclusive=True)
+                except Exception:
+                    pass
+        try:
+            return sd.OutputStream(samplerate=samplerate, channels=1,
+                                   dtype="float32", **kwargs)
+        except Exception:
+            # 回退默认设备：清掉独占/指定设备参数重试
+            return sd.OutputStream(samplerate=samplerate, channels=1,
+                                   dtype="float32", latency=0.05)
 
     def put(self, data: np.ndarray) -> None:
         """把一块 1D float32 音频入队，由常驻线程写入声卡。"""
@@ -264,6 +319,11 @@ class TTSPlayer:
         self._sub_mute = False               # 打断后抑制字幕线程的残留推送
         self._play_metas: "queue.Queue[Tuple[str, str, float, int, int]]" = queue.Queue()
         self._sent_seq = itertools.count(1)  # 句子序号：字幕锚点/游标按句隔离
+        # 每句 emit 入队的墙钟时刻（句首块真正写入设备时取差，诊断出声等待）
+        self._sent_emit_ts: dict = {}
+        # 流式句上下文（begin_stream 建立，feed/end 消费）：整句合成改为
+        # 增量播放时，音频块按到达节奏入队，首块到达即出声（无需等整句）。
+        self._stream_ctx: Optional[dict] = None
         self._tmp_dir = tempfile.mkdtemp(prefix="vtuber_tts_")
 
     # ---------- 对外回调 / 事件循环 ----------
@@ -314,6 +374,11 @@ class TTSPlayer:
             return
         wav, _text, dur_s, sent_id, chunk_idx = meta
         if chunk_idx == 0:
+            # 诊断：emit 入队 → 句首块真正开播的等待（合成完但声音晚 = 这里大）
+            emit_ts = self._sent_emit_ts.pop(sent_id, None)
+            if emit_ts is not None:
+                wait_ms = (time.perf_counter() - emit_ts) * 1000
+                console.dim(f"[TTS] 句{sent_id} 入队→开播等待 {wait_ms:.0f}ms")
             try:
                 latency = 0.0
                 if self._queue is not None and self._queue.stream is not None:
@@ -385,8 +450,8 @@ class TTSPlayer:
              subtitles: list, gen: int) -> None:
         """把一段合成音频拆块入队无缝播放 + 口型临时 wav + 词级时间戳字幕。
 
-        audio：1D float32；sr：采样率；text：本段文本；subtitles：GSV 返回的
-        词级时间戳列表（相对音频起点）；gen：合成侧代次快照（打断后递增，
+        audio：1D float32；sr：采样率；text：本段文本；subtitles：词级
+        时间戳列表（相对音频起点）；gen：合成侧代次快照（打断后递增，
         拆块循环据此提前停止入队）。
         """
         try:
@@ -399,30 +464,14 @@ class TTSPlayer:
         if self._sub_q is None:
             self._sub_q = _SubtitlesQueue(self._push_subtitle)
         sent_id = next(self._sent_seq)
+        self._sent_emit_ts[sent_id] = time.perf_counter()  # 入队时刻（诊断用）
         frames_per_chunk = max(1, int(_PLAY_CHUNK_SEC * sr))
         chunk_idx = 0
         for start in range(0, len(audio), frames_per_chunk):
-            if gen != self._gen:
+            if not self._emit_block(
+                    audio[start:start + frames_per_chunk], sr,
+                    sent_id, chunk_idx, gen):
                 return  # 打断：放弃剩余音频
-            chunk = audio[start:start + frames_per_chunk]
-            chunk_dur = len(chunk) / sr
-            wav_path = ""
-            try:
-                if self._on_play is not None:
-                    fd, wav_path = tempfile.mkstemp(
-                        suffix=".wav", prefix="vtuber_tts_", dir=self._tmp_dir)
-                    os.close(fd)
-                    sf.write(wav_path, chunk, sr)
-            except Exception as e:
-                console.dim(f"TTS 写临时音频失败：{e}")
-                wav_path = ""
-            self._play_metas.put((wav_path, "", chunk_dur, sent_id, chunk_idx))
-            try:
-                # 无缝播放：同一 OutputStream 逐块 write，块间由设备缓冲衔接
-                self._queue.put(chunk)
-            except Exception as e:
-                console.error(f"TTS 播放失败：{e}")
-                return
             chunk_idx += 1
         # 字幕：GSV-TTS-Lite 返回的真实词级时间戳，锚定播放时刻逐词推进
         if self._sub_q is not None:
@@ -430,6 +479,121 @@ class TTSPlayer:
                 self._sub_q.add_clip(text, list(subtitles or []), sent_id)
             except Exception:
                 pass
+
+    def _emit_block(self, chunk: np.ndarray, sr: int, sent_id: int,
+                    chunk_idx: int, gen: int) -> bool:
+        """把单个音频块入队（口型临时 wav + 元信息 + 音频），供 emit 与流式共用。
+
+        返回 False 表示代次已变（打断）或入队失败，调用方应停止。
+        """
+        if gen != self._gen:
+            return False
+        chunk_dur = len(chunk) / sr
+        wav_path = ""
+        try:
+            if self._on_play is not None:
+                fd, wav_path = tempfile.mkstemp(
+                    suffix=".wav", prefix="vtuber_tts_", dir=self._tmp_dir)
+                os.close(fd)
+                sf.write(wav_path, chunk, sr)
+        except Exception as e:
+            console.dim(f"TTS 写临时音频失败：{e}")
+            wav_path = ""
+        self._play_metas.put((wav_path, "", chunk_dur, sent_id, chunk_idx))
+        try:
+            # 无缝播放：同一 OutputStream 逐块 write，块间由设备缓冲衔接
+            self._queue.put(chunk)
+        except Exception as e:
+            console.error(f"TTS 播放失败：{e}")
+            return False
+        return True
+
+    # ---------- 流式播放（整句合成改为增量喂入，首块到达即出声） ----------
+
+    def begin_stream(self, sr: int, text: str, subtitles: list,
+                     gen: int) -> Optional[int]:
+        """开始一句流式音频的增量播放，返回 sent_id（播放器不可用/打断返回 None）。
+
+        与 emit() 同款初始化（播放队列/防抖/字幕句柄/入队时刻），但不拆整句：
+        后续 feed_stream() 按到达节奏把音频增量入队，句首块到达即开播，
+        首字延迟只受「首块到达」限制，不再等整句合成完。字幕整句显示
+        （流式逐块有 SOLA 重叠混音，无词级时间戳）。
+        """
+        if gen != self._gen:
+            return None
+        try:
+            self._ensure_queue(sr)
+        except Exception as e:
+            console.dim(f"TTS 播放队列初始化失败（口型/字幕可能不可用）：{e}")
+            return None
+        # 新音频到达：取消待触发的说话结束复原定时器（多句连播防抖）
+        self._cancel_play_done()
+        if self._sub_q is None:
+            self._sub_q = _SubtitlesQueue(self._push_subtitle)
+        sent_id = next(self._sent_seq)
+        self._sent_emit_ts[sent_id] = time.perf_counter()  # 入队时刻（诊断用）
+        self._stream_ctx = {
+            "sent_id": sent_id, "gen": gen, "sr": sr, "text": text,
+            "subtitles": list(subtitles or []),
+            "frames_per_chunk": max(1, int(_PLAY_CHUNK_SEC * sr)),
+            "chunk_idx": 0,
+            "buffer": np.zeros(0, dtype=np.float32),
+        }
+        return sent_id
+
+    def feed_stream(self, pcm: bytes, gen: int) -> bool:
+        """喂入一块流式音频（int16 小端 PCM 字节），按块边界增量入队播放。
+
+        返回 False 表示代次已变（打断）或入队失败，调用方应停止喂入。
+        """
+        ctx = self._stream_ctx
+        if ctx is None or gen != self._gen:
+            return False
+        audio = np.frombuffer(pcm, dtype="<i2").astype(np.float32) / 32768.0
+        buf = np.concatenate([ctx["buffer"], audio])
+        frames = ctx["frames_per_chunk"]
+        sent_id = ctx["sent_id"]
+        chunk_idx = ctx["chunk_idx"]
+        while len(buf) >= frames:
+            if not self._emit_block(buf[:frames], ctx["sr"],
+                                    sent_id, chunk_idx, gen):
+                return False
+            buf = buf[frames:]
+            chunk_idx += 1
+        # 首块立即出声：首个 HTTP 块若不足整块（0.5s）也直接入队播放，不
+        # 等凑满——首字延迟只受「首块到达」限制，不受本地分块缓冲拖累
+        # （服务端 boost_first_chunk 首块 ~0.48s，凑满 0.5s 会多等一拍）。
+        if chunk_idx == 0 and buf.size:
+            if not self._emit_block(buf, ctx["sr"], sent_id, chunk_idx, gen):
+                return False
+            buf = np.zeros(0, dtype=np.float32)
+            chunk_idx += 1
+        ctx["buffer"] = buf
+        ctx["chunk_idx"] = chunk_idx
+        return True
+
+    def end_stream(self, gen: int) -> None:
+        """流式句收尾：冲刷残余块并提交整句字幕。"""
+        ctx = self._stream_ctx
+        self._stream_ctx = None
+        if ctx is None or gen != self._gen:
+            return
+        if ctx["buffer"].size:
+            self._emit_block(ctx["buffer"], ctx["sr"], ctx["sent_id"],
+                             ctx["chunk_idx"], gen)
+        if self._sub_q is not None:
+            try:
+                self._sub_q.add_clip(ctx["text"], ctx["subtitles"],
+                                     ctx["sent_id"])
+            except Exception:
+                pass
+
+    def abort_stream(self) -> None:
+        """放弃当前流式句：丢弃未入队缓冲；已入队块照常播完。
+
+        退化/失败回退由调用方决定（重新批量合成），本方法只终止增量会话。
+        """
+        self._stream_ctx = None
 
     # ---------- 打断 / 排空 / 关闭 ----------
 
@@ -455,6 +619,8 @@ class TTSPlayer:
                     os.remove(wav)
                 except Exception:
                     pass
+        self._sent_emit_ts.clear()  # 打断：作废未开播句的入队时刻
+        self._stream_ctx = None     # 打断：放弃流式句剩余喂入
         if self._sub_q is not None:
             try:
                 self._sub_q.clear()
@@ -479,6 +645,7 @@ class TTSPlayer:
     def close(self) -> None:
         """停止播放线程、关闭输出流并清理临时目录（进程退出前调用）。"""
         self._cancel_play_done()
+        self._stream_ctx = None
         if self._sub_q is not None:
             try:
                 self._sub_q.clear()

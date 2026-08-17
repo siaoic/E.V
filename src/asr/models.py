@@ -48,8 +48,17 @@ def ensure_model(model_id: str, revision: str) -> Path:
             return candidate
     from modelscope import snapshot_download
 
-    console.info(f"[ASR] 模型 {model_id}（revision {revision}）缺失，正在从 ModelScope 下载…")
-    path = snapshot_download(model_id, revision=revision, cache_dir=str(MODELS_DIR))
+    label = f"{model_id}（revision {revision}）"
+    console.info(f"[ASR] 模型 {label} 缺失，正在从 ModelScope 下载…")
+    try:
+        path = snapshot_download(
+            model_id, revision=revision, cache_dir=str(MODELS_DIR))
+    except Exception as e:
+        console.error(
+            f"[ASR] 模型 {label} 下载失败：{e}。请检查网络后重试"
+            f"（模型将保存在 {MODELS_DIR}）。")
+        raise
+    console.info(f"[ASR] 模型 {label} 下载完成")
     return Path(path)
 
 
@@ -69,3 +78,14 @@ def ensure_asr_model() -> Path:
         return Path(override)
     revision = os.environ.get("STT_LOCAL_MODEL_REVISION") or MODEL_REVISION
     return ensure_model(ASR_MODEL_ID, revision)
+
+
+def ensure_stt_models() -> None:
+    """确保 STT 全链路模型就绪（fsmn-vad + paraformer 流式转写）。
+
+    供显式下载入口（下载stt模型.bat / asr_server.py --download-only）一次
+    性下载两个模型；任一缺失自动从 ModelScope 下载，已存在则直接跳过。
+    """
+    ensure_vad_model()
+    ensure_asr_model()
+    console.info("[ASR] STT 模型全部就绪")

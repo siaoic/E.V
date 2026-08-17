@@ -28,6 +28,7 @@
 
 # ===== GPT-SoVITS TTS =====
 # TTS_SERVER_URL: "http://127.0.0.1:8000"
+# TTS_OUTPUT_DEVICE: "Voicemeeter In"   # 低延迟输出设备名子串（WASAPI 独占）；留空用系统默认
 # GPTSOVITS_REF_AUDIO: ""
 # GPTSOVITS_REF_AUDIOS: ""
 # GPTSOVITS_PROMPT_TEXT: ""

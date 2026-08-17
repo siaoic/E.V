@@ -16,7 +16,7 @@
 - POST /transcribe          → 一次性转写 {"path": "<wav>"}（流式循环兜底/兼容旧接口）
 
 启动：根目录 启动asr.bat（或 python src/asr/asr_server.py）。
-主程序 .env 配置 STT_ENGINE=local + STT_SERVER_URL=http://127.0.0.1:8487。
+主程序 .env 的 STT_BASE_URL 留空时自动走本服务（STT_SERVER_URL=http://127.0.0.1:8487）。
 """
 
 import base64
@@ -202,6 +202,13 @@ class _AsrHandler(BaseHTTPRequestHandler):
 
 
 def main() -> None:
+    # --download-only：只下载/检查模型（VAD + ASR），不加载模型、不启动
+    # 服务。供「下载stt模型.bat」调用：提前备好模型，避免启动服务时阻塞
+    # 在下载上（asr.bat 双击即起，无需等待）。
+    if "--download-only" in sys.argv:
+        models.ensure_stt_models()
+        print("[ASR] STT 模型已就绪，可直接启动 启动asr.bat", flush=True)
+        return
     asr = _load_asr()
     print("[ASR] 模型加载完成", flush=True)
     _AsrHandler.asr = asr
