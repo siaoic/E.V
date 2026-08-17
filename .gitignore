@@ -94,6 +94,14 @@ live2d/【免费版】悠小喵/
 live2d/阿芙洛狄忒模型文件/
 live2d/yumi_vts/
 
+# ================= 音效资源（运行期需本地保留，不入库；讲解.txt 为含义说明仍入库） =================
+plugins/tools/SFX/*.wav
+
+# ================= 第三方接入 SDK（Unity/Godot/Web Game Runner，接入源码本地保留不入库） =================
+plugins/neuro-sdk/Unity/
+plugins/neuro-sdk/Godot/
+plugins/neuro-sdk/Web Game Runner/
+
 # ================= memU 源码库（仅保留 tools/memu 运行包 + LICENSE.txt + AGENTS.md） =================
 # 其余为库本身的开发期文件，防止重新解压/拷贝时再次误提交
 tools/memory/memu/*
