@@ -409,6 +409,7 @@ class LLMBrain(BaseLLMAdapter, _InjectionMixin, _SummaryMixin):
         tool_call_total = 0      # 工具调用总次数
         sentence_count = 0       # 已产出句数
         final_reply: Optional[str] = None
+        sound_effect_used = False  # 本轮已播放音效：抑制音效后的文字/语音回复
 
         # ===== 多轮工具调用循环（对标 llm-handler.js 的 while (iteration < maxIterations)） =====
         max_tool_iterations = self._max_tool_iterations()
@@ -640,13 +641,13 @@ class LLMBrain(BaseLLMAdapter, _InjectionMixin, _SummaryMixin):
                     buffer = buffer[idx + 1:]
                     scanned = 0
                     cleaned = _emit(sentence)
-                    if cleaned:
+                    if cleaned and not sound_effect_used:
                         yield cleaned
                 scanned = len(buffer)
 
             # 收尾：剩余内容作为最后一句
             cleaned = _emit(buffer)
-            if cleaned:
+            if cleaned and not sound_effect_used:
                 yield cleaned
 
             await bg_task
@@ -673,6 +674,15 @@ class LLMBrain(BaseLLMAdapter, _InjectionMixin, _SummaryMixin):
                 console.accent(f"===== 🔧 第 {iteration} 轮工具调用 =====")
                 console.accent(_format_tool_calls(tool_calls))
 
+                # 本轮含音效播放工具：音效播放后不再语音/文字回复（直播场景
+                # 只要音效效果，多余的总结会打断听感）。标记后后续轮次的
+                # 文本只进历史上下文、不 yield 播出。
+                if any(
+                    (tc.get("function") or {}).get("name") == "play_sound_effect"
+                    for tc in tool_calls
+                ):
+                    sound_effect_used = True
+
                 # 1) assistant 消息（含 tool_calls；content 为 null 时
                 #    由 _clean_messages_for_api 兜底转为 ''，兼容严格模式 API）
                 messages.append({
@@ -688,6 +698,9 @@ class LLMBrain(BaseLLMAdapter, _InjectionMixin, _SummaryMixin):
 
             # ===== 无工具调用 =====
             if not clean_content.strip():
+                if sound_effect_used:
+                    # 音效播放后无需文字回复：空响应直接结束，不再催促
+                    break
                 # 空响应处理（对标 llm-handler.js consecutiveEmptyResponses：
                 # 第 1 次催模型回复，第 2 次仍空则放弃）
                 empty_count += 1
@@ -715,7 +728,7 @@ class LLMBrain(BaseLLMAdapter, _InjectionMixin, _SummaryMixin):
             final_reply = await self._request_final_reply(messages)
             for seg in _split_sentences(final_reply):
                 cleaned = _clean_sentence(seg)
-                if cleaned.strip():
+                if cleaned.strip() and not sound_effect_used:
                     yield cleaned
 
         # 思考过程换行

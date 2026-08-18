@@ -2,12 +2,13 @@
 
 主程序不再进程内加载模型，改由 tts.bat 启动的外部服务负责合成，本引擎作为
 客户端使用：
-- 待合成句子入队，串行泵按句请求 /tts/stream 流式合成，边收 int16 PCM
-  边增量播放——首字延迟只受「GPT 首块解码 + SoVITS 首块解码」限制（实测
-  ~200ms），不再等整句合成完；
-- 播放/口型/字幕复用 TTSPlayer（真实开播时刻锚定；流式无词级时间戳，
-  字幕降级为整句显示，句首播放时一次性推送）；
-- 流式失败或音频退化时回退 /tts/batch 单句合成（_synth_one 重试兜底）；
+- 待合成句子入队，串行泵按句 POST /tts/stream Token 级流式合成（服务端
+  复用官方 infer_stream，GPT 按 stream_chunk 累积即解码出块），边收 int16
+  PCM 边播放——首块到达即出声，首字延迟只受「首块合成」限制；
+- 词级时间戳字幕随流按块返回（相对整句起点），逐块入队锚定真实开播时刻
+  逐词推进（官方示例 subtitlesqueue.add 的 1:1 语义）；
+- 流式失败或音频退化时回退 /tts/batch 整句合成（_synth_one 重试兜底），
+  磁盘缓存命中时直接整句播放（缓存无词级时间戳，字幕降级整句显示）；
 - 未连接服务时 start() 返回 False，speak/drain/stop 静默降级（主程序只走字幕）。
 
 兼容旧模块接口（main.py / stream.py / cleaner.py 引用）：
@@ -16,6 +17,7 @@ set_subtitle_callback/apply_ref(_extras) + _wav_cache / _cleanup_output。
 """
 
 import asyncio
+import base64
 import hashlib
 import io
 import json
@@ -68,12 +70,31 @@ _MAX_DEGRADED_SEC = 25.0          # 绝对上限：正常句几乎不可能超�
 _MAX_SEC_PER_CHAR = 1.0           # 相对判据：正常语速 ~0.3s/字，1s/字+ 必为拖长音
 _MIN_DEGRADED_SEC = 8.0           # 短文本相对判据的最小绝对时长（防误杀短句）
 
+# 合成退化兜底检测之二（尖峰噪声）：
+# GPT 流式采样偶发崩坏还会产出「交替满幅振荡」的高频噪声段（相邻采样 ±1
+# 快速翻转，即 16kHz 方波嘶声）——时长正常但波形崩坏，纯时长判据查不出。
+# 判据：相邻采样差 >0.5 的采样占比 >1% 即判退化。正常语音 32kHz 下该占比
+# <0.1%；崩坏段几乎全部采样满足（实测整段占比 9%+），有量级余量。
+_BURST_DIFF_THRESH = 0.5          # 相邻采样差阈值：正常语音几乎不可能超过
+_BURST_RATE_MAX = 0.01            # 跳变采样占比上限，超过即判退化
+
 
 def _is_degraded_audio(dur_s: float, text_len: int) -> bool:
     """判断合成音频是否退化（拖长音怪叫）：时长异常地远超文本长度。"""
     return (dur_s > _MAX_DEGRADED_SEC
             or (dur_s > _MIN_DEGRADED_SEC
                 and dur_s / max(1, text_len) > _MAX_SEC_PER_CHAR))
+
+
+def _has_burst_noise(audio: np.ndarray) -> bool:
+    """判断音频是否含交替满幅振荡崩坏段（高频嘶声）：跳变采样占比超限。
+
+    audio：1D float32。过短（<100 采样）不判，避免小块误报。
+    """
+    if audio.size < 100:
+        return False
+    d = np.abs(np.diff(audio))
+    return float((d > _BURST_DIFF_THRESH).mean()) > _BURST_RATE_MAX
 
 
 def _collapse_tts_text(text: str) -> str:
@@ -97,9 +118,16 @@ def _decode_wav_bytes(content: bytes) -> Tuple[np.ndarray, int]:
     data, sr = sf.read(io.BytesIO(content), dtype="float32")
     return data, int(sr)
 
-# 服务端默认地址（fastapi_server_example.py 监听 0.0.0.0:8167），可用
+
+def _encode_wav_bytes(audio: np.ndarray, sr: int) -> bytes:
+    """把 1D float32 音频编码为 wav 字节流（流式整句写磁盘缓存用）。"""
+    buf = io.BytesIO()
+    sf.write(buf, audio, sr, format="WAV")
+    return buf.getvalue()
+
+# 服务端默认地址（fastapi_server_example.py 监听 0.0.0.0:8000），可用
 # TTS_SERVER_URL 覆盖
-_SERVER_DEFAULT_URL = "http://127.0.0.1:8167"
+_SERVER_DEFAULT_URL = "http://127.0.0.1:8000"
 
 # ---------- 磁盘音频缓存（相同文本+参考+参数只合成一次） ----------
 #
@@ -238,10 +266,15 @@ def evict_tts_cache() -> Tuple[int, int]:
             pass
     return (len(removed), freed)
 
-# 泵单次收拢句数：流式合成按句独立请求（/tts/stream 单句），批量收集无
-# 意义，固定 1 = 每句独立流式合成，首声延迟仅「首块到达」，真正的边说
-# 边合成边播。
+# 泵单次收拢句数：流式合成按句独立请求（/tts/stream 单句），收拢多句
+# 无意义，固定 1 = 每句独立合成，一句失败只影响自身（重试/丢弃兜底）。
 _BATCH_MAX = 1
+
+# 流式合成参数（服务端 /tts/stream 透传到 infer_stream）：与官方示例一致
+# 的 stream_chunk=25/overlap_len=5——GPT 累积 25 个 token 即解码出一块音频，
+# 首块快速产出降低首字延迟；overlap_len 个 token 重叠用于块间平滑混音。
+_STREAM_CHUNK = 25
+_STREAM_OVERLAP = 5
 
 # 合成参数（服务端 /tts/batch 透传到 infer_batched_async）：
 # 采用 GSV-TTS-Lite 官方 API 文档推荐值——top_k=5/top_p=0.9 比库默认
@@ -250,23 +283,6 @@ _SYNTH_PARAMS = {
     "top_k": 5, "top_p": 0.9, "temperature": 1.0,
     "repetition_penalty": 1.35, "noise_scale": 0.5, "speed": 1.0,
 }
-
-# 服务端文本切段的最小语义长度（cut_text 按标点切段的阈值），仅对本轮
-# 第一句生效（见 _pump 的 first 标记）：
-# 默认 10 太敏感——第一句（≥10 字且含逗号）会被切成多段，段与段之间
-# 无 SOLA 平滑、各插一段 cut_mute 静音、且每段 GPT 独立采样导致音调
-# 突变，听感像"两句话拼装"。提高到 40 让第一句整句一段合成（段内流式
-# 块间有 SOLA 重叠平滑，衔接自然）；后续句保持服务端默认切段（标点
-# 停顿自然，且避免长段 GPT 上下文过长）。
-_CUT_MINLEN = 40
-
-# 第一句流式块大小（GPT token 数，服务端 infer_stream 按该粒度逐块
-# 生成 + SOLA 重叠混音）：
-# 服务端默认 stream_chunk=12 太碎——每块仅 ~0.22s 音频，而客户端按 0.5s
-# 攒块播放，首块播完后要等后续块攒够才续播，块间出现空窗 + SOLA 拼接
-# 过密 → 听感"顿挫"。提到 25（官方 demo 默认）：每块 ~0.64s 音频，超过
-# 0.5s 播放块，块到即播、衔接连续，拼接点也减半。
-_STREAM_CHUNK = 25
 
 # 兼容 cleaner.py：新引擎临时 wav 播放即删，无持久缓存可清
 _wav_cache: dict = {}
@@ -281,8 +297,10 @@ class TTSEngine(BaseTTSAdapter):
     """GPT-SoVITS HTTP 服务端客户端引擎（合成在独立进程，本引擎只播放）。
 
     服务端为 tools/gsv_tts/API/fastapi_server_example.py（tts.bat 启动）：
-    - /tts/batch 批量合成，返回 output 目录下的文件名列表；
-    - /audio/{filename} 下载 wav 字节流，本进程解码后无缝播放。
+    - /tts/stream Token 级流式合成（官方 infer_stream），SSE 返回音频块
+      + 词级时间戳，首块到达即播放；
+    - /tts/batch 整句批量合成，返回 output 目录下的文件名列表；
+    - /audio/{filename} 下载 wav 字节流（批量路径兜底用）。
     未连接服务时 start() 返回 False，speak 等接口静默降级（不报错）。
     """
 
@@ -382,9 +400,9 @@ class TTSEngine(BaseTTSAdapter):
     async def warmup(self) -> None:
         """预热：启动时一次性完成 服务端流式合成 链路。
 
-        服务端模型在 startup 只加载权重，首次流式合成才编译推理图；预热
-        把这份开销提前消化，之后主播第一次说话不必再等（顺带烫热 HTTP
-        连接池与流式分块链路）。失败静默降级。
+        服务端模型在 startup 只加载权重，首次合成才编译推理图（流式走
+        infer_stream 路径单独建图）；预热把这份开销提前消化，之后主播
+        第一次说话不必再等（顺带烫热 HTTP 连接池）。失败静默降级。
         """
         if not self._ready or self._client is None:
             return
@@ -392,15 +410,17 @@ class TTSEngine(BaseTTSAdapter):
         if not speaker_audio:
             return
         try:
-            payload = {"texts": ["你好呀"], "speaker_audio": speaker_audio,
+            payload = {"text": "你好呀", "speaker_audio": speaker_audio,
                        "prompt_audio": prompt_audio, "prompt_text": prompt_text,
+                       "stream_chunk": _STREAM_CHUNK,
+                       "overlap_len": _STREAM_OVERLAP,
                        **_SYNTH_PARAMS}
             async with self._client.stream(
                     "POST", f"{self._server_url}/tts/stream",
                     json=payload) as resp:
                 resp.raise_for_status()
-                async for _ in resp.aiter_bytes():
-                    pass  # 全量收完：流式推理图 + HTTP 分块链路烫热
+                async for _ in resp.aiter_lines():
+                    pass  # 消费完所有块即完成预热（不播放）
             console.dim("[TTS] 服务端预热完成（流式合成链路已就绪）")
         except Exception as e:
             console.dim(f"[TTS] 预热失败（不影响使用）：{e}")
@@ -518,13 +538,13 @@ class TTSEngine(BaseTTSAdapter):
         self._interrupted = False
         self._player.clear_interrupt()
 
-    # ---------- 合成（流式 /tts/stream，串行泵） ----------
+    # ---------- 合成（/tts/stream 流式 + /tts/batch 兜底，串行泵） ----------
 
     async def speak(self, text: str) -> None:
         """把一句话送入合成队列（立即返回，不阻塞 LLM 流）。
 
-        串行泵按句顺序流式合成；服务端阻塞推理天然保序，首字延迟仅为首
-        块到达耗时。
+        串行泵按句 Token 级流式合成；首块到达即出声（首字延迟只受首块
+        合成+传输耗时限制），服务端 _infer_lock 串行推理天然保序。
         """
         if (not self._ready or self._pending is None
                 or self._interrupted):
@@ -539,16 +559,12 @@ class TTSEngine(BaseTTSAdapter):
 
     async def _pump(self) -> None:
         """串行消费待合成句子；收拢当前积攒的句子成批合成，空闲时退出。"""
-        # 新一轮说话的第一句：泵从空队列首次取句即新一轮开口。只有第一句
-        # 需要整句一段合成（避免"拼装感"，见 _CUT_MINLEN），后续句保持
-        # 服务端默认按标点切段（标点停顿自然，且避免长段 GPT 上下文过长）。
-        first = True
         while True:
             text = await self._pending.get()
             if self._interrupted:
                 continue  # 丢弃打断后的残留句子
             gen = self._gen
-            # 收拢当前待合成句子（最多 _BATCH_MAX 条一批，走批量合成）
+            # 收拢当前待合成句子（最多 _BATCH_MAX 条一批，按句顺序流式合成）
             texts = [text]
             while len(texts) < _BATCH_MAX:
                 try:
@@ -557,7 +573,7 @@ class TTSEngine(BaseTTSAdapter):
                     break
             self._working = True
             try:
-                await self._synth_remote(texts, gen, first)
+                await self._synth_remote(texts, gen)
             except asyncio.CancelledError:
                 self._working = False
                 raise
@@ -566,50 +582,32 @@ class TTSEngine(BaseTTSAdapter):
                     console.error(f"TTS 合成失败：{e}")
             finally:
                 self._working = False
-            first = False
             if self._pending.empty():
                 return  # 空闲退出
 
-    async def _synth_remote(self, texts: list, gen: int, first: bool) -> None:
-        """流式合成并增量播放（POST /tts/stream 边收边播）。
+    async def _synth_remote(self, texts: list, gen: int) -> None:
+        """逐句合成并播放（优先 Token 级流式，退化/失败回退整句批量）。
 
-        流式使首字延迟只受「GPT 首块解码 + SoVITS 首块解码」限制（实测
-        ~200ms），而非等整句合成完（~1s+）。服务端逐块返回 int16 PCM，
-        播放器按到达节奏增量入队，首块到达即出声。流式逐块有 SOLA 重叠
-        混音，无词级时间戳，字幕回退整句显示。
-
-        磁盘缓存（data/tts_cache，md5 键）先行：同文本+参考+参数命中即
-        解码播放，跳过服务端合成；命中后仍走退化检测，异常产物删缓存并
-        降级为 HTTP 重合成。流式失败（网络/服务端偶发 500）或音频退化
-        （时长异常=拖长音怪叫）时回退 _synth_one 逐句合成（内部带重试 +
-        退化丢弃兜底），绝不把怪叫播完整段。
+        流式路径 POST /tts/stream（官方 infer_stream）：首块到达即出声，
+        首字延迟只受首块合成+传输耗时限制。退化（拖长音怪叫/尖峰噪声，
+        与文本无关的 GPT 采样随机崩坏）或网络失败时回退 _synth_one 重试
+        （内部带重试 + 退化丢弃兜底），绝不把怪叫播完整段。
         """
         for text in texts:
             if gen != self._gen:
                 return  # 打断：放弃剩余
-            await self._synth_stream(text, gen, first)
+            await self._synth_stream(text, gen)
 
-    async def _synth_stream(self, text: str, gen: int, first: bool) -> None:
-        """流式合成一句：缓存命中直接播；否则 POST /tts/stream 边收边播。
+    async def _synth_stream(self, text: str, gen: int) -> None:
+        """Token 级流式合成一句（POST /tts/stream，SSE 边收边播）。
 
-        退化监测：流式无法「合成完再整体检查」，改为按累计时长增量判据
-        （_is_degraded_audio，同批量路径阈值），超限即中止流式并回退
-        _synth_one 重试（批量路径会整体复查，仍退化则丢弃该句）。
+        对齐官方示例语义：每块音频到达即播放（audio.play()），每块随带的
+        词级时间戳字幕增量立即入队（subtitlesqueue.add），句首块起即与
+        播放逐词同步。缓存命中直接播放；否则流式合成，块间无重叠可直接
+        拼接，整句写磁盘缓存（保持高频句只合成一次）。流式失败/无输出/
+        产物退化时回退 _synth_fallback 整句批量合成兜底。
         """
         speaker_audio, prompt_audio, prompt_text = self._ref_params()
-        payload = {
-            "texts": [text],
-            "speaker_audio": speaker_audio,
-            "prompt_audio": prompt_audio,
-            "prompt_text": prompt_text,
-            **_SYNTH_PARAMS,
-        }
-        if first:
-            # 仅本轮第一句：整句一段合成 + 加大流式块，消除"拼装感"与
-            # "顿挫感"（见 _CUT_MINLEN / _STREAM_CHUNK）；后续句保持
-            # 服务端默认切段与块大小
-            payload["cut_minlen"] = _CUT_MINLEN
-            payload["stream_chunk"] = _STREAM_CHUNK
         key = _tts_cache_key(text, speaker_audio, prompt_audio, prompt_text)
         cached = await asyncio.to_thread(_cache_load, key)
         if cached is not None:
@@ -617,75 +615,93 @@ class TTSEngine(BaseTTSAdapter):
                 return
             audio = await asyncio.to_thread(_decode_wav_bytes, cached)
             audio_data, sr = audio
-            if _is_degraded_audio(len(audio_data) / sr, len(text)):
-                # 缓存里存了退化产物：删掉并重合成
+            if (_is_degraded_audio(len(audio_data) / sr, len(text))
+                    or _has_burst_noise(audio_data)):
+                # 缓存里存了退化产物（拖长音怪叫/尖峰噪声）：删掉并重合成
                 await asyncio.to_thread(_cache_delete, key)
             else:
                 # 缓存音频无词级时间戳，字幕回退整句显示
                 self._player.emit(audio_data, sr, text,
                                   _fallback_subtitles(text), gen)
                 return
-        sr = 32000  # GSV-TTS-Lite 输出采样率（服务端 /tts/stream 固定）
-        sent_id = self._player.begin_stream(
-            sr, text, _fallback_subtitles(text), gen)
-        if sent_id is None:
-            return  # 播放器不可用（无输出设备等）：放弃该句
-        total_samples = 0
-        first_chunk_t0 = time.perf_counter()  # 首块到达耗时（首句延迟验证用）
+        payload = {
+            "text": text,
+            "speaker_audio": speaker_audio,
+            "prompt_audio": prompt_audio,
+            "prompt_text": prompt_text,
+            "stream_chunk": _STREAM_CHUNK,
+            "overlap_len": _STREAM_OVERLAP,
+            **_SYNTH_PARAMS,
+        }
+        collected = bytearray()
+        sent_id = None
         try:
             async with self._client.stream(
                     "POST", f"{self._server_url}/tts/stream",
                     json=payload) as resp:
                 resp.raise_for_status()
-                async for data in resp.aiter_bytes():
+                async for line in resp.aiter_lines():
                     if gen != self._gen:
-                        self._player.abort_stream()
-                        return  # 打断：放弃剩余音频
-                    data = data[:len(data) // 2 * 2]  # 容错奇数尾字节
-                    total_samples += len(data) // 2
-                    if _is_degraded_audio(total_samples / sr, len(text)):
-                        # 拖长音怪叫（与文本无关的采样随机崩坏）：中止流式，
-                        # 回退批量合成重试——已入队块不播怪叫主体
-                        self._player.abort_stream()
-                        console.warn(
-                            f"TTS 检测到异常合成（文本 {len(text)} 字、音频 "
-                            f"{total_samples / sr:.1f}s），回退重试…")
-                        retried = await self._synth_one(text, gen, first)
-                        if retried is not None:
-                            audio_data, sr2 = retried
-                            self._player.emit(audio_data, sr2, text,
-                                              _fallback_subtitles(text), gen)
+                        self._player.abort_stream()  # 打断：放弃剩余喂入
                         return
-                    if not self._player.feed_stream(data, gen):
-                        return  # 播放器侧代次已变（打断由 interrupt 正常走）
-                    if first_chunk_t0 is not None:
-                        elapsed_ms = (time.perf_counter() - first_chunk_t0) * 1000
-                        console.dim(
-                            f"[TTS] 首块到达 {elapsed_ms:.0f}ms（文本 "
-                            f"{len(text)} 字）")
-                        first_chunk_t0 = None
+                    if not line.startswith("data: "):
+                        continue
+                    evt = json.loads(line[6:])
+                    if evt.get("done"):
+                        break
+                    pcm = base64.b64decode(evt["audio"])
+                    if sent_id is None:
+                        # 首块到达：建立增量播放会话（Token 级流式，边收边播）
+                        sent_id = self._player.begin_stream(
+                            32000, text, gen)
+                        if sent_id is None:
+                            return  # 播放器不可用/已打断
+                    # 词级时间戳字幕增量逐块入队（官方示例逐块 add 的 1:1 语义）
+                    if evt.get("subtitles"):
+                        self._player.feed_subtitles(evt["subtitles"], gen)
+                    collected += pcm
+                    if not self._player.feed_stream(bytes(pcm), gen):
+                        return  # 打断：调用方已放弃本句
+            if sent_id is None:
+                raise RuntimeError("流式无音频块")
             self._player.end_stream(gen)
-        except asyncio.CancelledError:
-            self._player.abort_stream()
-            raise
+            # 整句音频（块间无重叠可直接拼接）写缓存 + 退化兜底
+            audio_data = np.frombuffer(bytes(collected), dtype="<i2") \
+                .astype(np.float32) / 32768.0
+            if audio_data.size:
+                if (_is_degraded_audio(len(audio_data) / 32000, len(text))
+                        or _has_burst_noise(audio_data)):
+                    # 拖长音怪叫/尖峰噪声（采样随机崩坏）：回退整句重合成重播
+                    console.warn(
+                        f"TTS 流式检测到异常合成（文本 {len(text)} 字、音频 "
+                        f"{len(audio_data) / 32000:.1f}s），回退整句合成…")
+                    await self._synth_fallback(text, gen)
+                else:
+                    wav_bytes = await asyncio.to_thread(
+                        _encode_wav_bytes, audio_data, 32000)
+                    if wav_bytes:
+                        await asyncio.to_thread(_cache_save, key, wav_bytes)
         except Exception as e:
-            # 流式失败（网络/服务端偶发 500）：回退批量单句合成（带重试/退化兜底）
-            self._player.abort_stream()
-            console.dim(f"TTS 流式合成失败（{e}），回退单句合成…")
-            retried = await self._synth_one(text, gen, first)
-            if retried is not None:
-                audio_data, sr2 = retried
-                self._player.emit(audio_data, sr2, text,
-                                  _fallback_subtitles(text), gen)
+            self._player.abort_stream()  # 失败：终止增量会话
+            if gen == self._gen:
+                console.dim(f"TTS 流式合成失败（{e}），回退整句合成…")
+                await self._synth_fallback(text, gen)
 
-    async def _synth_one(self, text: str, gen: int, first: bool):
+    async def _synth_fallback(self, text: str, gen: int) -> None:
+        """流式失败/退化兜底：整句批量合成（_synth_one 带重试+退化丢弃）后整体播放。"""
+        retried = await self._synth_one(text, gen)
+        if retried is not None and gen == self._gen:
+            audio_data, sr2 = retried
+            self._player.emit(audio_data, sr2, text,
+                              _fallback_subtitles(text), gen)
+
+    async def _synth_one(self, text: str, gen: int):
         """回退路径：单独批量合成一句并下载解码，返回 (audio_data, sr)。
 
-        流式合成失败（服务端偶发 500/网络抖动）或音频退化（时长异常 =
-        拖长音怪叫，与文本无关的 GPT 采样随机崩坏）时的兜底。合成失败或
-        退化都重试一次——GSV 采样随机，重试大概率正常；两次仍失败返回
-        None，由调用方放弃该句，绝不把怪叫播出去。命中磁盘缓存时跳过
-        合成直接解码。
+        合成失败（服务端偶发 500/网络抖动）或音频退化（时长异常 = 拖长音
+        怪叫，与文本无关的 GPT 采样随机崩坏）时的兜底。合成失败或退化都
+        重试一次——GSV 采样随机，重试大概率正常；两次仍失败返回 None，由
+        调用方放弃该句，绝不把怪叫播出去。命中磁盘缓存时跳过合成直接解码。
         """
         speaker_audio, prompt_audio, prompt_text = self._ref_params()
         payload = {
@@ -695,15 +711,13 @@ class TTSEngine(BaseTTSAdapter):
             "prompt_text": prompt_text,
             **_SYNTH_PARAMS,
         }
-        if first:
-            # 与流式路径一致：仅本轮第一句整句一段合成
-            payload["cut_minlen"] = _CUT_MINLEN
         key = _tts_cache_key(text, speaker_audio, prompt_audio, prompt_text)
         cached = await asyncio.to_thread(_cache_load, key)
         if cached is not None:
             audio = await asyncio.to_thread(_decode_wav_bytes, cached)
             audio_data, sr = audio
-            if not _is_degraded_audio(len(audio_data) / sr, len(text)):
+            if not (_is_degraded_audio(len(audio_data) / sr, len(text))
+                    or _has_burst_noise(audio_data)):
                 return audio_data, sr
             await asyncio.to_thread(_cache_delete, key)  # 退化缓存作废
         for _ in range(2):
@@ -724,7 +738,8 @@ class TTSEngine(BaseTTSAdapter):
                 if audio is None:
                     continue
                 audio_data, sr = audio
-                if not _is_degraded_audio(len(audio_data) / sr, len(text)):
+                if not (_is_degraded_audio(len(audio_data) / sr, len(text))
+                        or _has_burst_noise(audio_data)):
                     return audio_data, sr
                 await asyncio.to_thread(_cache_delete, key)  # 退化产物不入缓存
                 console.warn(

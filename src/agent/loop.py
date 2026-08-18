@@ -28,6 +28,7 @@ from src.core.output_lock import (
     STATE_IDLE, get_output_lock, set_agent_owner, set_output_owner,
     set_global_state,
 )
+from src.utils import config, console
 
 
 @dataclass
@@ -63,6 +64,37 @@ _FINISH_TOOL_SCHEMA = {
     },
 }
 
+# 委派工具：把相互独立的子任务分派给并行子 Agent 执行（对标 hermes
+# "Delegates and parallelizes"）。子 Agent 共享主 Agent 的 LLM 客户端与沙箱、
+# 独立 TokenBudget，且不带 delegate 工具（防无限递归）。
+_DELEGATE_TOOL_SCHEMA = {
+    "type": "function",
+    "function": {
+        "name": "delegate",
+        "description": "将任务拆分为多个相互独立的子任务，分派给子 Agent 并行执行。"
+                       "适用于可并行的子工作流（如分别调研多个主题再汇总）；"
+                       "子任务必须自足完整（含背景与期望产出），彼此不得有依赖。",
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "tasks": {
+                    "type": "array",
+                    "items": {"type": "string"},
+                    "description": "相互独立的子任务列表（每个都是完整自足的指令）",
+                },
+            },
+            "required": ["tasks"],
+        },
+    },
+}
+
+# 子 Agent 最大步数：委派子任务的执行步数上限（低于主 Agent 上限，
+# 保证子任务收敛，避免子任务失控拖垮整体）
+_SUB_MAX_STEPS = 6
+
+# 技能沉淀条件：成功完成任务至少需要这么多步才值得沉淀为可复用技能
+_SKILL_MIN_STEPS = 2
+
 
 class ReActAgent:
     def __init__(
@@ -74,6 +106,7 @@ class ReActAgent:
         sandbox: Sandbox,
         budget: TokenBudget,
         max_steps: int = 8,
+        allow_delegate: bool = True,
     ) -> None:
         self._llm = llm_client
         self._model = llm_model
@@ -83,6 +116,10 @@ class ReActAgent:
         self._max_steps = max_steps
         self._history: list[AgentStep] = []
         self._progress_callback: Optional[ProgressCallback] = None
+        # 委派工具：注册到执行器。子 Agent 构造时传 allow_delegate=False 且
+        # executor 已剔除 delegate（双保险防无限递归）。
+        if allow_delegate:
+            self._executor.register("delegate", _DELEGATE_TOOL_SCHEMA["function"], self._delegate)
 
     def on_progress(self, callback: ProgressCallback) -> None:
         """注册进度回调（每步执行后触发，用于控制中心推送）。"""
@@ -105,10 +142,126 @@ class ReActAgent:
         async with get_output_lock():
             set_agent_owner()
             try:
-                return await self._run_steps(task)
+                result = await self._run_steps(task)
             finally:
                 set_output_owner(None)
                 set_global_state(STATE_IDLE)
+        # 任务收尾：技能沉淀 + 记忆沉淀（失败静默，不影响任务结果与关闭）
+        try:
+            await self._after_run(task, result)
+        except Exception as e:
+            console.dim(f"[Agent] 任务沉淀失败（不影响结果）：{e}")
+        return result
+
+    # ---------- 任务沉淀（对标 hermes 的 closed learning loop） ----------
+
+    async def _after_run(self, task: str, result: str) -> None:
+        """任务成功结束后：沉淀可复用技能 + 关键结论写记忆库（均为失败静默）。"""
+        await self._maybe_save_skill(task, result)
+        await self._maybe_sink_memory(task, result)
+
+    async def _maybe_save_skill(self, task: str, result: str) -> None:
+        """复杂任务成功完成后，把「任务→步骤→工具序列」提炼为可复用 Skill。
+
+        由管家模型/主模型提炼（复用 call_llm_json，fail-open）；技能名已存在
+        则跳过（不覆盖人工/pin 技能）。沉淀失败不影响任务结果。
+        """
+        cfg = config.cfg
+        if not cfg.AGENT_SKILL_CREATION:
+            return
+        if not result or result.startswith(("达到最大步数", "LLM 调用失败",
+                                            "模型未给出有效动作", "（无输出）")):
+            return  # 任务未正常完成，无沉淀价值
+        if len(self._history) < _SKILL_MIN_STEPS:
+            return  # 步骤太少，不值得沉淀
+        # 轨迹压缩成素材：每步「动作 → 观察」精简化
+        lines = []
+        for i, s in enumerate(self._history, 1):
+            act = f"{s.action['name']}({s.action['arguments']})"
+            obs = s.observation[:150]
+            lines.append(f"{i}. {act} → {obs}")
+        trace = "\n".join(lines)
+        from src.llm.evolution._utils import call_llm_json
+        data = await call_llm_json(
+            [(self._llm, self._model, "Agent 模型")],
+            [
+                {"role": "system", "content": _SKILL_EXTRACT_PROMPT},
+                {"role": "user", "content":
+                    f"[TASK]\n{task}\n\n[TRACE]\n{trace}\n\n[RESULT]\n{result[:500]}"},
+            ],
+            label="Agent 技能沉淀",
+            temperature=0.3,
+            max_tokens=1200,
+        )
+        if not isinstance(data, dict):
+            return
+        name = (data.get("name") or "").strip()
+        desc = (data.get("description") or "").strip()
+        content = (data.get("content") or "").strip()
+        if not (name and content):
+            return
+        # 去重：同名技能已存在（含 pin）则跳过，不覆盖已有沉淀
+        from plugins.tools.skills import get_skill_manager
+        if get_skill_manager().get(name) is not None:
+            console.dim(f"[Agent] 技能 {name!r} 已存在，跳过沉淀")
+            return
+        from src.llm.evolution.skills import SkillEvolution
+        await SkillEvolution().save_skill({
+            "name": name, "description": desc or "Agent 任务沉淀技能",
+            "content": content,
+        })
+
+    async def _maybe_sink_memory(self, task: str, result: str) -> None:
+        """把任务结论/关键事实写入记忆库，供后续对话检索召回（失败静默）。"""
+        if not config.cfg.AGENT_MEMORY_SINK:
+            return
+        if not result or result.startswith(("达到最大步数", "LLM 调用失败")):
+            return
+        from tools.memory import memory
+        mm = memory.get_manager()
+        await mm.commit_recall_files([{
+            "name": "Agent任务记录",
+            "description": "Agent 任务执行结论",
+            "content": f"任务：{task}\n\n结论：{result[:800]}",
+            "user": mm.self_user_id,
+        }])
+        console.dim("[Agent] 任务结论已写入记忆库")
+
+    # ---------- 子 Agent 委派（对标 hermes "Delegates and parallelizes"） ----------
+
+    async def _delegate(self, tasks: list) -> str:
+        """把相互独立的子任务分派给并行子 Agent 执行并汇总结果。
+
+        子 Agent 共享主 Agent 的 LLM 客户端与沙箱、独立 TokenBudget，
+        且 executor 不含 delegate 工具（天然防无限递归）；子任务不参与沉淀。
+        """
+        if not isinstance(tasks, list) or not tasks or not all(
+                isinstance(t, str) and t.strip() for t in tasks):
+            return "参数错误：tasks 必须是包含 1 条及以上子任务的数组"
+        console.dim(f"[Agent] 委派 {len(tasks)} 个子任务并行执行...")
+
+        async def _run_one(subtask: str) -> str:
+            sub = ReActAgent(
+                llm_client=self._llm,
+                llm_model=self._model,
+                executor=self._executor.without("delegate"),
+                sandbox=self._sandbox,
+                budget=TokenBudget(max_tokens=self._budget.max_tokens,
+                                   model_name=self._model),
+                max_steps=min(self._max_steps, _SUB_MAX_STEPS),
+                allow_delegate=False,  # 子任务不得再委派（防无限递归）
+            )
+            try:
+                # 不调用 run()：避免重复竞争输出锁（主 Agent 已持有）且不沉淀
+                return await sub._run_steps(subtask)
+            except Exception as e:
+                return f"子任务执行异常：{type(e).__name__}: {e}"
+
+        results = await asyncio.gather(*[_run_one(t) for t in tasks])
+        parts = []
+        for i, (t, r) in enumerate(zip(tasks, results), 1):
+            parts.append(f"子任务 {i}：「{t.strip()}」\n结果：{r[:2000]}")
+        return "\n\n".join(parts)
 
     async def _run_steps(self, task: str) -> str:
         """ReAct 主循环（已在输出锁内执行，不含锁管理）。"""
@@ -308,3 +461,18 @@ _REACT_SYSTEM_PROMPT = """你是一个任务执行 Agent。使用 ReAct 模式�
   ```
 - 先 read_file / list_dir 了解工作目录，再决定下一步；不要重复已失败的动作
 - 简洁思考，不要写冗余的内心独白；结果里不要夹带 JSON 包装"""
+
+# 技能提炼提示词：把成功完成的 Agent 任务轨迹提炼为可复用 Skill。
+# 输出协议入 system 消息（保证 JSON 解析兼容），产出 {name, description, content}。
+_SKILL_EXTRACT_PROMPT = """你是技能提炼专家。根据一个 Agent 成功完成的任务及其步骤轨迹，
+提炼成一份可复用的中文技能（SKILL.md 正文），供之后遇到同类任务时直接套用。
+
+要求：
+- name：简短英文/数字/下划线（如 organize_danmaku_stats），语义化
+- description：一句话描述该技能适用的任务场景（15 字以内优先）
+- content：Markdown 正文，包含——
+  1. 适用场景（什么任务用本技能）
+  2. 操作步骤（按轨迹中的实际工具序列归纳，每步写明用什么工具、关键参数与判断要点）
+  3. 关键经验（轨迹观察中踩过的坑、失败动作与修正）
+  4. 完成判定（什么情况下视为任务完成）
+- 只输出 JSON：{"name": "...", "description": "...", "content": "..."}"""

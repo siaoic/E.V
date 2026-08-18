@@ -1,4 +1,8 @@
 <div align="center">
+  <a href="项目主页链接">
+    <img src="huiyeji.gif" alt="Logo" width="240" height="254">
+  </a>
+
   <h1>GSV-TTS-Lite</h1>
 
   <p>
@@ -102,6 +106,18 @@ pip install torch torchvision torchaudio
 pip install gsv-tts-lite==0.4.7
 ```
 
+### WebUI 可视化界面
+
+1. **安装依赖**：
+  ```bash
+  cd WebUI
+  pip install -r requirements.txt
+  ```
+2. **启动程序**：
+  ```bash
+  python web.py
+  ```
+
 ### API 服务接口
 
 1. **安装依赖**：
@@ -162,54 +178,34 @@ import threading
 from gsv_tts import TTS
 
 class SubtitlesQueue:
-    """按词级时间戳渐进输出字幕（对齐真实播放时刻）。
-
-    GSV 流式返回的每个 chunk：字幕 orig_idx 相对整句原文、start_s/end_s
-    相对音频起点（跨 chunk 累计），audio.orig_text 即整句原文。因此用
-    「整句原文 + 全局索引 + 锚点墙钟」逐词精确推进：
-    - 锚点 = 首个字幕块到达处理时刻（近似音频开始），每个词在 锚点+start_s 显示；
-    - 时刻已过（播放领先推理）时立即追平，不因 end_s 为 None（流式中间词）
-      或已过而丢字——只依赖 start_s，端时刻只影响可选的高亮。
-    """
     def __init__(self):
         self.q = queue.Queue()
         self.t = None
-        self._text = None      # 整句原文
-        self._idx = 0          # 已显示的原文索引（字幕索引相对整句，跨 chunk 累计）
-        self._anchor = None    # 锚点墙钟
-
+    
     def process(self):
-        while True:
-            subtitles = self.q.get()
+        last_i = 0
+        last_t = time.time()
 
+        while True:
+            subtitles, text = self.q.get()
+            
             if subtitles is None:
                 break
 
-            if self._anchor is None:
-                self._anchor = time.time()
+            for subtitle in subtitles:
+                if subtitle["start_s"] > time.time() - last_t:
+                    time.sleep(subtitle["start_s"] - (time.time() - last_t))
 
-            for sub in subtitles:
-                start_s = float(sub.get("start_s") or 0.0)
-                wait = self._anchor + start_s - time.time()
-                if wait > 0:
-                    time.sleep(wait)
-
-                # 该词开始时刻已到（或播放领先）：直接追平输出累积原文，不丢字
-                i_end = sub.get("orig_idx_end")
-                if isinstance(i_end, int) and self._text and 0 <= i_end < len(self._text):
-                    new_idx = i_end + 1
-                else:
-                    new_idx = self._idx + len(str(sub.get("text", "")))
-                if new_idx > self._idx:
-                    self._idx = new_idx
-                    print(self._text[:self._idx], end="", flush=True)
+                if subtitle["end_s"] and subtitle["end_s"] > time.time() - last_t:
+                    if subtitle["orig_idx_end"] > last_i:
+                        print(text[last_i:subtitle["orig_idx_end"]], end="", flush=True)
+                        last_i = subtitle["orig_idx_end"]
+                        time.sleep(subtitle["end_s"] - (time.time() - last_t))
 
         self.t = None
-
+    
     def add(self, subtitles, text):
-        # text = 整句原文；字幕索引相对整句，逐 chunk 填充显示
-        self._text = text
-        self.q.put(subtitles)
+        self.q.put((subtitles, text))
         if self.t is None:
             self.t = threading.Thread(target=self.process, daemon=True)
             self.t.start()

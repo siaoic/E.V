@@ -63,6 +63,17 @@ class ToolExecutor:
         """OpenAI function schema 列表（供 LLM tools 参数使用）。"""
         return [entry[0] for entry in self._tools.values()]
 
+    def register(self, name: str, schema: dict, fn: Callable[..., Any]) -> None:
+        """运行时注册工具（如 ReActAgent 注册 delegate 委派工具）。"""
+        self._tools[name] = (schema, fn)
+
+    def without(self, *names: str) -> "ToolExecutor":
+        """返回去掉指定工具的新执行器（共享沙箱），供子 Agent 委派去递归用。"""
+        return ToolExecutor(
+            {k: v for k, v in self._tools.items() if k not in names},
+            self._sandbox,
+        )
+
     async def execute(self, name: str, args: dict) -> str:
         """执行工具并返回观察文本；任何失败都以文本形式返回（不抛异常）。"""
         entry = self._tools.get(name)

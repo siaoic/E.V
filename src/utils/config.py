@@ -262,6 +262,8 @@ class AgentConfig:
     AGENT_MAX_TOKENS: int = 50000
     AGENT_WORKSPACE: str = ""
     AGENT_ALLOW_SHELL: bool = False
+    AGENT_SKILL_CREATION: bool = True
+    AGENT_MEMORY_SINK: bool = True
     PROACTIVE_QUEUE_MAX: int = 4
     AGENT_AVOID_MAIN_LLM: bool = True
     AGENT_HISTORY_SNAPSHOT: int = 6
@@ -463,6 +465,8 @@ _AGENT_LOADERS = {
     "AGENT_MAX_TOKENS": lambda: int(os.getenv("AGENT_MAX_TOKENS") or "50000"),
     "AGENT_WORKSPACE": lambda: os.getenv("AGENT_WORKSPACE") or "",
     "AGENT_ALLOW_SHELL": lambda: _get_bool("AGENT_ALLOW_SHELL", False),
+    "AGENT_SKILL_CREATION": lambda: _get_bool("AGENT_SKILL_CREATION", True),
+    "AGENT_MEMORY_SINK": lambda: _get_bool("AGENT_MEMORY_SINK", True),
     "PROACTIVE_QUEUE_MAX": lambda: int(os.getenv("PROACTIVE_QUEUE_MAX") or "4"),
     "AGENT_AVOID_MAIN_LLM": lambda: _get_bool("AGENT_AVOID_MAIN_LLM", True),
     "AGENT_HISTORY_SNAPSHOT": lambda: int(os.getenv("AGENT_HISTORY_SNAPSHOT") or "6"),
@@ -470,7 +474,8 @@ _AGENT_LOADERS = {
 }
 
 _PERSONA_LOADERS = {
-    "SYSTEM_PROMPT_FILE": lambda: os.getenv("SYSTEM_PROMPT_FILE") or "",
+    "SYSTEM_PROMPT_FILE": lambda: (
+        os.getenv("SYSTEM_PROMPT_FILE") or "").split("#", 1)[0].strip(),
     "SYSTEM_PROMPT": lambda: _load_system_prompt(),
     # Author's Note 尾部人设锚点（近因效应，默认空 = 不注入，行为不变）
     "AUTHOR_NOTE": lambda: os.getenv("AUTHOR_NOTE") or "",
@@ -661,7 +666,8 @@ _ALL_HOT_FIELDS = _TOOL_HOT_FIELDS + (
     "SYSTEM_PROMPT_FILE", "SYSTEM_PROMPT", "AUTHOR_NOTE",
     "KNOWLEDGE_ENABLED", "KNOWLEDGE_MAX_CHARS",
     "AGENT_ENABLED", "AGENT_MODEL", "AGENT_MAX_STEPS", "AGENT_MAX_TOKENS",
-    "AGENT_WORKSPACE", "AGENT_ALLOW_SHELL",
+    "AGENT_WORKSPACE", "AGENT_ALLOW_SHELL", "AGENT_SKILL_CREATION",
+    "AGENT_MEMORY_SINK",
     "PROACTIVE_ENABLED", "RESPONSE_INTERVAL_MIN", "RESPONSE_INTERVAL_MAX",
     "LLM_MAX_CONCURRENCY", "PROACTIVE_QUEUE_MAX",
     "AGENT_AVOID_MAIN_LLM", "AGENT_HISTORY_SNAPSHOT", "AGENT_DUP_THRESHOLD",

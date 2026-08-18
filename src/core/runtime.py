@@ -69,6 +69,7 @@ class RuntimeContext:
         self.mindcraft_bridge: Optional[MindcraftBridge] = None
         self.pf: Optional[ProfanityFilter] = None
         self.mm = None
+        self.agent_scheduler = None  # Agent 定时任务调度器（启动流程中初始化）
         # === 弹幕 ===
         self.danmaku_picker = None
         self.bili_svc = None
@@ -347,6 +348,13 @@ class RuntimeContext:
         # 自我进化：定期自我提示（空闲期主动补复盘，后台循环）
         if self.evolution is not None:
             asyncio.create_task(self._evolution_periodic_loop())
+
+        # Agent 定时任务调度：加载清单 + 后台循环到点触发（!agent_schedule 管理）
+        from src.agent.scheduler import AgentScheduler
+        self.agent_scheduler = AgentScheduler()
+        self.agent_scheduler.load()
+        if cfg.AGENT_ENABLED:
+            asyncio.create_task(self._agent_schedule_loop())
 
         # 语音识别
         if cfg.STT_ENABLED:
@@ -793,6 +801,34 @@ class RuntimeContext:
                     proactive=self.proactive)
             except Exception as e:
                 console.dim(f"[自我进化] 周期任务出错（不影响运行）：{e}")
+
+    async def _agent_schedule_loop(self) -> None:
+        """后台循环：每 30s 检查一次 Agent 定时任务清单，到点后台触发执行。
+
+        到期任务经 AgentScheduler.due_items() 取走并推进下次时间；
+        触发本身用 create_task 后台执行（run_task 占用输出互斥锁），
+        不阻塞本循环与主输入。
+        """
+        while True:
+            await asyncio.sleep(30)
+            try:
+                due = self.agent_scheduler.due_items()
+            except Exception as e:
+                console.dim(f"[Agent调度] 检查清单出错（不影响运行）：{e}")
+                continue
+            for item in due:
+                console.ok(f"[Agent调度] 触发任务 #{item.get('id')}：{item.get('task')}")
+                asyncio.create_task(self._run_scheduled_task(item))
+
+    async def _run_scheduled_task(self, item: dict) -> None:
+        """执行一条到期定时任务（后台）：run_task 失败只告警不影响运行。"""
+        from src.agent import run_task
+        try:
+            result = await run_task(item.get("task") or "")
+            console.ok(f"[Agent调度] 任务 #{item.get('id')} 完成：{str(result)[:200]}")
+        except Exception as e:
+            console.error(f"[Agent调度] 任务 #{item.get('id')} 失败："
+                          f"{type(e).__name__}: {e}")
 
     # ---------- 会话归档 ----------
 

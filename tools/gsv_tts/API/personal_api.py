@@ -425,8 +425,7 @@ async def startup_event():
             import torch
             from huggingface_hub import snapshot_download
             
-            # ASR 模型统一放在 src/asr/qwen3_asr（与主程序本地 STT 共用一份）
-            local_model_path = Path(__file__).resolve().parents[3] / "src" / "asr" / "qwen3_asr"
+            local_model_path = models_dir / "qwen3_asr"
             repo_id = "Qwen/Qwen3-ASR-0.6B"
             
             if not (local_model_path.exists() and (local_model_path / "config.json").exists()):

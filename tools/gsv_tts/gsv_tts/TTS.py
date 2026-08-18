@@ -107,8 +107,8 @@ class TTS:
         self.cnhubert_path = Path(self.models_dir) / "chinese-hubert-base"
         self.cnroberta_path = Path(self.models_dir) / "chinese-roberta-wwm-ext-large"
         self.sv_path = Path(self.models_dir) / "sv" / "pretrained_eres2netv2w24s4ep4.ckpt"
-        self.default_gpt_path = Path(self.models_dir) / "Neuro-e15.ckpt"
-        self.default_sovits_path = Path(self.models_dir) / "Neuro_e8_s1712.pth"
+        self.default_gpt_path = Path(self.models_dir) / "s1v3.ckpt"
+        self.default_sovits_path = Path(self.models_dir) / "s2Gv2ProPlus.pth"
 
         check_pretrained_models(self.models_dir)
         
@@ -292,7 +292,7 @@ class TTS:
         return_subtitles: bool = False,
         is_cut_text: bool = True,
         cut_minlen: int = 10,
-        cut_mute: int = 0.25,
+        cut_mute: int = 0.4,
         cut_mute_scale_map: dict = {"…": 2.0, ".": 1.5, "。": 1.5, "?": 1.5, "？": 1.5, "!": 1.5, "！": 1.5, ",": 1.0, "，": 1.0, ":": 1.0, "：": 1.0, ";": 1.0, "；": 1.0, "~": 1.0, "、": 0.8, "・": 0.8},
         stream_mode: Literal["token", "sentence"] = "token",
         stream_chunk: int = 25,
@@ -511,7 +511,7 @@ class TTS:
         return_subtitles: bool = False,
         is_cut_text: bool = True,
         cut_minlen: int = 10,
-        cut_mute: int = 0.25,
+        cut_mute: int = 0.4,
         cut_mute_scale_map: dict = {"…": 2.0, ".": 1.5, "。": 1.5, "?": 1.5, "？": 1.5, "!": 1.5, "！": 1.5, ",": 1.0, "，": 1.0, ":": 1.0, "：": 1.0, ";": 1.0, "；": 1.0, "~": 1.0, "、": 0.8, "・": 0.8},
         top_k: int = 15,
         top_p: float = 1.0,
@@ -1036,7 +1036,7 @@ class TTS:
         return_subtitles: bool = False,
         is_cut_text: bool = True,
         cut_minlen: int = 10,
-        cut_mute: int = 0.25,
+        cut_mute: int = 0.4,
         cut_mute_scale_map: dict = {"…": 2.0, ".": 1.5, "。": 1.5, "?": 1.5, "？": 1.5, "!": 1.5, "！": 1.5, ",": 1.0, "，": 1.0, ":": 1.0, "：": 1.0, ";": 1.0, "；": 1.0, "~": 1.0, "、": 0.8, "・": 0.8},
         stream_mode: Literal["token", "sentence"] = "token",
         stream_chunk: int = 25,
@@ -1122,7 +1122,7 @@ class TTS:
         return_subtitles: bool = False,
         is_cut_text: bool = True,
         cut_minlen: int = 10,
-        cut_mute: int = 0.25,
+        cut_mute: int = 0.4,
         cut_mute_scale_map: dict = {"…": 2.0, ".": 1.5, "。": 1.5, "?": 1.5, "？": 1.5, "!": 1.5, "！": 1.5, ",": 1.0, "，": 1.0, ":": 1.0, "：": 1.0, ";": 1.0, "；": 1.0, "~": 1.0, "、": 0.8, "・": 0.8},
         top_k: int = 15,
         top_p: float = 1.0,

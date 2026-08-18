@@ -1,33 +1,42 @@
-"""
-FastAPI 服务端使用示例
-展示如何使用异步 TTS 接口处理并发请求
-支持外链音频URL和ASR自动识别
+"""独立 TTS 流式服务端（Token 级流式，走 HTTP 供主程序调用）。
+
+与官方 fastapi_server_example.py 的差异：官方原版只有 /tts/single、/tts/batch、
+/audio，没有流式端点；本服务在 tools/gsv_tts **之外**新建，import 官方
+gsv_tts.TTS 类（不改其任何代码），额外提供 /tts/stream Token 级流式端点
+（复用官方 infer_stream_async），并保留 /tts/batch + /audio 作为批量兜底。
+
+由 启动tts.bat 启动（端口 8000，与 .env 的 TTS_SERVER_URL 一致）。
 """
 
 import sys
 from pathlib import Path
 
-project_root = Path(__file__).parent.parent
-sys.path.insert(0, str(project_root))
+# 项目根 = src/tts/server.py 的上三层；tools/gsv_tts 含 gsv_tts 包（官方原版）
+_PROJECT_ROOT = Path(__file__).resolve().parent.parent.parent
+_TOOLS_GSV = _PROJECT_ROOT / "tools" / "gsv_tts"
+sys.path.insert(0, str(_TOOLS_GSV))
 
-from fastapi import FastAPI, HTTPException
-from fastapi.responses import FileResponse
-from pydantic import BaseModel
-from typing import List, Optional
-from gsv_tts import TTS
-import uuid
-import os
-import tempfile
-import logging
+from fastapi import FastAPI, HTTPException  # noqa: E402
+from fastapi.responses import FileResponse, StreamingResponse  # noqa: E402
+from pydantic import BaseModel  # noqa: E402
+from typing import List, Optional  # noqa: E402
+from gsv_tts import TTS  # noqa: E402
+import base64  # noqa: E402
+import json  # noqa: E402
+import logging  # noqa: E402
+import os  # noqa: E402
+import tempfile  # noqa: E402
+import uuid  # noqa: E402
 
-app = FastAPI(title="GSV-TTS 异步 API", version="1.1")
+import numpy as np  # noqa: E402
 
-models_dir = project_root / "API" / "models"
-output_dir = project_root / "output"
+app = FastAPI(title="GSV-TTS 流式 API", version="1.2")
+
+models_dir = _TOOLS_GSV / "API" / "models"
+output_dir = _TOOLS_GSV / "output"
 output_dir.mkdir(exist_ok=True)
 
 tts: Optional[TTS] = None
-asr = None
 
 temp_dir = tempfile.mkdtemp(prefix="gsv_tts_")
 
@@ -40,11 +49,11 @@ def is_url(path: str) -> bool:
 async def download_audio(url: str) -> str:
     """下载音频URL到临时文件"""
     import httpx
-    
+
     async with httpx.AsyncClient(timeout=60.0) as client:
         response = await client.get(url, follow_redirects=True)
         response.raise_for_status()
-    
+
     ext = ".wav"
     content_type = response.headers.get("content-type", "")
     if "mp3" in content_type or url.lower().endswith(".mp3"):
@@ -53,36 +62,16 @@ async def download_audio(url: str) -> str:
         ext = ".ogg"
     elif "flac" in content_type or url.lower().endswith(".flac"):
         ext = ".flac"
-    
+
     temp_path = os.path.join(temp_dir, f"download_{uuid.uuid4().hex}{ext}")
     with open(temp_path, "wb") as f:
         f.write(response.content)
-    
+
     logging.info(f"下载音频到: {temp_path}")
     return temp_path
 
 
-def transcribe_audio(audio_path: str) -> str:
-    """使用ASR识别音频文本"""
-    global asr
-    if asr is None:
-        raise HTTPException(status_code=500, detail="ASR模型未启用，请设置 --use_asr 或提供 prompt_text")
-    
-    results = asr.transcribe(audio_path)
-    if results and len(results) > 0:
-        result = results[0]
-        if hasattr(result, 'text'):
-            text = result.text
-        elif isinstance(result, dict):
-            text = result.get("text", "")
-        else:
-            text = str(result)
-        logging.info(f"ASR识别结果: {text}")
-        return text
-    return ""
-
-
-class TTSSingleRequest(BaseModel):
+class TTSStreamRequest(BaseModel):
     text: str
     speaker_audio: str
     prompt_audio: str
@@ -93,6 +82,8 @@ class TTSSingleRequest(BaseModel):
     repetition_penalty: float = 1.35
     noise_scale: float = 0.5
     speed: float = 1.0
+    stream_chunk: int = 25
+    overlap_len: int = 5
 
 
 class TTSBatchRequest(BaseModel):
@@ -110,9 +101,9 @@ class TTSBatchRequest(BaseModel):
 
 @app.on_event("startup")
 async def startup_event():
-    global tts, asr
+    global tts
     print("🚀 正在加载 TTS 模型...")
-    
+
     max_cache_len = 1024
     batch_sizes = [1, 4, 8]
     cache_lens = []
@@ -121,106 +112,84 @@ async def startup_event():
         cache_lens.append(length)
         length *= 2
     gpt_cache = [(b, c) for b in batch_sizes for c in cache_lens]
-    
+
     tts = TTS(
         models_dir=str(models_dir),
         gpt_cache=gpt_cache,
-        sovits_cache=[50],
+        # 50 = stream_chunk * 2 = 25 * 2, 55 = stream_chunk * 2 + overlap_len
+        sovits_cache=[50, 55],
     )
     print("✅ TTS 模型加载完成！")
-    
-    use_asr = os.environ.get("USE_ASR", "true").lower() == "true"
-    if use_asr:
-        try:
-            import torch
-            from huggingface_hub import snapshot_download
-            
-            local_model_path = models_dir / "qwen3_asr"
-            repo_id = "Qwen/Qwen3-ASR-0.6B"
-            
-            if not (local_model_path.exists() and (local_model_path / "config.json").exists()):
-                print(f"⬇️ 本地未找到ASR模型，正在下载: {repo_id}")
-                snapshot_download(
-                    repo_id=repo_id,
-                    local_dir=str(local_model_path),
-                    local_dir_use_symlinks=False,
-                )
-                print("✅ ASR模型下载完成！")
-            
-            from qwen_asr import Qwen3ASRModel
-            print("🚀 正在加载 ASR 模型...")
-            asr = Qwen3ASRModel.from_pretrained(
-                str(local_model_path),
-                dtype=torch.bfloat16,
-                device_map="cuda:0",
-                local_files_only=True
-            )
-            print("✅ ASR 模型加载完成！")
-        except Exception as e:
-            print(f"⚠️ ASR 模型加载失败: {e}")
-            print("💡 提示：如果没有提供 prompt_text，请求将会失败")
-            asr = None
-    else:
-        print("ℹ️ ASR 模型已禁用")
 
 
 @app.get("/")
 async def root():
     return {
-        "message": "GSV-TTS 异步 API 服务已启动",
+        "message": "GSV-TTS 流式 API 服务已启动",
         "docs": "/docs",
         "features": {
             "url_support": True,
-            "auto_asr": asr is not None
-        }
+            "auto_asr": False,
+        },
     }
 
 
-@app.post("/tts/single")
-async def tts_single(request: TTSSingleRequest):
-    """单个 TTS 请求的异步接口，支持外链音频和自动ASR"""
+@app.post("/tts/stream")
+async def tts_stream(request: TTSStreamRequest):
+    """Token 级流式 TTS 接口：SSE 边合成边返回音频块 + 词级时间戳。
+
+    基于官方 infer_stream（stream_mode="token"）实现：GPT 按 stream_chunk
+    个 token 累积后解码出音频块即返回，客户端首块到达即可播放，首字延迟
+    只受「首块合成」限制。每个事件为 JSON：audio（int16 PCM 的 base64）、
+    subtitles（词级时间戳，相对整句起点）、orig_text、audio_len_s；流结束
+    发送 {"done": true}。
+    """
     try:
         speaker_audio = request.speaker_audio
         prompt_audio = request.prompt_audio
         prompt_text = request.prompt_text
-        
+
         if is_url(speaker_audio):
             speaker_audio = await download_audio(speaker_audio)
-        
+
         if is_url(prompt_audio):
             prompt_audio = await download_audio(prompt_audio)
-        
+
         if prompt_text is None or prompt_text == "":
-            prompt_text = transcribe_audio(prompt_audio)
-            if not prompt_text:
-                raise HTTPException(
-                    status_code=400, 
-                    detail="无法自动识别prompt_audio文本，请手动提供prompt_text"
-                )
-        
-        audio_clip = await tts.infer_async(
-            spk_audio_path=speaker_audio,
-            prompt_audio_path=prompt_audio,
-            prompt_audio_text=prompt_text,
-            text=request.text,
-            top_k=request.top_k,
-            top_p=request.top_p,
-            temperature=request.temperature,
-            repetition_penalty=request.repetition_penalty,
-            noise_scale=request.noise_scale,
-            speed=request.speed,
-        )
-        
-        output_filename = f"tts_{uuid.uuid4().hex[:8]}.wav"
-        output_path = output_dir / output_filename
-        audio_clip.save(str(output_path))
-        
-        return {
-            "success": True,
-            "audio_len": audio_clip.audio_len_s,
-            "filename": output_filename,
-            "prompt_text_used": prompt_text,
-        }
+            raise HTTPException(
+                status_code=400,
+                detail="无法自动识别prompt_audio文本，请手动提供prompt_text"
+            )
+
+        async def gen():
+            async for chunk in tts.infer_stream_async(
+                spk_audio_path=speaker_audio,
+                prompt_audio_path=prompt_audio,
+                prompt_audio_text=prompt_text,
+                text=request.text,
+                return_subtitles=True,
+                stream_mode="token",
+                stream_chunk=request.stream_chunk,
+                overlap_len=request.overlap_len,
+                boost_first_chunk=True,
+                top_k=request.top_k,
+                top_p=request.top_p,
+                temperature=request.temperature,
+                repetition_penalty=request.repetition_penalty,
+                noise_scale=request.noise_scale,
+                speed=request.speed,
+            ):
+                audio = (chunk.audio_data * 32767).astype(np.int16).tobytes()
+                event = {
+                    "audio": base64.b64encode(audio).decode("ascii"),
+                    "subtitles": chunk.subtitles,
+                    "orig_text": chunk.orig_text,
+                    "audio_len_s": chunk.audio_len_s,
+                }
+                yield f"data: {json.dumps(event, ensure_ascii=False)}\n\n"
+            yield 'data: {"done": true}\n\n'
+
+        return StreamingResponse(gen(), media_type="text/event-stream")
     except HTTPException:
         raise
     except Exception as e:
@@ -229,26 +198,24 @@ async def tts_single(request: TTSSingleRequest):
 
 @app.post("/tts/batch")
 async def tts_batch(request: TTSBatchRequest):
-    """批量 TTS 请求的异步接口，支持外链音频和自动ASR"""
+    """批量 TTS 请求的异步接口（engine.py 流式失败/退化时的整句兜底）"""
     try:
         speaker_audio = request.speaker_audio
         prompt_audio = request.prompt_audio
         prompt_text = request.prompt_text
-        
+
         if is_url(speaker_audio):
             speaker_audio = await download_audio(speaker_audio)
-        
+
         if is_url(prompt_audio):
             prompt_audio = await download_audio(prompt_audio)
-        
+
         if prompt_text is None or prompt_text == "":
-            prompt_text = transcribe_audio(prompt_audio)
-            if not prompt_text:
-                raise HTTPException(
-                    status_code=400, 
-                    detail="无法自动识别prompt_audio文本，请手动提供prompt_text"
-                )
-        
+            raise HTTPException(
+                status_code=400,
+                detail="无法自动识别prompt_audio文本，请手动提供prompt_text"
+            )
+
         audio_clips = await tts.infer_batched_async(
             spk_audio_paths=speaker_audio,
             prompt_audio_paths=prompt_audio,
@@ -261,14 +228,14 @@ async def tts_batch(request: TTSBatchRequest):
             noise_scale=request.noise_scale,
             speed=request.speed,
         )
-        
+
         filenames = []
         for clip in audio_clips:
             filename = f"tts_{uuid.uuid4().hex[:8]}.wav"
             output_path = output_dir / filename
             clip.save(str(output_path))
             filenames.append(filename)
-        
+
         return {
             "success": True,
             "count": len(audio_clips),

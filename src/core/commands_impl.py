@@ -258,6 +258,43 @@ async def cmd_agent(runtime, cmd: str) -> bool:
     return True
 
 
+async def cmd_agent_schedule(runtime, cmd: str) -> bool:
+    """!agent_schedule 管理 Agent 定时任务（需 AGENT_ENABLED=true）。
+
+    用法：
+    - !agent_schedule                     列出所有定时任务
+    - !agent_schedule add every_30m "任务" 注册定时任务（every_<N>m / every_<N>h / daily HH:MM）
+    - !agent_schedule rm <id>             移除指定定时任务
+    到点由后台循环自动触发 run_task 执行（占用输出互斥锁，不阻塞主输入）。
+    """
+    scheduler = getattr(runtime, "agent_scheduler", None)
+    if scheduler is None:
+        console.warn("[Agent调度] 调度器未初始化（稍后重试）")
+        return True
+    if not runtime.cfg.AGENT_ENABLED:
+        console.warn("[Agent调度] AGENT_ENABLED 未开启（.env 设置 AGENT_ENABLED=true）")
+        return True
+    rest = cmd[len("!agent_schedule"):].strip()
+    if not rest:
+        console.dim(scheduler.list_text())
+        return True
+    parts = rest.split(None, 2)
+    op = parts[0].lower()
+    if op == "add" and len(parts) == 3:
+        ok, msg = scheduler.add(parts[1], parts[2])
+        (console.ok if ok else console.warn)(f"[Agent调度] {msg}")
+        return True
+    if op == "rm" and len(parts) == 2:
+        ok = scheduler.remove(parts[1])
+        if ok:
+            console.ok(f"[Agent调度] 已移除任务 #{parts[1]}")
+        else:
+            console.warn(f"[Agent调度] 未找到任务 #{parts[1]}")
+        return True
+    console.warn("[Agent调度] 用法：!agent_schedule [add every_30m \"任务\" | rm <id>]")
+    return True
+
+
 async def cmd_diary(runtime, cmd: str) -> bool:
     """!diary 写一篇今天的日记（LLM 生成，落盘 data/diary/YYYY-MM-DD.md）。
 
@@ -310,5 +347,7 @@ def build_app_commands(runtime) -> CommandRegistry:
                 help="TTS 辅助参考音频热更新"),
         Command("!agent ", lambda c: cmd_agent(runtime, c),
                 help="任务执行 Agent：多步读文件→改→验证"),
+        Command("!agent_schedule", lambda c: cmd_agent_schedule(runtime, c),
+                help="Agent 定时任务：list/add every_30m \"任务\"/rm <id>"),
     )
     return registry

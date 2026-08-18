@@ -1,4 +1,8 @@
 <div align="center">
+  <a href="项目主页链接">
+    <img src="huiyeji.gif" alt="Logo" width="240" height="254">
+  </a>
+
   <h1>GSV-TTS-Lite</h1>
 
   <p>
@@ -101,6 +105,18 @@ pip install torch torchvision torchaudio
 ```bash 
 pip install gsv-tts-lite==0.4.7
 ```
+
+### WebUI 可視化インターフェース
+
+1. **依存関係のインストール**：
+  ```bash
+  cd WebUI
+  pip install -r requirements.txt
+  ```
+2. **プログラムの起動**：
+  ```bash
+  python web.py
+  ```
 
 ### API サービスインターフェース
 
