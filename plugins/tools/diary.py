@@ -1,4 +1,9 @@
-"""日记写作：随时让 LLM 基于当天对话写一篇日记并落盘。
+"""写日记工具（本地 Function Call）：随时基于当天对话写一篇日记并落盘。
+
+原 src/llm/diary.py 迁移为本地工具（plugins/tools/diary.py）：
+- 工具入口 `_write_diary()`：LLM 自行判断"该写日记了"时调用（无参，
+  素材自动从 memory 会话轮次收集），生成 data/diary/YYYY-MM-DD.md
+- 同时保留 DiaryWriter 类：!diary 命令（commands_impl.cmd_diary）直接使用
 
 与 daily-diary skill（src/llm/skills/daily-diary/SKILL.md）打通技能系统：
 - 默认走技能机制：system 注入「可用技能」段，模型自己 load_skill 选择
@@ -293,4 +298,14 @@ class DiaryWriter:
         return str(path)
 
 
-__all__ = ["DiaryWriter"]
+async def _write_diary() -> str:
+    """写日记工具入口：素材自动取 memory 会话轮次，生成并落盘。"""
+    mgr = memory.get_manager()
+    turns = mgr.recent_turns if mgr is not None else []
+    path = await DiaryWriter().write_diary(turns)
+    if path:
+        return f"已写好今天的日记并保存到 {path}。"
+    return "日记生成失败（见上方日志）。"
+
+
+__all__ = ["DiaryWriter", "_write_diary"]

@@ -299,6 +299,7 @@ class ToolConfig:
     TOOL_LOAD_SKILL_ENABLED: bool = True
     TOOL_LOOK_SCREEN_ENABLED: bool = True
     TOOL_PLAY_SFX_ENABLED: bool = True
+    TOOL_WRITE_DIARY_ENABLED: bool = True
     MCP_ENABLED: bool = False
     MCP_CONFIG_PATH: str = ""
     SKILLS_DIR: str = "src/llm/skills"
@@ -494,6 +495,7 @@ _TOOL_LOADERS = {
     "TOOL_LOAD_SKILL_ENABLED": lambda: _get_bool("TOOL_LOAD_SKILL_ENABLED", True),
     "TOOL_LOOK_SCREEN_ENABLED": lambda: _get_bool("TOOL_LOOK_SCREEN_ENABLED", True),
     "TOOL_PLAY_SFX_ENABLED": lambda: _get_bool("TOOL_PLAY_SFX_ENABLED", True),
+    "TOOL_WRITE_DIARY_ENABLED": lambda: _get_bool("TOOL_WRITE_DIARY_ENABLED", True),
     "MCP_ENABLED": lambda: _get_bool("MCP_ENABLED", False),
     "MCP_CONFIG_PATH": lambda: os.getenv("MCP_CONFIG_PATH") or os.path.join(
         _PROJECT_ROOT, "src", "mcp", "mcp_config.json"),
@@ -951,6 +953,10 @@ class Config:
     @property
     def TOOL_PLAY_SFX_ENABLED(self) -> bool:
         return self.tool.TOOL_PLAY_SFX_ENABLED
+
+    @property
+    def TOOL_WRITE_DIARY_ENABLED(self) -> bool:
+        return self.tool.TOOL_WRITE_DIARY_ENABLED
 
     @property
     def MCP_ENABLED(self) -> bool:

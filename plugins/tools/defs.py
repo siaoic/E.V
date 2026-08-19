@@ -152,4 +152,14 @@ _LOCAL_TOOL_DEFS: List[dict] = [
             "parameters": {"type": "object", "properties": {}},
         },
     },
+    {
+        "type": "function",
+        "function": {
+            "name": "write_diary",
+            "description": "基于当天的对话写一篇日记并保存（data/diary/YYYY-MM-DD.md，"
+                           "当天已有日记会自动合并重写不丢内容）。当用户要求"
+                           "「写日记」「记日记」「写今天的日记」「记录今天」时调用。",
+            "parameters": {"type": "object", "properties": {}},
+        },
+    },
 ]

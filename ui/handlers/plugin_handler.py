@@ -77,6 +77,12 @@ class PluginHandler:
         else:
             add_local("TOOL_PLAY_SFX_ENABLED", "play_sound_effect",
                 False, True, "⭕ 已关闭", "播放音效增强表现力（本地 wav）")
+        if cfg.TOOL_WRITE_DIARY_ENABLED:
+            add_local("TOOL_WRITE_DIARY_ENABLED", "write_diary",
+                True, True, "✅ 已启用", "写日记：基于当天对话生成并落盘 data/diary/")
+        else:
+            add_local("TOOL_WRITE_DIARY_ENABLED", "write_diary",
+                False, True, "⭕ 已关闭", "写日记：基于当天对话生成并落盘 data/diary/")
 
         # ---- MCP（外部工具服务器） ----
         # MCP 未启用（MCP_ENABLED 为空）时，运行时不会加载 MCP 工具

@@ -301,7 +301,7 @@ async def cmd_diary(runtime, cmd: str) -> bool:
     想什么时候写就什么时候写；当天已有日记时会自动合并重写（不丢内容）。
     后台生成，不阻塞输入循环。
     """
-    from src.llm.diary import DiaryWriter
+    from plugins.tools.diary import DiaryWriter
 
     turns = runtime.mm.recent_turns if runtime.mm is not None else []
 

@@ -18,6 +18,9 @@ from ui.widgets.slot_label import _as_list
 class FacePage:
     """表情与动作页逻辑：6 情绪绑定卡片 + 表情/动作库 + 试播/绑定。"""
 
+    # 表情与动作页在 stack 中的索引（导航映射见 control_center._init_signals）
+    _FACE_PAGE_INDEX = 2
+
     def _init_face_page(self) -> None:
         """初始化表情动作页：整页滚动（scroll_face_page），两个独立绑定区域——
         表情绑定区（紫色大背景，6 个表情槽卡片 2 行 3 列）+ 动作绑定区
@@ -107,7 +110,7 @@ class FacePage:
         if key == getattr(self, "_face_lib_key", None):
             return
         self._face_lib_key = key
-        if self.stack.currentIndex() == 4:
+        if self.stack.currentIndex() == self._FACE_PAGE_INDEX:
             self._refresh_face_lib()
 
     def _build_expr_library(self) -> None:

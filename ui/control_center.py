@@ -196,7 +196,7 @@ class ControlCenter(LaunchPage, LLMPage, SettingsPage, FacePage, MemoryPage,
         self.btn_toggle.setVisible(launch)
         self.btn_clear_log.setVisible(launch)
         # 进入表情与动作页：刷新 vtuber 绑定库（运行时扫描缓存可能已更新）
-        if idx == 4:
+        if idx == self._FACE_PAGE_INDEX:
             self._refresh_face_lib()
 
     def _init_state(self) -> None:

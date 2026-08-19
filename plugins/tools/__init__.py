@@ -29,6 +29,7 @@ from plugins.tools.skill_loader import _load_skill, _read_skill_resource
 from plugins.tools.memory_tools import _remember_fact, _forget_memory
 from plugins.tools.screen import _look_at_screen
 from plugins.tools.sfx import _play_sound_effect, _list_sound_effects
+from plugins.tools.diary import _write_diary
 from src.mcp.llm_bridge import call_mcp_tool, get_mcp_tools_for_llm
 from plugins.manager import get_default_manager, tool_name
 
@@ -55,6 +56,7 @@ _LOCAL_REGISTRY = {
     "look_at_screen": _look_at_screen,
     "play_sound_effect": _play_sound_effect,
     "list_sound_effects": _list_sound_effects,
+    "write_diary": _write_diary,
 }
 
 
@@ -110,6 +112,9 @@ def get_merged_tools(mcp=None) -> List[dict]:
     if config.cfg.TOOL_PLAY_SFX_ENABLED:
         available_names.add("play_sound_effect")
         available_names.add("list_sound_effects")
+    # 写日记（LLM 自行判断何时记录当天，素材取 memory 会话轮次）
+    if config.cfg.TOOL_WRITE_DIARY_ENABLED:
+        available_names.add("write_diary")
 
     # 与 MCP 工具重名的本地工具跳过（外部服务器优先，避免 LLM 调用歧义）
     existing_names = {t["function"]["name"] for t in tools}
@@ -166,4 +171,6 @@ def get_local_tool_names() -> List[str]:
     if config.cfg.TOOL_PLAY_SFX_ENABLED:
         names.add("play_sound_effect")
         names.add("list_sound_effects")
+    if config.cfg.TOOL_WRITE_DIARY_ENABLED:
+        names.add("write_diary")
     return sorted(names)
