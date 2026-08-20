@@ -22,7 +22,7 @@ import re
 from typing import Any, Callable, Optional
 
 from src.llm.client.factory import get_async_openai_client
-from src.llm.jsonutil import parse_json_object
+from src.llm.utils.jsonutil import parse_json_object
 from src.llm.memory.lore_guard import is_lore_leak
 from src.utils import config
 

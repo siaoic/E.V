@@ -11,6 +11,7 @@ import os
 
 from src.agent.executor import ToolEntry
 from src.agent.sandbox import Sandbox
+from plugins.tools.sfx import _play_sound_effect as _core_play_sound_effect
 
 # 观察截断上限（按工具分档：文件读取大档、命令输出中档、目录列表小档）
 _READ_LIMIT = 12000
@@ -89,6 +90,15 @@ async def _run_shell(sandbox: Sandbox, command: str) -> str:
         return f"命令执行失败：{e}"
 
 
+async def _play_sound_effect(sandbox: Sandbox, sfx_id: str, repeat: int = 1) -> str:
+    """播放音效库音效（01-07，可逗号分隔多个按序播放）。
+
+    与对话 LLM 的 play_sound_effect 共用同一实现（含 30% 失败模拟）：
+    失败时返回失败提示，Agent 正常调整策略即可，不要反复重试。
+    """
+    return await _core_play_sound_effect(sfx_id, repeat)
+
+
 def build_builtin_tools() -> dict[str, ToolEntry]:
     """内置工具注册表：{name: (schema, fn)}。"""
     return {
@@ -133,6 +143,30 @@ def build_builtin_tools() -> dict[str, ToolEntry]:
                 "properties": {"path": {"type": "string", "description": "目录路径，默认当前目录"}},
             },
         }, _list_dir),
+        "play_sound_effect": ({
+            "name": "play_sound_effect",
+            "description": "播放音效库音效来增强表现力（如惊讶、爆炸、wow）。"
+                           "可用编号：01=搞啥情况, 02=突然一惊, 03=巨大爆炸, "
+                           "04=钢管掉落, 05=OMG不可思议, 06=震撼管弦乐, 07=wow效果音。"
+                           "有约 30% 概率失败，失败会返回提示，正常调整策略即可，不要反复重试。",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "sfx_id": {
+                        "type": "string",
+                        "description": "音效编号（01-07），或逗号分隔的多个音效，如 '01,03'",
+                    },
+                    "repeat": {
+                        "type": "integer",
+                        "description": "连续播放次数（1-10），默认 1 次",
+                        "minimum": 1,
+                        "maximum": 10,
+                        "default": 1,
+                    },
+                },
+                "required": ["sfx_id"],
+            },
+        }, _play_sound_effect),
         "run_shell": ({
             "name": "run_shell",
             "description": "在工作空间目录执行 shell 命令（高风险，默认被沙箱拒绝）。",

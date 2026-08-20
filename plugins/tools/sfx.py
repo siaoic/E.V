@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import os
 import random
+import re
 import threading
 import time
 import winsound
@@ -23,6 +24,14 @@ _SFX_LIBRARY = {
     "06": "震撼管弦乐",
     "07": "wow 效果音",
 }
+
+# 文本内音效标记：{{sfx:编号}} —— LLM 在叙述中插入，客户端拆段并在
+# 该段音频开始播放时同步触发音效（标记本身不显示、不被 TTS 念出）。
+_SFX_MARKER_RE = re.compile(r"\{\{sfx:(\d+)\}\}")
+
+# 音效编号分隔符：同一归属段内多个标记（含句尾合并）按逗号串联，
+# 播放时按序逐个触发（play_sfx_sequence 同样按逗号拆分）。
+_SFX_SEP = ","
 
 # 音效 wav 目录（SFX 资源与讲解.txt 同处）
 _SFX_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "SFX")
@@ -82,3 +91,67 @@ async def _list_sound_effects() -> str:
         return "音效库目录不存在，无法播放音效。"
     lines = [f"{item} = {meaning}" for item, meaning in _SFX_LIBRARY.items()]
     return "可用音效：" + "；".join(lines)
+
+
+# ---------- 文本内音效标记（说话期间用音效，与 TTS 播放同步） ----------
+
+def _merge_sfx(a: str, b: str) -> str:
+    """串联两组音效编号（去空，逗号分隔），支持同一段内多标记累加。"""
+    return _SFX_SEP.join(x for x in (a, b) if x)
+
+
+def split_sfx_markers(text: str) -> list[tuple[str, str]]:
+    """按音效标记拆分文本：返回 [(段文本, 该段播放时触发的音效编号或"")]。
+
+    标记合并到**其后**的文本段（标记出现在句尾时合并到末段），该段音频
+    开始播放时同步触发音效——"讲到那一刻，音效响起"。标记本身被移除。
+    同一归属段内出现多个标记（连续标记或中段+句尾）时编号按逗号串联，
+    播放时按序逐个触发。纯标记文本（无任何文字）返回 [("", 编号)]，
+    由调用方直接触发。
+    """
+    if not text:
+        return [("", "")]
+    parts: list[tuple[str, str]] = []
+    pending_sfx = ""
+    last = 0
+    for m in _SFX_MARKER_RE.finditer(text):
+        seg = text[last:m.start()]
+        if seg.strip():
+            parts.append((seg, pending_sfx))
+            pending_sfx = ""
+        pending_sfx = _merge_sfx(pending_sfx, m.group(1))
+        last = m.end()
+    tail = text[last:]
+    if tail.strip():
+        parts.append((tail, pending_sfx))
+    elif pending_sfx and parts:
+        # 句尾标记：追加到末段已有音效后（不覆盖中段标记）
+        parts[-1] = (parts[-1][0], _merge_sfx(parts[-1][1], pending_sfx))
+    elif pending_sfx:
+        parts.append(("", pending_sfx))  # 纯标记文本
+    return parts
+
+
+def strip_sfx_markers(text: str) -> str:
+    """移除全部音效标记（历史保存/记忆提取用，避免标记污染上下文）。"""
+    return _SFX_MARKER_RE.sub("", text)
+
+
+def play_sfx_sequence(sfx_ids: list[str], repeat: int = 1) -> None:
+    """稳定播放音效序列（不经过 30% 随机失败，供文本标记路径使用）。
+
+    与 _play_sound_effect 的失败模拟不同：叙事增强音效应稳定触发，
+    后台线程播放，不阻塞调用方。无效编号静默忽略。
+    """
+    ids = [
+        i
+        for item in sfx_ids
+        for i in item.split(_SFX_SEP)
+        if i in _SFX_LIBRARY
+    ]
+    if not ids:
+        return
+    thread = threading.Thread(
+        target=_play_sequence, args=(ids, max(1, min(repeat or 1, _MAX_REPEAT))),
+        daemon=True)
+    thread.start()

@@ -29,7 +29,7 @@ from datetime import datetime
 from openai import AsyncOpenAI
 
 from src.llm.client.factory import get_async_openai_client
-from src.llm.jsonutil import parse_json_object
+from src.llm.utils.jsonutil import parse_json_object
 from src.utils import config, console
 
 # 生效策略段文件：llm_brain 每轮读取注入系统提示（GEPA 择优后的当前版本）

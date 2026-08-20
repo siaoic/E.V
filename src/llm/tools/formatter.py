@@ -2,7 +2,7 @@
 
 import json
 
-from src.llm.constants import _MAX_TOOL_HISTORY_LOG, _MAX_TOOL_RESULT_LOG
+from src.llm.utils.constants import _MAX_TOOL_HISTORY_LOG, _MAX_TOOL_RESULT_LOG
 
 # 搜索结果日志最多逐条展示的条数（控制台防刷屏；完整结果仍进工具上下文）
 _MAX_SEARCH_RESULT_SHOW = 5

@@ -20,6 +20,8 @@ from plugins.manager import get_default_manager
 from src.core.bus import EV_AI_REPLY, EV_SPEAKING_END, bus
 from src.core.events.models import LLMResponse, SpeakingEvent
 from src.core.output_lock import get_output_owner
+from plugins.tools.sfx import split_sfx_markers
+from src.llm.cleaners.sentence import _split_sentences
 
 
 async def _run_tts_hooks(pm, text: str) -> str:
@@ -40,12 +42,16 @@ async def speak_text(text: str,
                      sub: Optional[SubtitleServer] = None,
                      proactive: bool = False,
                      profanity_filter=None,
-                     profanity_filter_rate: float = 0.7) -> None:
+                     profanity_filter_rate: float = 0.7,
+                     emotion_actor=None) -> None:
     """直接播报已有文本（无需 LLM 生成）：打印 + 网页字幕 + 口型 + TTS。
 
     供主动发言「LLM 自主决定想说就说」路径使用：发言内容已由主模型生成完毕，
     这里只做输出流水线（过滤 / 打印 / 字幕 / 口型 / TTS 排队播放），
     行为与 converse 的产句播报保持一致（脏话过滤、字幕时机、TTS 排空）。
+
+    emotion_actor：可选情绪演员（BaseEmotionActor）。提供时按句规则分类
+    逐句播放对应表情/动作（每句话一个情绪，不只看整段）。
     """
     sender = get_output_owner() or "user"
     spoken = text
@@ -57,6 +63,14 @@ async def speak_text(text: str,
     if proactive:
         console.chat("主动对话：", end="", flush=True)
     console.chat(spoken, end="", flush=True)
+    # 逐句情绪判断（规则分类零开销）：每句话播放对应表情/动作，不只看整段
+    if emotion_actor is not None:
+        try:
+            for _s in _split_sentences(spoken):
+                if _s.strip():
+                    await emotion_actor.handle_rule(_s)
+        except Exception as e:
+            console.dim(f"逐句情绪播放失败（不影响播报）：{e}")
     # 事件总线：AI 回复（供订阅方实时消费）
     await bus.emit(EV_AI_REPLY, LLMResponse(text=spoken, sender=sender))
     if tts:
@@ -97,7 +111,8 @@ async def converse(brain: LLMBrain,
                    profanity_filter=None,
                    profanity_filter_rate: float = 0.7,
                    history: Optional[list] = None,
-                   on_llm_done: Optional[Callable[[str], Awaitable[None]]] = None) -> None:
+                   on_llm_done: Optional[Callable[[str], Awaitable[None]]] = None,
+                   emotion_actor=None) -> None:
     """对话：LLM 流式产句 + 文本实时打印 + 网页字幕推送。
 
     当提供 tts 引擎时，每条句子立即送入合成队列并排队播放，
@@ -117,6 +132,9 @@ async def converse(brain: LLMBrain,
     生成完毕（brain.history 已含该回复）时以后台任务调度，**与 TTS 播放
     并行执行**，不等 drain() 播完全部音频——用于记忆提取等不依赖音频
     播完的任务，避免端到端耗时被 TTS 播放拖长。回调内部需自行捕获异常。
+
+    emotion_actor：可选情绪演员（BaseEmotionActor）。提供时对 LLM 每句话
+    做规则情绪分类并播放对应表情/动作（不只看整段回复一个情绪）。
     """
     sender = get_output_owner() or "user"
     try:
@@ -141,32 +159,45 @@ async def converse(brain: LLMBrain,
             if proactive and not turn_prefixed:
                 console.chat("主动对话：", end="", flush=True)
                 turn_prefixed = True
-            # AI 说的话走「对话」通道：控制中心左栏显示（读哪句显示哪句）
-            console.chat(spoken, end="", flush=True)
-            full_reply_parts.append(spoken)
-            # 事件总线：AI 回复（流式逐句，供订阅方实时消费）
-            await bus.emit(EV_AI_REPLY, LLMResponse(text=spoken, sender=sender))
-            # 网页字幕：打字机效果（与语音播放基本同步）
-            if tts:
-                # 插件钩子：on_tts_text（只影响语音，字幕展示原文）+ on_tts_start
-                spoken = await _run_tts_hooks(
-                    getattr(brain, "plugin_manager", None), spoken)
-                # 有 TTS：口型不在此处启动——TTS 合成+排队常需数秒，
-                # 若在句子生成时就 start_speaking，音频未播嘴已先动。
-                # 口型由音频播放回调（_on_tts_play → load_speech_curve）
-                # 在音频真正开始播放的那一刻同步触发。
-                await tts.speak(spoken)
-                # 字幕：音频播放回调中推送（说哪句显示哪句）
-            else:
-                # 无 TTS：直接产句时推送（没有播放时机）
-                if sub:
-                    sub.push("text", spoken)
-                if face:
-                    dur = max(0.6, len(spoken) * 0.15)
-                    face.start_speaking(dur)
-            # 让出事件循环：否则 TTS 合成任务永远得不到调度，
-            # 所有句子处理完后 TTS 才能开始合成，看起来像「LLM 发完才 TTS」
-            await asyncio.sleep(0)
+            # 文本内音效标记拆段：LLM 叙述中插入 {{sfx:编号}}，标记随其后
+            # 段的音频开始播放时同步触发音效（标记不显示、不被 TTS 念出）；
+            # 段与段之间只差一次入队，TTS 播放节奏几乎不变。
+            for seg, sfx in split_sfx_markers(spoken):
+                if not seg.strip():
+                    continue  # 纯标记段已合并到其后文本段，正常不会出现
+                # AI 说的话走「对话」通道：控制中心左栏显示（读哪句显示哪句）
+                console.chat(seg, end="", flush=True)
+                full_reply_parts.append(seg)
+                # 逐句情绪判断（规则分类零开销）：每句话播放对应表情/动作，
+                # 与 TTS 播放并行，不阻塞句子入队节奏
+                if emotion_actor is not None:
+                    try:
+                        await emotion_actor.handle_rule(seg)
+                    except Exception as e:
+                        console.dim(f"逐句情绪播放失败（不影响播报）：{e}")
+                # 事件总线：AI 回复（流式逐句，供订阅方实时消费）
+                await bus.emit(EV_AI_REPLY, LLMResponse(text=seg, sender=sender))
+                # 网页字幕：打字机效果（与语音播放基本同步）
+                if tts:
+                    # 插件钩子：on_tts_text（只影响语音，字幕展示原文）+ on_tts_start
+                    seg = await _run_tts_hooks(
+                        getattr(brain, "plugin_manager", None), seg)
+                    # 有 TTS：口型不在此处启动——TTS 合成+排队常需数秒，
+                    # 若在句子生成时就 start_speaking，音频未播嘴已先动。
+                    # 口型由音频播放回调（_on_tts_play → load_speech_curve）
+                    # 在音频真正开始播放的那一刻同步触发。
+                    await tts.speak(seg, sfx)
+                    # 字幕：音频播放回调中推送（说哪句显示哪句）
+                else:
+                    # 无 TTS：直接产句时推送（没有播放时机）
+                    if sub:
+                        sub.push("text", seg)
+                    if face:
+                        dur = max(0.6, len(seg) * 0.15)
+                        face.start_speaking(dur)
+                # 让出事件循环：否则 TTS 合成任务永远得不到调度，
+                # 所有句子处理完后 TTS 才能开始合成，看起来像「LLM 发完才 TTS」
+                await asyncio.sleep(0)
     except Exception as e:
         console.error(f"LLM 流式产出出错：{e}")
     finally:

@@ -24,7 +24,7 @@ from src.llm.client.factory import (
     build_thinking_extra_body,
     get_async_openai_client,
 )
-from src.llm.jsonutil import parse_json_array
+from src.llm.utils.jsonutil import parse_json_array
 from src.llm.memory.lore_guard import is_lore_leak
 from tools.memory import memory
 from src.utils import config, console

@@ -140,7 +140,8 @@ class ProactiveEngine:
 
     def __init__(self, brain, tts, face, sub, cfg,
                  butler=None, memory_manager=None,
-                 profanity_filter=None, profanity_filter_rate: float = 0.7) -> None:
+                 profanity_filter=None, profanity_filter_rate: float = 0.7,
+                 emotion_actor=None) -> None:
         self.cfg = cfg
         self.brain = brain
         self.tts = tts
@@ -150,6 +151,8 @@ class ProactiveEngine:
         self.mm = memory_manager      # 可选：记忆上下文注入 + 记入会话轮次
         self.pf = profanity_filter    # 可选：仅过滤 AI 播报句子，不过滤用户/弹幕输入
         self.pf_rate = profanity_filter_rate
+        # 可选情绪演员：播报时按句规则分类播放表情/动作
+        self.emotion_actor = emotion_actor
         # 全局输出互斥锁（模块单例，三方共用） + 说话者身份标记
         self._output_lock = get_output_lock()
 
@@ -431,6 +434,7 @@ class ProactiveEngine:
                         proactive=True,
                         profanity_filter=self.pf,
                         profanity_filter_rate=self.pf_rate,
+                        emotion_actor=self.emotion_actor,
                     )
                     # 左栏对话换行：主动发言是单条文本（无换行），收尾补一个
                     console.chat()

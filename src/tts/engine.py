@@ -33,6 +33,7 @@ import soundfile as sf
 from src.utils import console
 from src.tts.player import TTSPlayer
 from src.adapter.tts import BaseTTSAdapter
+from plugins.tools.sfx import play_sfx_sequence
 
 # 多参考音频分隔符：GPTSOVITS_REF_AUDIOS 可配置多个路径，以 | 连接
 # （控制中心支持拖拽多个音频文件，落地即 | 连接写入 .env）
@@ -564,31 +565,37 @@ class TTSEngine(BaseTTSAdapter):
 
     # ---------- 合成（/tts/stream 流式 + /tts/batch 兜底，串行泵） ----------
 
-    async def speak(self, text: str) -> None:
+    async def speak(self, text: str, sfx: str = "") -> None:
         """把一句话送入合成队列（立即返回，不阻塞 LLM 流）。
 
+        sfx：可选音效编号（文本内音效标记 {{sfx:编号}} 拆段后随段传入），
+        该句音频开始播放时同步触发音效；text 为空时直接触发不入队。
         串行泵按句 Token 级流式合成；首块到达即出声（首字延迟只受首块
         合成+传输耗时限制），服务端 _infer_lock 串行推理天然保序。
         """
         if not self._ready or self._pending is None or self._interrupted:
             return
         text = (text or "").strip()
-        if not text or not _HAS_CONTENT_RE.search(text):
+        if not text:
+            if sfx:
+                play_sfx_sequence([sfx])  # 纯音效段：直接触发
+            return
+        if not _HAS_CONTENT_RE.search(text):
             return  # 纯符号碎片：防 GPT-SoVITS 合成退化
         text = _collapse_tts_text(text)
-        await self._pending.put(text)
+        await self._pending.put((text, sfx))
         if self._pump_task is None or self._pump_task.done():
             self._pump_task = asyncio.create_task(self._pump())
 
     async def _pump(self) -> None:
         """串行消费待合成句子；收拢当前积攒的句子成批合成，空闲时退出。"""
         while True:
-            text = await self._pending.get()
+            item = await self._pending.get()
             if self._interrupted:
                 continue  # 丢弃打断后的残留句子
             gen = self._gen
             # 收拢当前待合成句子（最多 _BATCH_MAX 条一批，按句顺序流式合成）
-            texts = [text]
+            texts = [item]
             while len(texts) < _BATCH_MAX:
                 try:
                     texts.append(self._pending.get_nowait())
@@ -616,12 +623,12 @@ class TTSEngine(BaseTTSAdapter):
         与文本无关的 GPT 采样随机崩坏）或网络失败时回退 _synth_one 重试
         （内部带重试 + 退化丢弃兜底），绝不把怪叫播完整段。
         """
-        for text in texts:
+        for text, sfx in texts:
             if gen != self._gen:
                 return  # 打断：放弃剩余
-            await self._synth_stream(text, gen)
+            await self._synth_stream(text, gen, sfx)
 
-    async def _synth_stream(self, text: str, gen: int) -> None:
+    async def _synth_stream(self, text: str, gen: int, sfx: str = "") -> None:
         """Token 级流式合成一句（POST /tts/stream，SSE 边收边播）。
 
         对齐官方示例语义：每块音频到达即播放（audio.play()），每块随带的
@@ -645,6 +652,8 @@ class TTSEngine(BaseTTSAdapter):
                 await asyncio.to_thread(_cache_delete, key)
             else:
                 # 缓存音频无词级时间戳，字幕回退整句显示
+                if sfx:
+                    play_sfx_sequence([sfx])  # 该句即将播放：同步触发音效
                 self._player.emit(audio_data, sr, text, _fallback_subtitles(text), gen)
                 return
         payload = {
@@ -678,6 +687,9 @@ class TTSEngine(BaseTTSAdapter):
                         sent_id = self._player.begin_stream(32000, text, gen)
                         if sent_id is None:
                             return  # 播放器不可用/已打断
+                        if sfx:
+                            # 该句音频即将播放：同步触发音效（文本内音效标记）
+                            play_sfx_sequence([sfx])
                     # 词级时间戳字幕增量逐块入队（官方示例逐块 add 的 1:1 语义）
                     if evt.get("subtitles"):
                         self._player.feed_subtitles(evt["subtitles"], gen)

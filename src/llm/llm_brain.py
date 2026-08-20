@@ -47,6 +47,7 @@ from src.utils import config, console
 from tools.memory import memory
 from src.adapter.llm import BaseLLMAdapter
 from plugins.tools.skills import get_skill_manager
+from plugins.tools.sfx import strip_sfx_markers
 from src.llm.cleaners.api import _clean_messages_for_api
 from src.llm.cleaners.content import (
     _clean_sentence,
@@ -63,7 +64,7 @@ from src.llm.client.factory import (
     get_openai_client,
 )
 from src.llm.client.retry import _parse_retry_after
-from src.llm.constants import (
+from src.llm.utils.constants import (
     _MAX_429_WAIT,
     _MAX_TOOL_ITERATIONS,
     _SUMMARIZE_MIN_TURNS,
@@ -137,7 +138,7 @@ class LLMBrain(BaseLLMAdapter, _InjectionMixin, _SummaryMixin):
         self._policy_cache: str = ""
         # 模型路由进化（多臂老虎机）：配置多 LLM 服务时按历史表现选服务；
         # 未配置/未启用时 router 为 None，完全走原有单一 LLM 服务逻辑
-        from src.llm.model_router import get_router
+        from src.llm.utils.model_router import get_router
         self.router = get_router()
 
     def reload_client(self) -> None:
@@ -304,6 +305,12 @@ class LLMBrain(BaseLLMAdapter, _InjectionMixin, _SummaryMixin):
                 事实核查的问题时，必须先调用下方列出的搜索/抓取网页工具获取真实
                 结果再回答，不要说自己无法联网搜索——工具列表已提供给你。"""
             )
+            # 工具使用时机清单：逐条列出当前可用工具 + 触发时机（与 function
+            # calling 同源，弥补引导段不列具体清单、模型不知何时该调哪个的缺口）
+            from plugins.tools import render_tool_guide
+            tool_guide = render_tool_guide(tools)
+            if tool_guide:
+                sys_content += "\n\n" + tool_guide
             # 注入 MCP 服务器能力说明（mcp_config.json 的 description 字段），
             # 让模型明确知道每台服务器能做什么、有哪些工具可调用
             mcp_desc = self._describe_mcp_servers(self.mcp)
@@ -743,7 +750,12 @@ class LLMBrain(BaseLLMAdapter, _InjectionMixin, _SummaryMixin):
         # ===== 历史保存完整工具链（对标 live-2d(2)：
         # assistant+tool_calls + tool 响应都进历史，跨轮保留上下文）=====
         if final_reply is not None:
-            messages.append({"role": "assistant", "content": final_reply})
+            # 音效标记（{{sfx:编号}}）只服务于本轮 TTS 播放，不写入历史，
+            # 避免标记污染后续轮次的 LLM 上下文/记忆
+            messages.append({
+                "role": "assistant",
+                "content": strip_sfx_markers(final_reply),
+            })
         if history is not None:
             # 用快照发起的请求（agent 主动发言）：只把本轮新产出的消息并入
             # 真实历史，不能整体替换——否则被精简掉的早期轮次会丢失

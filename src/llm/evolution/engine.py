@@ -68,7 +68,7 @@ class EvolutionEngine:
     @staticmethod
     def _default_prompt_evo_getter():
         """默认 GEPA 进化器获取（懒 import，调用时才加载 prompt_evo 模块）。"""
-        from src.llm.prompt_evo import get_evolver
+        from src.llm.evolution.prompt_evo import get_evolver
         return get_evolver()
 
     def _ensure_client(self) -> AsyncOpenAI | None:

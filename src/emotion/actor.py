@@ -19,7 +19,8 @@ import re
 from typing import Dict, List
 
 from src.utils import console
-from src.llm.embedding import (
+from src.emotion.reaction import MessageReaction
+from src.llm.utils.embedding import (
     EmbeddingEmotionClassifier,
     SiliconFlowEmbeddingProvider,
 )
@@ -48,6 +49,8 @@ class BaseEmotionActor:
         self._motions: Dict[str, int] = {}
         self._map: Dict[str, Dict[str, str]] = {}
         self._classifier: "EmbeddingEmotionClassifier | None" = None
+        # 规则情绪分类器（纯正则、零开销）：AI 回复逐句情绪判断用
+        self._rule_classifier = MessageReaction()
 
     # ---------- 启动扫描（子类实现） ----------
 
@@ -129,6 +132,23 @@ class BaseEmotionActor:
             console.dim(f"情绪分类失败：{e}")
             return ""
         emotion = getattr(intent, "emotion", "中性") or "中性"
+        played = await self._play_map(emotion)
+        if played:
+            console.dim(f"情绪「{emotion}」→ {played}")
+        return played
+
+    async def handle_rule(self, text: str) -> str:
+        """按句判断情绪（规则分类，零开销）并播放映射：AI 回复逐句用。
+
+        与 handle() 的区别：只做规则情绪分类 → 播放该情绪绑定的表情/动作，
+        不匹配手动命令（回复内容不是用户指令），不需要 Embedding 服务
+        （离线可用、无网络/初始化依赖）。
+        返回播放描述文本（空串表示未播放）。
+        """
+        text = (text or "").strip()
+        if not text:
+            return ""
+        emotion = self._rule_classifier.classify(text).emotion
         played = await self._play_map(emotion)
         if played:
             console.dim(f"情绪「{emotion}」→ {played}")

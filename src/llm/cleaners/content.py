@@ -29,6 +29,12 @@ _KAOMOJI_RE = re.compile(
     r"\u30fb\u00b7\u005e\u005f\u0060])[^（）()]{1,14}[)）]"
 )
 
+# 零宽/不可见格式字符：\u200b-\u200f（零宽空格/连接符/LRM）、\u202a-\u202e
+# （双向文本控制）、\u2060-\u206f（单词连接符等）、\ufeff（BOM）、
+# \ufff9-\ufffb（行间注释标记）。模型偶发插入分隔 token，GBK 终端
+# 打印即崩（UnicodeEncodeError），且 GPT-SoVITS 合成时可能静默丢字。
+_ZERO_WIDTH_RE = re.compile(r"[\u200b-\u200f\u202a-\u202e\u2060-\u206f\ufeff\ufff9-\ufffb]")
+
 # Emoji 过滤：匹配主流 Unicode emoji 区域（含 ZWJ 序列、肤色修饰符等）
 _EMOJI_RE = re.compile(
     "["
@@ -92,6 +98,7 @@ def _clean_sentence(sentence: str) -> str:
         return sentence
     sentence = memory.extract_and_strip(sentence)
     sentence = _filter_thinking_content(sentence)
+    sentence = _ZERO_WIDTH_RE.sub("", sentence)
     sentence = _ACTION_ANNOT_RE.sub(" ", sentence)
     sentence = _HTML_TAG_RE.sub("", sentence)
     sentence = _TOOL_CALL_TEXT_RE.sub(" ", sentence)

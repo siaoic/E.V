@@ -5,7 +5,7 @@ import json
 from typing import Any, List
 
 from src.utils import console
-from src.llm.constants import _MAX_ROUND_TOOL_CHARS
+from src.llm.utils.constants import _MAX_ROUND_TOOL_CHARS
 from src.llm.tools.formatter import _format_search_result, _format_tool_result
 
 

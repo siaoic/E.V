@@ -15,7 +15,7 @@ import shutil
 from pathlib import Path
 from typing import Any
 
-from src.llm.jsonutil import parse_json_object
+from src.llm.utils.jsonutil import parse_json_object
 from src.utils import console
 
 

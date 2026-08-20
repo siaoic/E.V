@@ -24,7 +24,7 @@ from datetime import datetime
 from openai import AsyncOpenAI
 
 from src.llm.client.factory import get_async_openai_client
-from src.llm.jsonutil import parse_json_array
+from src.llm.utils.jsonutil import parse_json_array
 from src.utils import config, console
 
 # 评估结果存档（追加写，供用户审阅每次评估的对比数据）

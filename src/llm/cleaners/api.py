@@ -4,7 +4,7 @@ import json
 import re
 from typing import List
 
-from src.llm.constants import _MAX_TOOL_CONTENT_LENGTH
+from src.llm.utils.constants import _MAX_TOOL_CONTENT_LENGTH
 from src.llm.tool_message_utils import sanitize_tool_message_sequence
 
 # 控制字符（可能导致 JSON 解析失败）：移除不可见字符，保留换行符(\n)和制表符(\t)

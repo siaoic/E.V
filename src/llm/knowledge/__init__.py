@@ -57,7 +57,7 @@ class KnowledgeService:
             self._gate = gate
             # 懒导入 + 注入 embedding 服务：精确/bigram 都未命中时做语义兜底；
             # 未配置或本地服务不可用时静默降级（行为与不启用一致）
-            from src.llm.embedding import SiliconFlowEmbeddingProvider
+            from src.llm.utils.embedding import SiliconFlowEmbeddingProvider
             self._recall = KnowledgeRecall(
                 kb, embedding=SiliconFlowEmbeddingProvider())
             # 后台预热 lore 语义矩阵：构建早于首次语义补位查询，

@@ -1,7 +1,7 @@
 """LLM JSON 统一容错解析工具测试：围栏/全角/区间截取/类型校验。"""
 import pytest
 
-from src.llm.jsonutil import (
+from src.llm.utils.jsonutil import (
     extract_json_text,
     parse_json_array,
     parse_json_object,

@@ -37,6 +37,7 @@ __all__ = [
     "get_merged_tools",
     "call_tool",
     "get_local_tool_names",
+    "render_tool_guide",
     "_LOCAL_TOOL_DEFS",
     "_LOCAL_REGISTRY",
 ]
@@ -174,3 +175,32 @@ def get_local_tool_names() -> List[str]:
     if config.cfg.TOOL_WRITE_DIARY_ENABLED:
         names.add("write_diary")
     return sorted(names)
+
+
+def render_tool_guide(tools: List[dict]) -> str:
+    """从 OpenAI 工具定义生成「可用工具 + 使用时机」清单（注入系统提示用）。
+
+    与 get_merged_tools 共用同一份 tools 列表（已过滤开关/key，只列模型真正
+    可调用的工具）；description 已含触发时机语义（如「当用户问你看到什么时
+    调用」），压缩成单行逐条列出——让模型明确知道何时该调用哪个工具，弥补
+    「工具使用」引导段只有泛泛说明、不列具体清单的缺口（对标技能段的可用
+    技能清单呈现）。
+    """
+    entries: List[str] = []
+    for tool_def in tools:
+        function = tool_def.get("function")
+        if isinstance(function, dict):
+            name = (function.get("name") or "").strip()
+            description = (function.get("description") or "").strip()
+        else:
+            # 兼容 {name, description} 平铺格式（部分插件工具）
+            name = (tool_def.get("name") or "").strip()
+            description = (tool_def.get("description") or "").strip()
+        if not name:
+            continue
+        description = " ".join(description.split())
+        entries.append(f"- {name}: {description}")
+    if not entries:
+        return ""
+    return ("可用工具（工具名 + 使用时机，情境匹配时优先调用）：\n"
+            + "\n".join(entries))

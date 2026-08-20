@@ -42,7 +42,13 @@ class ChatHandler(BaseHandler):
                     stream.converse(runtime.brain, text, tts=tts, face=face, sub=sub,
                                     profanity_filter=profanity_filter,
                                     profanity_filter_rate=profanity_filter_rate,
-                                    on_llm_done=on_llm_done))
+                                    on_llm_done=on_llm_done,
+                                    emotion_actor=(
+                                        runtime.emotion_actor
+                                        if (getattr(runtime, "emotion_actor", None)
+                                            is not None
+                                            and runtime.cfg.EMOTION_ACTOR_ENABLED)
+                                        else None)))
                 # 优先复用 _wait_input 语音触发时挂起的键盘监听（input() 阻塞
                 # 线程无法取消，任意时刻必须只有一个 input() 在等 stdin，否则
                 # 更早挂起的那只抢占键盘输入）：复用后立即置 None

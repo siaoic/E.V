@@ -322,6 +322,11 @@ class RuntimeContext:
                 memory_manager=self.mm if cfg.MEMORY_ENABLED else None,
                 profanity_filter=self.pf,
                 profanity_filter_rate=cfg.PROFANITY_FILTER_RATE,
+                emotion_actor=(
+                    self.emotion_actor
+                    if (getattr(self, "emotion_actor", None) is not None
+                        and cfg.EMOTION_ACTOR_ENABLED)
+                    else None),
             )
             console.dim(
                 f"主动对话已启用：LLM 自主开口（互动/弹幕结束即给机会，"
@@ -719,6 +724,11 @@ class RuntimeContext:
                     profanity_filter=self.pf,
                     profanity_filter_rate=cfg.PROFANITY_FILTER_RATE,
                     on_llm_done=_on_llm_done if cfg.MEMORY_ENABLED else None,
+                    emotion_actor=(
+                        self.emotion_actor
+                        if (getattr(self, "emotion_actor", None) is not None
+                            and cfg.EMOTION_ACTOR_ENABLED)
+                        else None),
                 )
                 # 左栏对话换行：回复句子是连续流（无换行），收尾补一个，
                 # 避免与下一条弹幕/发言粘连成一行
@@ -1092,6 +1102,11 @@ class RuntimeContext:
                 memory_manager=self.mm if cfg.MEMORY_ENABLED else None,
                 profanity_filter=self.pf,
                 profanity_filter_rate=cfg.PROFANITY_FILTER_RATE,
+                emotion_actor=(
+                    self.emotion_actor
+                    if (getattr(self, "emotion_actor", None) is not None
+                        and cfg.EMOTION_ACTOR_ENABLED)
+                    else None),
             )
             console.ok("主动对话已热启用")
         elif not cfg.PROACTIVE_ENABLED:

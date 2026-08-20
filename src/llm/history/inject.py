@@ -7,7 +7,7 @@
 import json
 import time
 
-from src.llm.constants import (
+from src.llm.utils.constants import (
     _ADVICE_ACTIVE_PATH,
     _ADVICE_CACHE_TTL,
     _POLICY_PATH,

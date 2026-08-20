@@ -21,6 +21,8 @@ import threading
 from collections import OrderedDict
 from typing import Any
 
+import numpy as np
+
 from src.utils import config, console
 from tools.memory.memory import _ensure_memu_path
 
@@ -31,8 +33,11 @@ _ensure_memu_path()
 # 六种基础情绪（与 emotion_actor.EMOTIONS 对齐）
 EMOTIONS = ["开心", "生气", "疑惑", "悲伤", "害怕", "厌恶"]
 
-# 每种情绪的示例语料（用于初始化时生成情绪向量）
-_EMOTION_CORPUS: dict[str, list[str]] = {
+# 直接情感词锚点：对话短句（如「好难过」「吓死我了」）与 corpus.py 的
+# 场景化长句语料嵌入距离差异大——仅用场景语料做 max-pooling 会因各情绪
+# 覆盖偏差系统性误判（实测生气霸榜，6 句只对 2 句）；叠加短句锚点后
+# 直接情感表达就近命中（实测 6/6），场景语料再补充长句/场景覆盖面。
+_EMOTION_ANCHORS: dict[str, list[str]] = {
     "开心": ["太棒了", "好开心", "笑死我了", "真让人高兴", "太喜欢了", "今天运气真好"],
     "生气": ["气死我了", "太过分了", "烦死了", "你怎么这样", "让人恼火", "真让人火大"],
     "疑惑": ["什么意思", "不太明白", "这是为什么", "搞不懂", "真的假的", "怎么回事"],
@@ -41,19 +46,16 @@ _EMOTION_CORPUS: dict[str, list[str]] = {
     "厌恶": ["好恶心", "真讨厌", "烦人", "受不了", "厌恶", "敬而远之"],
 }
 
+# 每种情绪的分类语料：corpus.py 完整语料库 + 直接情感词锚点（单一数据源，
+# 避免 embedding 侧复制一份小示例造成数据漂移）
+from src.emotion.corpus import EMOTION_CORPUS  # noqa: E402
+
+_EMOTION_CORPUS: dict[str, list[str]] = {
+    emotion: _EMOTION_ANCHORS.get(emotion, []) + EMOTION_CORPUS[emotion]
+    for emotion in EMOTIONS
+}
+
 _CACHE_CAPACITY = 4096
-
-
-def _cosine_similarity(a: list[float], b: list[float]) -> float:
-    """余弦相似度（numpy 向量化）。"""
-    import numpy as np
-
-    vector_a = np.asarray(a, dtype=float)
-    vector_b = np.asarray(b, dtype=float)
-    denom = float(np.linalg.norm(vector_a) * np.linalg.norm(vector_b))
-    if denom == 0:
-        return 0.0
-    return float(np.dot(vector_a, vector_b) / denom)
 
 
 # 常驻后台事件循环：embedding 同步桥接共用同一个循环，保证 httpx 连接池
@@ -223,39 +225,71 @@ class EmbeddingEmotionClassifier:
 
     def __init__(self, provider: SiliconFlowEmbeddingProvider) -> None:
         self._provider = provider
-        self._emotion_vectors: dict[str, list[float]] = {}
+        # 语料向量矩阵（行 L2 归一化，N×D）+ 每情绪对应的行索引
+        self._matrix: np.ndarray | None = None
+        self._group_rows: dict[str, np.ndarray] = {}
         self._ready = False
 
     async def initialize(self) -> bool:
-        """对情绪语料批量向量化，构建比对基准。"""
+        """语料逐条向量化，拼成 L2 归一化矩阵供 classify 一次矩阵乘比对。
+
+        完整语料每种情绪上百条场景化描述，若整段拼接会超过嵌入模型
+        上下文被截断（llama.cpp -c 2048，上百句必超）；若取平均则各类
+        向量被拉向中心、类间区分度塌陷（实测六类相似度差 <0.02，
+        悲伤句误判生气）。故逐条保存，classify 时对该情绪取最大相似度
+        （max-pooling）——只要有一条语料与文本相近即命中，区分度最稳。
+        行向量预归一化后点积即余弦，分类阶段只剩一次矩阵乘 + 6 次分组
+        max（NumPy 批量计算，替代逐条 Python 循环）。
+        """
         if not self._provider.configured:
             return False
         try:
-            corpus_texts = [
-                f"{emotion}：{'、'.join(examples)}"
-                for emotion, examples in _EMOTION_CORPUS.items()
-            ]
-            vectors = await self._provider.batch_embed(corpus_texts)
-            self._emotion_vectors = {
-                emotion: vector
-                for emotion, vector in zip(EMOTIONS, vectors, strict=True)
-                if vector
+            texts: list[str] = []
+            groups: list[str] = []
+            for emotion, examples in _EMOTION_CORPUS.items():
+                for example in examples:
+                    texts.append(example)
+                    groups.append(emotion)
+            vectors = await self._provider.batch_embed(texts)
+            matrix = np.asarray(vectors, dtype=float)  # (N, D)
+            norms = np.linalg.norm(matrix, axis=1, keepdims=True)
+            valid = norms.ravel() > 0
+            if not valid.any():
+                return False
+            matrix = matrix[valid] / norms[valid]  # 行归一化
+            labels = np.asarray(
+                [g for g, v in zip(groups, vectors, strict=True) if v],
+                dtype=object,
+            )
+            self._matrix = matrix
+            self._group_rows = {
+                emotion: np.flatnonzero(labels == emotion)
+                for emotion in _EMOTION_CORPUS
             }
-            self._ready = bool(self._emotion_vectors)
+            self._ready = True
         except Exception as e:
             console.dim(f"情绪分类器初始化失败：{e}")
             self._ready = False
         return self._ready
 
     async def classify(self, text: str) -> EmotionIntent:
-        """返回最近情绪的 EmotionIntent（未初始化抛异常）。"""
+        """返回最近情绪的 EmotionIntent（未初始化抛异常）。
+
+        一次矩阵乘算 query 与全部语料的余弦（行向量已预归一化，
+        点积 ÷ query 范数即余弦），再对每情绪行组取 max（max-pooling）。
+        """
         if not self._ready:
             raise RuntimeError("情绪分类器尚未初始化")
         vector = await self._provider.embed(text)
+        query = np.asarray(vector, dtype=float)
+        query_norm = float(np.linalg.norm(query))
+        if query_norm == 0:
+            return EmotionIntent("中性", 0.0)
+        scores = self._matrix @ query / query_norm  # (N,) 全部语料余弦
         best_emotion = "中性"
         best_score = 0.0
-        for emotion, ref in self._emotion_vectors.items():
-            score = _cosine_similarity(vector, ref)
+        for emotion, rows in self._group_rows.items():
+            score = float(scores[rows].max())
             if score > best_score:
                 best_emotion, best_score = emotion, score
         return EmotionIntent(best_emotion, best_score)

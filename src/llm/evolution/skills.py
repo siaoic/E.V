@@ -12,7 +12,7 @@ import re
 import time
 from pathlib import Path
 
-from src.llm.skill_eval import get_evaluator
+from src.llm.evolution.skill_eval import get_evaluator
 from src.utils import config, console
 
 from ._utils import _file_mtime, _strip_ws, archive_skill, call_llm_json, split_frontmatter
