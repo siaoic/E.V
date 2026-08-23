@@ -13,6 +13,7 @@ import json
 from typing import Any, Awaitable, Callable
 
 from src.agent.sandbox import Sandbox, SandboxViolation
+from src.core import estop
 
 # 工具定义：(OpenAI function schema, 执行函数)
 ToolEntry = tuple[dict, Callable[..., Any]]
@@ -79,6 +80,9 @@ class ToolExecutor:
         entry = self._tools.get(name)
         if entry is None:
             return f"未知工具：{name}（可用：{', '.join(self._tools)}）"
+        # 3.13 全局急停：哨兵文件存在时拒绝高危工具执行（fail-closed）
+        if estop.is_blocked(name):
+            return f"操作被全局急停拒绝（哨兵文件存在）：{name}"
         if not self._sandbox.check(name):
             return f"操作被沙箱拒绝（高风险未放行）：{name}"
         schema, fn = entry

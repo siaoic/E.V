@@ -47,25 +47,45 @@ def scan_plugin_dirs(plugins_dir: str) -> dict:
     return result
 
 
-def load_enabled_plugins(plugins_dir: str) -> set:
-    """读取 enabled_plugins.json 的启用相对路径集合（缺失/损坏返回空集）。"""
+def load_plugin_sets(plugins_dir: str) -> tuple:
+    """读取启用/禁用相对路径集合：(enabled, disabled)（缺失/损坏返回空集）。
+
+    plugins 为 opt-in 启用清单；disabled 为显式禁用清单（禁用后移入，
+    永不因自动登记重新启用）。相对路径统一正斜杠。
+    """
     path = os.path.join(plugins_dir, "enabled_plugins.json")
     if not os.path.isfile(path):
-        return set()
+        return set(), set()
     try:
         with open(path, "r", encoding="utf-8") as f:
             data = json.load(f)
-        return {_normalize(p) for p in data.get("plugins", [])}
+        enabled = {_normalize(p) for p in data.get("plugins", [])}
+        disabled = {_normalize(p) for p in data.get("disabled", [])}
+        return enabled, disabled
     except (OSError, ValueError):
-        return set()
+        return set(), set()
+
+
+def save_plugin_sets(plugins_dir: str, enabled, disabled=None) -> None:
+    """写入启用/禁用清单（空禁用清单不写字段，保持旧文件格式兼容）。"""
+    path = os.path.join(plugins_dir, "enabled_plugins.json")
+    data = {"plugins": sorted(_normalize(p) for p in enabled)}
+    if disabled:
+        data["disabled"] = sorted(_normalize(p) for p in disabled)
+    with open(path, "w", encoding="utf-8") as f:
+        json.dump(data, f, ensure_ascii=False, indent=2)
+
+
+def load_enabled_plugins(plugins_dir: str) -> set:
+    """读取 enabled_plugins.json 的启用相对路径集合（兼容旧调用）。"""
+    enabled, _ = load_plugin_sets(plugins_dir)
+    return enabled
 
 
 def save_enabled_plugins(plugins_dir: str, plugins) -> None:
-    """写入 enabled_plugins.json（相对路径统一正斜杠）。"""
-    path = os.path.join(plugins_dir, "enabled_plugins.json")
-    normalized = [_normalize(p) for p in plugins]
-    with open(path, "w", encoding="utf-8") as f:
-        json.dump({"plugins": normalized}, f, ensure_ascii=False, indent=2)
+    """写入启用清单，保留既有禁用清单（兼容旧调用）。"""
+    _, disabled = load_plugin_sets(plugins_dir)
+    save_plugin_sets(plugins_dir, plugins, disabled)
 
 
 class PluginManager:
@@ -79,38 +99,72 @@ class PluginManager:
         # 插件名 -> {"plugin", "metadata", "dir", "rel"}
         self._plugins: dict = {}
         self._enabled: set | None = None   # 已启用相对路径集合（None = 尚未读取）
+        self._disabled: set | None = None  # 已禁用相对路径集合（显式禁用，永不自动登记）
         self._system_prompt_patches: dict = {}   # patch_id -> 文本
         self._dynamic_tools: dict = {}           # 插件名 -> [tool_def]
         self._event_handlers: dict = {}          # 事件名 -> [(插件名, handler)]
+        self._memory_providers: dict = {}        # 插件名 -> 记忆 provider（3.11）
         self._dispatching_llm_request = False    # 防 on_llm_request 递归调 LLM
 
     # ==================== enabled_plugins.json ====================
 
     def _load_enabled_list(self, force: bool = False) -> None:
-        """读取 enabled_plugins.json 到 self._enabled（相对路径集合）。"""
+        """读取 enabled_plugins.json 的启用/禁用集合（相对路径）。"""
         if self._enabled is not None and not force:
             return
-        self._enabled = load_enabled_plugins(self.plugins_dir)
+        self._enabled, self._disabled = load_plugin_sets(self.plugins_dir)
+
+    def _user_plugins_dir(self) -> str:
+        """用户插件根目录（DATA_ROOT/plugins，可写数据根）。不存在返回空串。"""
+        root = getattr(config.cfg, "DATA_ROOT", "") or ""
+        return os.path.join(root, "plugins") if root else ""
 
     def _scan_all_plugin_dirs(self) -> dict:
-        """扫描 plugins/ 下带 metadata.json 的一级目录，返回 {相对路径: 插件目录绝对路径}。"""
-        return scan_plugin_dirs(self.plugins_dir)
+        """扫描内建（plugins/）与用户（DATA_ROOT/plugins/）目录。
+
+        3.11 发现顺序：bundled > user；同名插件以内建优先并告警（跳过
+        用户目录版本），避免同名冲突无裁决规则。
+        """
+        result = scan_plugin_dirs(self.plugins_dir)
+        user_dir = self._user_plugins_dir()
+        if user_dir and user_dir != self.plugins_dir:
+            for rel, path in scan_plugin_dirs(user_dir).items():
+                if rel in result:
+                    console.warn(
+                        f"[插件] 同名插件 {rel} 已存在于内建目录，跳过用户目录版本")
+                    continue
+                result[rel] = path
+        return result
+
+    def _auto_register_new(self, plugin_dirs: dict) -> None:
+        """新插件目录自动登记进启用清单（丢目录即用，4.x）。
+
+        仅在既非启用也非禁用时登记一次；显式禁用过的插件不会被重新启用。
+        登记落盘后与 load_all / sync_enabled_plugins 共用同一份清单。
+        """
+        changed = False
+        for rel in plugin_dirs:
+            if rel not in self._enabled and rel not in self._disabled:
+                self._enabled.add(rel)
+                changed = True
+        if changed:
+            try:
+                save_plugin_sets(self.plugins_dir, self._enabled, self._disabled)
+            except OSError as e:
+                console.warn(f"[插件] 自动登记启用清单失败：{e}")
 
     # ==================== 加载 / 卸载 / 热重载 ====================
 
     async def load_all(self) -> None:
-        """加载 plugins/ 下所有已启用插件（on_init 后不自动 on_start）。"""
+        """加载 plugins/ 下所有插件（新插件目录自动登记启用，丢目录即用）。"""
         self._load_enabled_list()
-        if not os.path.isdir(self.plugins_dir):
-            return
-        for entry in sorted(os.listdir(self.plugins_dir)):
-            plugin_dir = os.path.join(self.plugins_dir, entry)
-            if not os.path.isdir(plugin_dir):
-                continue
+        plugin_dirs = self._scan_all_plugin_dirs()
+        self._auto_register_new(plugin_dirs)
+        for plugin_dir in sorted(plugin_dirs.values()):
             try:
                 await self.load(plugin_dir)
             except Exception as e:
-                console.warn(f"[插件] 加载失败（{entry}）：{e}")
+                console.warn(f"[插件] 加载失败（{os.path.basename(plugin_dir)}）：{e}")
 
     async def load(self, plugin_dir: str) -> str | None:
         """加载单个插件目录：读取 metadata.json + 入口，实例化并 on_init。
@@ -126,9 +180,16 @@ class PluginManager:
         except (OSError, ValueError) as e:
             raise ValueError(f"metadata.json 解析失败：{e}") from e
         name = metadata.get("name") or os.path.basename(plugin_dir)
-        rel = _normalize(os.path.relpath(plugin_dir, self.plugins_dir))
+        # 3.11 双目录发现：相对路径以各自根目录为基准（内建 vs 用户）
+        if os.path.commonpath([plugin_dir, self.plugins_dir]) == self.plugins_dir:
+            rel_root = self.plugins_dir
+        else:
+            rel_root = self._user_plugins_dir()
+        rel = _normalize(os.path.relpath(plugin_dir, rel_root))
 
         self._load_enabled_list()
+        if rel in self._disabled:
+            return None      # 显式禁用：跳过
         if rel not in self._enabled:
             return None      # 未启用：跳过
         if name in self._plugins:
@@ -152,6 +213,16 @@ class PluginManager:
                     context._plugin_config = json.load(f)
             except (OSError, ValueError):
                 context._plugin_config = {}
+
+        # 3.11 可选编程式注册入口：插件包内声明 register(ctx) 即可用
+        # context 编程式注册工具 / 钩子 / 记忆 provider（与 metadata 声明
+        # 方式兼容共存；异常隔离，不影响插件本身与主程序）
+        register_fn = getattr(module, "register", None)
+        if callable(register_fn):
+            try:
+                register_fn(context)
+            except Exception as e:
+                console.warn(f"[插件] register(ctx) 执行失败（{name}）：{e}")
 
         plugin = plugin_class()
         plugin.context = context
@@ -200,6 +271,7 @@ class PluginManager:
                 pass
         self._plugins.pop(name, None)
         self._dynamic_tools.pop(name, None)
+        self._memory_providers.pop(name, None)
         for event in list(self._event_handlers):
             self._event_handlers[event] = [
                 (pn, h) for pn, h in self._event_handlers[event] if pn != name]
@@ -229,21 +301,22 @@ class PluginManager:
                 console.warn(f"[插件] 热重载失败（{name}）：{e}")
 
     async def sync_enabled_plugins(self) -> None:
-        """同步 enabled_plugins.json：卸载被禁用的、加载新启用的并 on_start。"""
+        """同步 enabled_plugins.json：登记新插件、卸载被禁用的、加载新启用的并 on_start。"""
         self._load_enabled_list(force=True)
         all_dirs = self._scan_all_plugin_dirs()
+        self._auto_register_new(all_dirs)
         loaded_by_rel = {entry["rel"]: name
                          for name, entry in self._plugins.items()}
         # 卸载被禁用的
         for rel, name in list(loaded_by_rel.items()):
-            if rel not in self._enabled:
+            if rel not in self._enabled or rel in self._disabled:
                 try:
                     await self.unload(name)
                 except Exception as e:
                     console.warn(f"[插件] 卸载失败（{name}）：{e}")
         # 加载新启用的
         for rel in self._enabled:
-            if rel in loaded_by_rel:
+            if rel in loaded_by_rel or rel in self._disabled:
                 continue
             plugin_dir = all_dirs.get(rel)
             if plugin_dir is None:
@@ -257,22 +330,28 @@ class PluginManager:
         console.dim(f"[插件] 插件同步完成，当前共 {len(self._plugins)} 个")
 
     async def apply_enabled(self, rel_path: str, enabled: bool) -> str:
-        """启用/禁用插件：写 enabled_plugins.json 并热加载/卸载，返回结果文本。"""
+        """启用/禁用插件：写 enabled_plugins.json 并热加载/卸载，返回结果文本。
+
+        禁用移入 disabled 清单，确保下次自动登记不会重新启用。
+        """
         rel = _normalize((rel_path or "").strip())
-        plugins = load_enabled_plugins(self.plugins_dir)
-        if enabled and rel in plugins:
-            return f"插件已处于启用状态：{rel}"
-        if not enabled and rel not in plugins:
-            return f"插件已处于禁用状态：{rel}"
+        enabled_set, disabled_set = load_plugin_sets(self.plugins_dir)
         if enabled:
-            plugins.add(rel)
+            if rel in enabled_set and rel not in disabled_set:
+                return f"插件已处于启用状态：{rel}"
+            enabled_set.add(rel)
+            disabled_set.discard(rel)
         else:
-            plugins.remove(rel)
+            if rel not in enabled_set and rel in disabled_set:
+                return f"插件已处于禁用状态：{rel}"
+            disabled_set.add(rel)
+            enabled_set.discard(rel)
         try:
-            save_enabled_plugins(self.plugins_dir, plugins)
+            save_plugin_sets(self.plugins_dir, enabled_set, disabled_set)
         except OSError as e:
             raise OSError(f"写入 enabled_plugins.json 失败：{e}") from e
-        self._enabled = set(plugins)
+        self._enabled = enabled_set
+        self._disabled = disabled_set
         if enabled:
             plugin_dir = self._scan_all_plugin_dirs().get(rel)
             if plugin_dir is None:
@@ -414,6 +493,16 @@ class PluginManager:
             t for t in self._dynamic_tools.get(plugin_name, [])
             if tool_name(t) != name]
 
+    # ==================== 记忆 provider 暂存（3.11） ====================
+
+    def register_memory_provider(self, plugin_name: str, provider) -> None:
+        """暂存插件编程式注册的记忆 provider（同名后写胜出）。"""
+        self._memory_providers[plugin_name] = provider
+
+    def get_memory_providers(self) -> dict:
+        """返回全部已注册记忆 provider 的 {插件名: provider} 快照。"""
+        return dict(self._memory_providers)
+
     # ==================== 系统提示补丁 ====================
 
     def add_system_prompt_patch(self, patch_id: str, text: str) -> None:
@@ -490,3 +579,39 @@ def set_default_manager(manager: PluginManager | None) -> None:
 def get_default_manager() -> PluginManager | None:
     """获取全局默认插件管理器（未初始化返回 None）。"""
     return _default_manager
+
+
+async def handle_plugins_command(text: str) -> tuple:
+    """处理控制台 !plugins 子命令，返回 (handled, result)。
+
+    用法：!plugins list | sync | enable <相对路径> | disable <相对路径>
+          | reload <插件名>；未知子命令返回用法说明。
+    """
+    parts = (text or "").strip().split()
+    if not parts or parts[0] != "!plugins":
+        return False, ""
+    manager = get_default_manager()
+    if manager is None:
+        return True, "插件系统未初始化"
+    sub = parts[1] if len(parts) > 1 else "help"
+    if sub == "list":
+        rows = manager.get_plugin_list()
+        if not rows:
+            return True, "当前没有已加载的插件"
+        lines = [f"{r['displayName']} v{r['version']}（{r['rel']}）"
+                 for r in rows]
+        return True, "\n".join(lines)
+    if sub == "sync":
+        await manager.sync_enabled_plugins()
+        return True, f"插件同步完成，当前共 {len(manager.get_plugin_list())} 个"
+    if sub in ("enable", "disable") and len(parts) >= 3:
+        result = await manager.apply_enabled(parts[2], sub == "enable")
+        return True, result
+    if sub == "reload" and len(parts) >= 3:
+        try:
+            await manager.reload(parts[2])
+        except KeyError as e:
+            return True, str(e)
+        return True, f"插件已热重载：{parts[2]}"
+    return True, ("用法：!plugins list | sync | enable <相对路径> "
+                  "| disable <相对路径> | reload <插件名>")

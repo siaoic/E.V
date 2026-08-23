@@ -15,7 +15,6 @@ PetEmotionActor（Live2D 桌宠）与 VtsEmotionActor（VTubeStudio）复用的�
 import json
 import os
 import random
-import re
 from typing import Dict, List
 
 from src.utils import console
@@ -114,16 +113,13 @@ class BaseEmotionActor:
         return await self._classifier.initialize()
 
     async def handle(self, text: str) -> str:
-        """处理一条输入：先匹配手动命令；否则分类情绪并播放映射。
+        """处理一条输入：分类情绪并播放映射。
 
         返回播放描述文本（空串表示未播放），供主循环提示用。
         """
         text = (text or "").strip()
         if not text:
             return ""
-        cmd = await self._try_command(text)
-        if cmd:
-            return cmd
         if not await self.initialize():
             return ""
         try:
@@ -175,41 +171,4 @@ class BaseEmotionActor:
                 no = 0
             if await self.play_motion(parts[0], no):
                 return f"动作 {motion}"
-        return ""
-
-    # ---------- 手动命令 ----------
-
-    async def _try_command(self, text: str) -> str:
-        m = re.match(r"^/(expr|motion|face)\s*(.*)$", text)
-        if not m:
-            return ""
-        cmd, arg = m.group(1), m.group(2).strip()
-        if cmd == "face" and arg == "list":
-            expr_txt = "、".join(self._expressions) or "（无）"
-            motion_txt = "、".join(
-                f"{g}×{n}" for g, n in self._motions.items()) or "（无）"
-            return f"表情：{expr_txt}；动作：{motion_txt}"
-        if cmd == "expr":
-            if not arg:
-                return "用法：/expr <表情名>"
-            ok = await self.play_expression(arg)
-            return f"已播放表情 {arg}" if ok else f"表情 {arg} 不存在（/face list 查看）"
-        if cmd == "motion":
-            parts = arg.split()
-            if not parts:
-                return "用法：/motion <动作组> [序号]"
-            # 先按文件名匹配（模型自带动作文件，MotionFile 组）：控制中心
-            # 动作卡片对自带动作文件发的是文件名（去扩展名，如 `wave`），
-            # 直接按组名播放会在 _motion_groups 里查不到（文件组的 key 是
-            # MotionFile）→ 试播静默失败。按名匹配失败再回落「组名 序号」。
-            if await self.play_motion_by_name(parts[0]):
-                return f"已播放动作 {parts[0]}"
-            no = 0
-            try:
-                no = int(parts[1]) if len(parts) > 1 else 0
-            except ValueError:
-                return f"动作序号无效：{parts[1]}"
-            ok = await self.play_motion(parts[0], no)
-            return (f"已播放动作 {parts[0]} #{no}" if ok
-                    else f"动作 {parts[0]} #{no} 不存在（/face list 查看）")
         return ""

@@ -8,6 +8,7 @@ Handler 管协作（输入/对话）、命令实现管控制台命令。外部�
 """
 
 import asyncio
+import json
 import logging
 
 from src.utils import config, console
@@ -43,9 +44,16 @@ class Application:
         except Exception:
             pass
         runtime = RuntimeContext(cfg)
-        # 命令注册表：先建好，各 handler 内部用 runtime.dispatch 派发
-        runtime._cmd_registry = runtime.build_command_registry()
         await runtime.setup()
+
+        # 3.15 开播就绪检查（只读旁路）：聚合探测 TTS/ASR/VTS/弹幕/记忆/MCP，
+        # 失败仅 WARN 不阻断启动（保持现状启动行为）
+        try:
+            from src.core import readiness
+            report = await readiness.check_readiness(runtime)
+            readiness.warn_failures(report)
+        except Exception as e:
+            console.dim(f"[就绪检查] 探针异常（忽略）：{e}")
 
         input_handler = InputHandler(runtime)
         chat_handler = ChatHandler(runtime)
@@ -70,12 +78,10 @@ class Application:
             await runtime.teardown()
 
     async def _main_loop(self, runtime, input_handler, chat_handler) -> None:
-        """主循环：等待输入 → 命令或对话。"""
-        quitting = False
-        show_prompt = True
-        while not quitting:
+        """主循环：等待输入 → 对话（无命令交互，Ctrl+C / EOF 退出）。"""
+        while True:
             try:
-                user_text = await input_handler.wait_input(show_prompt=show_prompt)
+                user_text = await input_handler.wait_input(show_prompt=True)
             except (EOFError, KeyboardInterrupt):
                 print()
                 break
@@ -83,17 +89,64 @@ class Application:
             # 键盘触发时监听已消费置 None；语音触发时保留挂起的监听
             # 供 _interruptible_converse 复用（此处无条件置 None 会泄漏
             # input() 阻塞线程，导致语音对话后键盘第一行输入被抢占吞掉）
-            show_prompt = True
             while user_text:
                 user_text = user_text.strip()
                 if not user_text:
                     break
-                if user_text in ("/quit", "/exit", "/q"):
-                    quitting = True
+                # 5.8 主播即时命令：!advice drop（话术即时负反馈），增量不影响普通对话
+                if user_text.startswith("!advice"):
+                    from src.llm.evolution.advice import handle_advice_command
+                    handled, result = handle_advice_command(user_text)
+                    if handled:
+                        console.ok(f"[命令] {result}")
+                        break
+                # 5.14 建议机制：!suggestions（查看/批准/否决）+ !blueprint（蓝图填槽），
+                # consent-first，均只读挂起建议或显式转定时任务
+                if user_text.startswith(("!suggestions", "!blueprint")):
+                    from src.agent.suggestions import handle_suggestions_command
+                    handled, result = handle_suggestions_command(user_text)
+                    if handled:
+                        console.ok(f"[命令] {result}")
+                        break
+                # 5.13 学习可视化：!journey 输出 ASCII 学习星图（纯读侧，不写盘）
+                if user_text.startswith("!journey"):
+                    from src.llm.evolution.graph import journey_timeline
+                    console.ok(f"[命令]\n{journey_timeline()}")
                     break
-                if await runtime.dispatch(user_text):
-                    show_prompt = False
+                # 3.15 开播自检：!doctor 手动触发完整就绪检查（复用 readiness
+                # 探针，只读旁路），输出 JSON 供排查依赖服务状态
+                if user_text.startswith("!doctor"):
+                    from src.core import readiness
+                    report = await readiness.check_readiness(runtime)
+                    console.ok("[命令] 自检结果:\n" + json.dumps(
+                        report, ensure_ascii=False, indent=2))
                     break
+                # 3.16 辅助调用记账：!perf 展示各辅助任务 token 与耗时
+                # （aux_usage.jsonl + evolution_usage.jsonl，均为旁路记账）
+                if user_text.startswith("!perf"):
+                    from src.llm.auxiliary import get_aux_usage_summary
+                    from src.llm.evolution.usage import usage_summary
+                    console.ok(f"[命令]\n{get_aux_usage_summary()}")
+                    console.ok(f"[命令]\n{usage_summary()}")
+                    break
+                # 5.15 技能创作引导：!learn <主题> 后台走 Agent 链路创作技能
+                # （created_by=user，curator 不自动策展）；后台执行不阻塞对话
+                if user_text.startswith("!learn"):
+                    topic = user_text[len("!learn"):].strip()
+                    if not topic:
+                        console.ok("[命令] 用法：!learn <主题>（如：!learn 怎么回应观众的夸夸）")
+                        break
+                    console.ok(f"[命令] 已启动技能创作（{topic}），后台运行中……")
+                    asyncio.create_task(runtime._run_learn_task(topic))
+                    break
+                # 插件管理：!plugins list / sync / enable / disable / reload
+                # （UI 控制中心启停插件时也发 !plugins sync 走同一路径）
+                if user_text.startswith("!plugins"):
+                    from plugins.manager import handle_plugins_command
+                    handled, result = await handle_plugins_command(user_text)
+                    if handled:
+                        console.ok(f"[命令] {result}")
+                        break
                 # 插件钩子：onUserInput（可注入背景上下文 / 改写消息 / 拦截不发给 AI）
                 if runtime.plugin_manager is not None:
                     event = UserInputEvent(user_text, "text")

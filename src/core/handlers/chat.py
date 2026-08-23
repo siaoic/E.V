@@ -20,6 +20,7 @@ class ChatHandler(BaseHandler):
         抢占（锁保护）。
         """
         from src.utils import console
+        from src.core.turn_lease import session_turn_gate
         runtime = self.runtime
         tts = runtime.tts
         face = runtime.face
@@ -27,6 +28,12 @@ class ChatHandler(BaseHandler):
         stt = runtime.stt_engine
         loop = asyncio.get_running_loop()
         console.chat()  # 回复起始换行
+        # 会话租约（3.10）：用户对话（键盘/语音同属本地会话）排队串行进入
+        # brain；默认关闭时 gate 直接放行，行为与现状完全一致
+        gate = session_turn_gate("local")
+        gate_ok = await gate.__aenter__()
+        if not gate_ok:
+            return False, "", None
         output_lock = get_output_lock()
         async with output_lock:
             set_output_owner("user")
@@ -123,6 +130,13 @@ class ChatHandler(BaseHandler):
                             pass
                         console.chat()  # 打断换行
                         buzz = buzz.strip()
+                        # 5.6 负反馈信号：播报被用户输入/语音打断 → 记录事件
+                        # （供复盘素材注入；失败静默，不影响打断链路）
+                        try:
+                            from src.llm.evolution.feedback import record_feedback
+                            record_feedback("interrupt", "interrupt", buzz)
+                        except Exception:
+                            pass
                         if stt_fut is not None and not stt_fut.done():
                             stt_fut.cancel()
                         if input_fut is not None and input_fut in done:
@@ -151,3 +165,5 @@ class ChatHandler(BaseHandler):
                     runtime._pending_stdin_fut = input_fut
                 set_output_owner(None)
                 set_global_state(STATE_IDLE)
+                if gate_ok:
+                    await gate.__aexit__(None, None, None)

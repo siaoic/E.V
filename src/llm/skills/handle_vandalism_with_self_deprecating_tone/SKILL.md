@@ -1,6 +1,7 @@
 ---
 name: handle_vandalism_with_self_deprecating_tone
-description: 用自嘲化解观众挑衅，保持人设不崩同时降低对抗感
+description: 用自嘲化解观众挑衅，保持人设不崩同时降低对抗感。
+version: 1.0.0
 ---
 
 # handle_vandalism_with_self_deprecating_tone

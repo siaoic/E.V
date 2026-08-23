@@ -121,6 +121,11 @@ class LLMBrain(BaseLLMAdapter, _InjectionMixin, _SummaryMixin):
         # 摘要同时写入记忆实现跨会话继承。
         self._session_summary: Optional[str] = None
         self._summary_task: Optional[asyncio.Task] = None
+        # L3 会话历史落盘任务（后台写 SQLite，失败不影响主链路）
+        self._session_persist_task: Optional[asyncio.Task] = None
+        # L4 治理（会后秘书）：低频后台复盘写 L2 MEMORY.md；轮次计数器防并发
+        self._curator_task: Optional[asyncio.Task] = None
+        self._curator_turn_count: int = 0
         # MCP 管理器（外部工具服务器）；None 表示禁用
         self.mcp = mcp
         # 插件系统（Application 启动后注入）：钩子分发与系统提示补丁
@@ -136,6 +141,7 @@ class LLMBrain(BaseLLMAdapter, _InjectionMixin, _SummaryMixin):
         # GEPA 进化策略段缓存（prompt_evo.py 写入 policy json，30s TTL）
         self._policy_cache_ts = 0.0
         self._policy_cache: str = ""
+        self._policy_previous: str = ""  # 5.16 A/B：上一版策略文本（盲测轮换用）
         # 模型路由进化（多臂老虎机）：配置多 LLM 服务时按历史表现选服务；
         # 未配置/未启用时 router 为 None，完全走原有单一 LLM 服务逻辑
         from src.llm.utils.model_router import get_router
@@ -194,9 +200,10 @@ class LLMBrain(BaseLLMAdapter, _InjectionMixin, _SummaryMixin):
         """合并 MCP + 本地工具（对标 live-2d(2) getMergedToolsList）。
 
         每轮对话实时获取一次（不缓存）：MCP 服务器可能在运行中动态增删工具。
+        AGENT_TOOLSET 非空时按工具集门控过滤（3.3）；空 = 全量（旧行为）。
         """
         from plugins.tools import get_merged_tools
-        return get_merged_tools(self.mcp)
+        return get_merged_tools(self.mcp, toolset=self.cfg.AGENT_TOOLSET)
 
     @staticmethod
     def _describe_mcp_servers(mcp) -> str:
@@ -226,6 +233,18 @@ class LLMBrain(BaseLLMAdapter, _InjectionMixin, _SummaryMixin):
                 console.warn("LLM 服务不支持 thinking 参数，降级为普通模式")
                 resp = self.client.chat.completions.create(**kwargs)
             message = resp.choices[0].message
+            # 记录非流式请求的 token 用量（含 cached_tokens，服务端支持时），
+            # 用于验收 prompt 前缀缓存命中率（对标 Hermes prompt cache 观测）
+            usage = getattr(resp, "usage", None)
+            if usage is not None:
+                prompt_tokens = getattr(usage, "prompt_tokens", None)
+                cached_tokens = 0
+                details = getattr(usage, "prompt_tokens_details", None)
+                if details is not None:
+                    cached_tokens = getattr(details, "cached_tokens", 0) or 0
+                console.dim(
+                    f"[LLM] 非流式兜底用量 prompt={prompt_tokens}"
+                    f" cached={cached_tokens or 0}")
             content = getattr(message, "content", None) or ""
             # reasoning_content 替代空 content（仅非流式且无 tool_calls；对标 llm-client.js L107-109）
             if (not content.strip()
@@ -238,6 +257,50 @@ class LLMBrain(BaseLLMAdapter, _InjectionMixin, _SummaryMixin):
         except Exception as e:
             console.error(f"获取最终回复失败：{e}")
         return "抱歉，任务太复杂了，我已经尽力了~"
+
+    async def _persist_session_history(self, rows: List[dict]) -> None:
+        """后台把本轮消息落盘到 L3 会话历史库（SQLite+FTS5）。
+
+        通过 asyncio.to_thread 丢线程池执行（sqlite 同步 IO 不阻塞事件循环），
+        落盘失败仅记日志，不影响对话主链路（历史库只是可追溯的旁路）。
+        """
+        try:
+            from src.llm.memory.session import _session_id, get_session_store
+            await asyncio.to_thread(
+                get_session_store().add_messages, _session_id(), rows)
+        except Exception as e:
+            console.warn(f"[会话历史] 落盘失败：{e}")
+
+    def _schedule_curator_review(self) -> None:
+        """低频调度会后复盘：每 MEMORY_CURATOR_INTERVAL 轮且无进行中任务时触发。
+
+        复盘提取是独立后台任务（额外 LLM 调用），不阻塞本轮回复。
+        """
+        if not getattr(self.cfg, "MEMORY_CURATOR_ENABLED", True):
+            return
+        interval = max(1, int(getattr(self.cfg, "MEMORY_CURATOR_INTERVAL", 10)))
+        self._curator_turn_count += 1
+        if self._curator_turn_count % interval != 0:
+            return
+        if self._curator_task is not None and not self._curator_task.done():
+            return
+        self._curator_task = asyncio.create_task(self._curator_review())
+
+    async def _curator_review(self) -> None:
+        """会后秘书：后台复盘最近对话，把值得长期记住的事实写入 L2。
+
+        写入走 curated store（去重 + 威胁扫描 + 字符上限），只影响下一次
+        会话的冻结快照；失败静默，不影响主链路。
+        """
+        from src.llm.memory.govern import run_curator
+
+        snapshot = list(self.history)
+        try:
+            written = await run_curator(self.client, self.cfg, snapshot)
+            if written:
+                console.ok(f"[记忆复盘] 已沉淀 {written} 条长期记忆（下次会话生效）")
+        except Exception as e:
+            console.warn(f"[记忆复盘] 失败：{e}")
 
     # ---------- 流式对话 ----------
 
@@ -290,14 +353,20 @@ class LLMBrain(BaseLLMAdapter, _InjectionMixin, _SummaryMixin):
         # 1) 记忆使用说明常驻系统提示（segments/files 两层渐进 + fail-open）；
         # 2) 检索结果按 memU hosts/retrieval.py _shape_for_agent 的三层形状注入。
         #    Embedding 不可用/失败时自动回退 LLM 检索（仍输出同形状）。
-        sys_content = self.cfg.SYSTEM_PROMPT
-        # 每轮对话实时合并一次工具列表（对标 live-2d(2) getMergedToolsList，不缓存）
+        # 系统提示分层组装（对标 Hermes「prompt caching is sacred」）：
+        # system 前缀保持字节稳定 → 服务端自动前缀缓存命中（降本/提速）。
+        # stable 段（人设/工具说明/长期记忆/技能/策略，会话内稳定或低频变化）
+        # 放前缀；volatile 段（知识/记忆检索/画像/插件本轮背景，每轮变化）放
+        # 尾部。各段内容与升级前完全一致，仅调整段间相对顺序；
+        # PROMPT_CACHE_MODE=0 时按原交错顺序拼装（行为与升级前一致）。
+        sections: List[tuple] = []  # (is_stable: bool, content: str)
+
+        # 1. 人设（stable）
+        sections.append((True, self.cfg.SYSTEM_PROMPT))
+        # 2. 工具能力引导 + 清单 + MCP 说明（stable，会话内稳定）
         tools = self._get_tools()
-        # 有工具可用时注入能力引导：角色人设（尤其 Neuro-sama 这类"不是通用
-        # 助手"人设）常导致模型遇到搜索/查资料需求直接道歉"我无法搜索"，
-        # 明明有 bing_search 等工具却从不调用。引导段只在有工具时注入。
         if tools:
-            sys_content += (
+            tool_block = (
                 """                
                 \n\n### 工具使用\n
                 你可以调用函数工具完成实际任务（联网搜索、抓取网页、查询时间天气、
@@ -305,24 +374,27 @@ class LLMBrain(BaseLLMAdapter, _InjectionMixin, _SummaryMixin):
                 事实核查的问题时，必须先调用下方列出的搜索/抓取网页工具获取真实
                 结果再回答，不要说自己无法联网搜索——工具列表已提供给你。"""
             )
-            # 工具使用时机清单：逐条列出当前可用工具 + 触发时机（与 function
-            # calling 同源，弥补引导段不列具体清单、模型不知何时该调哪个的缺口）
             from plugins.tools import render_tool_guide
             tool_guide = render_tool_guide(tools)
             if tool_guide:
-                sys_content += "\n\n" + tool_guide
-            # 注入 MCP 服务器能力说明（mcp_config.json 的 description 字段），
-            # 让模型明确知道每台服务器能做什么、有哪些工具可调用
+                tool_block += "\n\n" + tool_guide
             mcp_desc = self._describe_mcp_servers(self.mcp)
             if mcp_desc:
-                sys_content += "\n\n### 可用的联网服务器\n" + mcp_desc
-        # 知识库注入：信号闸门命中才追加权威设定段（防幻觉；闲聊/无关消息
-        # 返回空串不注入，省 Token）。数据懒加载，进程内缓存一次。
+                tool_block += "\n\n### 可用的联网服务器\n" + mcp_desc
+            sections.append((True, tool_block))
+        # 3. 知识库（volatile）：信号闸门命中才追加权威设定段（防幻觉；
+        #    闲聊/无关消息返回空串不注入，省 Token）。数据懒加载，进程内缓存一次。
         knowledge_section = self._knowledge_section(user_text)
         if knowledge_section:
-            sys_content += "\n\n" + knowledge_section
+            sections.append((False, knowledge_section))
+        # 4. L2 内建长期记忆（MEMORY.md/USER.md 冻结快照，跨会话持久；stable）
+        curated_section = self._curated_memory_section()
+        if curated_section:
+            sections.append((True, curated_section))
+        # 5. 记忆召回（volatile）：记忆使用说明 + 本轮检索结果。写入完全交给
+        #    管家模型（ButlerAgent 每轮从对话提取，参照 <memory> 标签）
         if self.cfg.MEMORY_ENABLED:
-            sys_content += "\n\n" + memory.STANDING_INSTRUCTION
+            mem_block = memory.STANDING_INSTRUCTION
             try:
                 # 硬超时熔断：召回超过 1.5s 直接跳过注入，优先保障响应速度
                 mem_ctx = await asyncio.wait_for(
@@ -330,40 +402,67 @@ class LLMBrain(BaseLLMAdapter, _InjectionMixin, _SummaryMixin):
             except asyncio.TimeoutError:
                 console.warn("[记忆检索] 召回超时（>1.5s），熔断跳过本次注入")
                 mem_ctx = ""
-            # 记忆写入完全交给管家模型（ButlerAgent 每轮从对话提取，参照
-            # <memory> 标签（曾在此注入写标签指令，主模型经常漏写/写错）
             if mem_ctx:
-                sys_content += (
+                mem_block += (
                     "\n\n### 检索到的记忆（segments / files，按相关度排序）\n"
                     + mem_ctx
                 )
-        # 注入观众画像（进化引擎复盘的长期事实，关键词召回补充向量记忆）
+            sections.append((False, mem_block))
+        # 6. 观众画像（volatile）：进化引擎复盘的长期事实，关键词召回补充向量记忆
+        # 5.1：画像/技能索引/话术建议/GEPA 策略统称「进化注入段」——
+        # EVOLUTION_INJECT_IN_USER=1 时迁移到 user 消息尾部（近因效应 + 保持
+        # system 前缀字节稳定以命中提示缓存，对标 hermes「可变内容注入 user 消息」）；
+        # =0 时回退旧行为（按原 stable/volatile 分组拼进 system）。
+        user_tail: List[str] = []
+
+        def _inject_evolution(block: str, stable: bool) -> None:
+            if config.cfg.EVOLUTION_INJECT_IN_USER:
+                user_tail.append(block)
+            else:
+                sections.append((stable, block))
+
         profile_section = self._profile_section(user_text)
         if profile_section:
-            sys_content += "\n\n" + profile_section
-        # 注入技能段（严格参照 Muika agent.py：系统提示 = 人设 + Available skills 段）。
-        # 只列技能名+描述（轻量），完整指令由 load_skill 工具按需加载。
+            _inject_evolution(profile_section, False)
+        # 7. 技能段（stable）：只列技能名+描述（轻量），完整指令由 load_skill
+        #    工具按需加载（严格参照 Muika agent.py：系统提示 = 人设 + Available skills）
         skills_section = get_skill_manager().render_prompt_section()
         if skills_section:
-            sys_content += "\n\n" + skills_section
-        # 注入生效中的话术建议（进化引擎沉淀，到期由复盘回评续期/移除）
+            _inject_evolution(skills_section, True)
+        # 8. 生效中的话术建议（stable，低频变化）：进化引擎沉淀，到期由复盘回评续期/移除
         advice_section = self._active_advice_section()
         if advice_section:
-            sys_content += "\n\n" + advice_section
-        # 注入 GEPA 进化策略段（对标 hermes 的 GEPA：变异 → 评审择优落盘，
-        # 与话术建议互补——策略是长期行为准则，建议是短期话术优化）
+            _inject_evolution(advice_section, True)
+        # 9. GEPA 进化策略段（stable，低频变化）：变异 → 评审择优落盘，
+        #    与话术建议互补——策略是长期行为准则，建议是短期话术优化
         policy_section = self._policy_section()
         if policy_section:
-            sys_content += "\n\n" + policy_section
-        # 插件注入：on_user_input 本轮背景上下文（一次性）+ add_system_prompt_patch 长期提示
+            _inject_evolution(policy_section, True)
+        # 10. 插件注入：on_user_input 本轮背景上下文（volatile，一次性）
+        #     + add_system_prompt_patch 长期提示（stable）
         if self.plugin_manager is not None:
             turn_contexts = self._pop_turn_context()
             if turn_contexts:
-                sys_content += ("\n\n### 插件补充背景（仅本轮对话参考，不要向用户复述）\n"
-                                + "\n".join(f"- {t}" for t in turn_contexts))
+                sections.append((
+                    False,
+                    "### 插件补充背景（仅本轮对话参考，不要向用户复述）\n"
+                    + "\n".join(f"- {t}" for t in turn_contexts),
+                ))
             patch_section = self.plugin_manager.system_prompt_patch_section()
             if patch_section:
-                sys_content += "\n\n" + patch_section
+                sections.append((True, patch_section))
+
+        if self.cfg.PROMPT_CACHE_MODE:
+            # 缓存友好：stable 段作前缀（字节稳定可命中服务端前缀缓存），
+            # volatile 段作尾部（每轮重建，只影响后缀）
+            stable_block = "\n\n".join(s for stable, s in sections if stable)
+            volatile_block = "\n\n".join(s for stable, s in sections if not stable)
+            sys_content = stable_block
+            if volatile_block:
+                sys_content += "\n\n" + volatile_block
+        else:
+            # 回退模式：原交错顺序，与升级前字节一致
+            sys_content = "\n\n".join(s for _, s in sections)
         messages: List[dict] = [{"role": "system", "content": sys_content}]
         # 注入早期对话摘要（历史裁剪时后台压缩生成，跨会话继承）
         summary = self._consume_summary()
@@ -375,6 +474,15 @@ class LLMBrain(BaseLLMAdapter, _InjectionMixin, _SummaryMixin):
         # agent 主动发言：只带精简历史快照（最近 N 条），降低 token 消耗
         messages.extend(history if history is not None else self.history)
         messages.append({"role": "user", "content": user_text})
+        # 5.1：进化注入段（画像/技能索引/话术建议/GEPA 策略）作为独立 system
+        # 消息追加在 user 之后（与技能预判提示段同模式：近因效应，且不改动
+        # system 前缀字节，最大化提示缓存命中；段内容与旧拼装完全一致）
+        if user_tail:
+            messages.append({
+                "role": "system",
+                "content": "### 技能与进化上下文（供本轮参考，不要向用户复述）\n\n"
+                           + "\n\n".join(user_tail),
+            })
         # 技能意图预判（本地 match_intent，零依赖）：命中时在 user 后追加
         # 提示段（近因效应），要求模型优先 load_skill——主动发言是 AI 内部
         # 指令非用户输入，不参与预判，避免误匹配。
@@ -795,6 +903,33 @@ class LLMBrain(BaseLLMAdapter, _InjectionMixin, _SummaryMixin):
                 self._summary_task = asyncio.create_task(
                     self._summarize_dropped(dropped)
                 )
+
+        # ===== L3 会话历史落盘（Hermes 式 state.db，SQLite+FTS5 全文检索）=====
+        # 只落盘本轮新增消息（与 history 相同的起点），完整保留工具调用链
+        # （tool_call 序列化）；注入的内部指令 user 消息不入库。后台任务执行，
+        # 失败仅记日志，不影响主链路（默认开启，MEMORY_HISTORY_ENABLED 关闭跳过）。
+        if (final_reply is not None
+                and getattr(self.cfg, "MEMORY_HISTORY_ENABLED", True)):
+            start = 1 + len(history) if history is not None else 1
+            new_rows = [
+                {"role": m.get("role"),
+                 "content": (_summarize_tool_content(m["content"])
+                             if m.get("role") == "tool"
+                             else (m.get("content") or "")),
+                 "tool_call": json.dumps(m.get("tool_calls"), ensure_ascii=False)
+                              if m.get("tool_calls") else None}
+                for m in messages[start:]
+                if m.get("role") in ("user", "assistant", "tool")
+                and not (m.get("role") == "user"
+                         and m.get("content") == user_text)
+            ]
+            if new_rows:
+                self._session_persist_task = asyncio.create_task(
+                    self._persist_session_history(new_rows)
+                )
+        # L4 治理（会后秘书）：低频后台复盘，把值得长期记住的事实写入 L2。
+        # 冻结快照保证当前会话 prompt 不变，沉淀只在下一次会话生效。
+        self._schedule_curator_review()
 
         # 打印 LLM 性能报告
         tracker.print_report()

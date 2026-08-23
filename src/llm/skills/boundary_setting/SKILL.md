@@ -1,6 +1,7 @@
 ---
 name: boundary_setting
-description: Establishing firm conversational limits without engaging in circular conflict.
+description: Set firm conversational limits, avoid circular conflict.
+version: 1.0.0
 ---
 
 # Boundary Setting

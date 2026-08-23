@@ -118,6 +118,67 @@ _LOCAL_TOOL_DEFS: List[dict] = [
     {
         "type": "function",
         "function": {
+            "name": "memory",
+            "description": "把稳定事实保存到纯文本长期记忆（MEMORY.md / USER.md），"
+                           "跨会话持久并在每轮对话注入系统提示，因此条目要短小精悍、"
+                           "高价值。按 action 操作：add 新增一条；replace 用唯一子串"
+                           "定位旧条目并替换（若匹配多条会报错，请用更具体的子串）；"
+                           "remove 用唯一子串删除。建议用 operations 数组一次批量完成"
+                           "「删旧的 + 写新的」（原子应用，最终态才查字符上限）。"
+                           "何时用：用户透露稳定的偏好/习惯/个人信息、或你学到关于"
+                           "观众/环境的持久事实时主动保存；不要存临时聊天内容。"
+                           "target：memory = 你自己的笔记；user = 对观众的认知。",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "action": {
+                        "type": "string",
+                        "enum": ["add", "replace", "remove"],
+                        "description": "单操作模式的动作；使用 operations 批量时省略",
+                    },
+                    "target": {
+                        "type": "string",
+                        "enum": ["memory", "user"],
+                        "description": "memory = AI 笔记；user = 观众认知（默认 memory）",
+                    },
+                    "content": {
+                        "type": "string",
+                        "description": "条目内容（add/replace 必填）",
+                    },
+                    "old_text": {
+                        "type": "string",
+                        "description": "replace/remove 必填：定位旧条目的唯一子串",
+                    },
+                    "operations": {
+                        "type": "array",
+                        "description": "批量模式：一次应用多项操作（全有或全无）",
+                        "items": {
+                            "type": "object",
+                            "properties": {
+                                "action": {
+                                    "type": "string",
+                                    "enum": ["add", "replace", "remove"],
+                                },
+                                "content": {
+                                    "type": "string",
+                                    "description": "add/replace 的条目内容",
+                                },
+                                "old_text": {
+                                    "type": "string",
+                                    "description": "replace/remove 的定位子串",
+                                },
+                            },
+                            "required": ["action"],
+                        },
+                    },
+                },
+                "required": ["target"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
             "name": "play_sound_effect",
             "description": "播放音效来增强对话的趣味性和表现力（如惊讶、爆炸、wow）。"
                            "想播音效时可先调用 list_sound_effects 查看可用音效，再按编号播放；"
@@ -163,6 +224,48 @@ _LOCAL_TOOL_DEFS: List[dict] = [
                            "当天已有日记会自动合并重写不丢内容）。当用户要求"
                            "「写日记」「记日记」「写今天的日记」「记录今天」时调用。",
             "parameters": {"type": "object", "properties": {}},
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "session_search",
+            "description": "精确检索历史会话消息（区别于记忆的模糊语义召回）。"
+                           "当需要回忆「之前聊过什么/谁说过什么/某句话原话」这类"
+                           "精确词、人名、梗时调用，返回匹配的历史消息 JSON。"
+                           "mode：DISCOVER 按关键词搜索（默认）；READ 按消息 id 读单条；"
+                           "SCROLL 按会话时间线翻页（配 session_id/before_ts）；"
+                           "BROWSE 列出指定会话最近消息。",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "query": {
+                        "type": "string",
+                        "description": "搜索关键词（DISCOVER 必填；中文短词如人名、梗均可命中）",
+                    },
+                    "mode": {
+                        "type": "string",
+                        "enum": ["DISCOVER", "READ", "SCROLL", "BROWSE"],
+                        "description": "检索模式，默认 DISCOVER",
+                    },
+                    "session_id": {
+                        "type": "string",
+                        "description": "会话标识（SCROLL/BROWSE 用）",
+                    },
+                    "limit": {
+                        "type": "integer",
+                        "description": "返回条数上限（1-50，默认 10）",
+                    },
+                    "before_ts": {
+                        "type": "string",
+                        "description": "时间线翻页锚点（SCROLL：只取早于此时间戳的消息）",
+                    },
+                    "msg_id": {
+                        "type": "integer",
+                        "description": "消息 id（READ 模式用）",
+                    },
+                },
+            },
         },
     },
 ]

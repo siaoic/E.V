@@ -1,4 +1,4 @@
-"""记忆系统：后端抽象 + Mem0 判决链 + 命名空间/衰减/防护。
+"""记忆系统：后端抽象 + Mem0 判决链 + 命名空间/衰减/防护 + L4 Provider 编排。
 
 分层：
 - base.py         MemoryBackend ABC + 文本格式化工具
@@ -8,12 +8,18 @@
 - namespace.py    命名空间与主题推断（纯规则）
 - decay.py        按 topic 差异化时间衰减（后端无关）
 - lore_guard.py   Lore 泄漏防护 + 记忆注入铁律（防 OOC）
+- curated.py      L2 纯文本长期记忆（MEMORY.md/USER.md + 冻结快照）
+- session.py      L3 会话历史（SQLite + FTS5 全文检索）
+- provider.py     L4 MemoryProvider ABC（可插拔语义后端）
+- manager.py      L4 MemoryManager 编排（注册/召回/写入/边界事件）
+- memu_provider.py memU 内置 Provider 适配（观察现有直连调用链）
 
 接入策略（硬约束：默认行为 100% 不变）：
 - 现有路径（tools.memory.memory 模块级函数）不受影响；
 - MEMORY_BACKEND=memu（默认）继续走模块级函数；
 - MEMORY_BACKEND=lite 时才构造 LiteMemoryBackend；
-- MEMORY_LIFECYCLE_ENABLED=true 时判决链接入现有 commit_recall_files。
+- MEMORY_LIFECYCLE_ENABLED=true 时判决链接入现有 commit_recall_files；
+- L2/L3/L4 全部默认开启且为纯增量（不改变任何现有链路行为）。
 """
 
 from __future__ import annotations
@@ -22,9 +28,12 @@ from typing import Optional
 
 from src.llm.memory.base import MemoryBackend, recall_as_text
 from src.llm.memory.lifecycle import LifecycleEngine
+from src.llm.memory.manager import MemoryManager, get_memory_manager
+from src.llm.memory.provider import MemoryProvider
 
 __all__ = [
     "MemoryBackend", "LifecycleEngine", "recall_as_text",
+    "MemoryProvider", "MemoryManager", "get_memory_manager",
     "create_memory_backend",
 ]
 

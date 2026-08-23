@@ -1,6 +1,7 @@
 ---
 name: stream_chat_anti_avoidance
-description: Respond to vague or circular questions by demanding specific input while maintaining persona.
+description: Demand specific input for vague questions, keep persona.
+version: 1.0.0
 ---
 
 # stream-chat-anti-avoidance

@@ -7,7 +7,8 @@
   PCM 边播放——首块到达即出声，首字延迟只受「首块合成」限制；
 - 词级时间戳字幕随流按块返回（相对整句起点），逐块入队锚定真实开播时刻
   逐词推进（官方示例 subtitlesqueue.add 的 1:1 语义）；
-- 流式失败或音频退化时回退 /tts/batch 整句合成（_synth_one 重试兜底），
+- 流式失败或音频退化时重试一次 /tts/stream（GSV 采样随机，重试大概率
+  正常），仍失败则丢弃该句（宁缺毋怪）——只走流式，不回退 /tts/batch；
   磁盘缓存命中时直接整句播放（缓存无词级时间戳，字幕降级整句显示）；
 - 未连接服务时 start() 返回 False，speak/drain/stop 静默降级（主程序只走字幕）。
 
@@ -32,6 +33,7 @@ import soundfile as sf
 
 from src.utils import console
 from src.tts.player import TTSPlayer
+from src.tts.echo import remember_spoken  # 3.14：播报文本记录（回声防护比对基准）
 from src.adapter.tts import BaseTTSAdapter
 from plugins.tools.sfx import play_sfx_sequence
 
@@ -279,9 +281,9 @@ _BATCH_MAX = 1
 _STREAM_CHUNK = 25
 _STREAM_OVERLAP = 5
 
-# 合成参数（服务端 /tts/batch 透传到 infer_batched_async）：
-# 采用 GSV-TTS-Lite 官方 API 文档推荐值——top_k=5/top_p=0.9 比库默认
-# top_k=15/top_p=1.0 采样更收敛，配合 repetition_penalty 抑制循环怪音。
+# 合成参数（服务端 /tts/stream 透传到 infer_stream）：采用 GSV-TTS-Lite
+# 官方 API 文档推荐值——top_k=5/top_p=0.9 比库默认 top_k=15/top_p=1.0 采样
+# 更收敛，配合 repetition_penalty 抑制循环怪音。
 _SYNTH_PARAMS = {
     "top_k": 5,
     "top_p": 0.9,
@@ -305,9 +307,9 @@ class TTSEngine(BaseTTSAdapter):
 
     服务端为 tools/gsv_tts/API/fastapi_server_example.py（tts.bat 启动）：
     - /tts/stream Token 级流式合成（官方 infer_stream），SSE 返回音频块
-      + 词级时间戳，首块到达即播放；
-    - /tts/batch 整句批量合成，返回 output 目录下的文件名列表；
-    - /audio/{filename} 下载 wav 字节流（批量路径兜底用）。
+      + 词级时间戳，首块到达即播放（主播说话只走这条路径）；
+    - /tts/batch + /audio/{filename} 整句批量合成下载（仅 provider.synthesize
+      的对外交付接口复用，主播说话不再回退批量路径）。
     未连接服务时 start() 返回 False，speak 等接口静默降级（不报错）。
     """
 
@@ -563,7 +565,7 @@ class TTSEngine(BaseTTSAdapter):
         self._interrupted = False
         self._player.clear_interrupt()
 
-    # ---------- 合成（/tts/stream 流式 + /tts/batch 兜底，串行泵） ----------
+    # ---------- 合成（/tts/stream 流式，串行泵） ----------
 
     async def speak(self, text: str, sfx: str = "") -> None:
         """把一句话送入合成队列（立即返回，不阻塞 LLM 流）。
@@ -583,6 +585,7 @@ class TTSEngine(BaseTTSAdapter):
         if not _HAS_CONTENT_RE.search(text):
             return  # 纯符号碎片：防 GPT-SoVITS 合成退化
         text = _collapse_tts_text(text)
+        remember_spoken(text)  # 3.14：记录最近播报文本（stt.py 回声防护比对基准）
         await self._pending.put((text, sfx))
         if self._pump_task is None or self._pump_task.done():
             self._pump_task = asyncio.create_task(self._pump())
@@ -616,26 +619,29 @@ class TTSEngine(BaseTTSAdapter):
                 return  # 空闲退出
 
     async def _synth_remote(self, texts: list, gen: int) -> None:
-        """逐句合成并播放（优先 Token 级流式，退化/失败回退整句批量）。
+        """逐句合成并播放（只走 Token 级流式）。
 
         流式路径 POST /tts/stream（官方 infer_stream）：首块到达即出声，
         首字延迟只受首块合成+传输耗时限制。退化（拖长音怪叫/尖峰噪声，
-        与文本无关的 GPT 采样随机崩坏）或网络失败时回退 _synth_one 重试
-        （内部带重试 + 退化丢弃兜底），绝不把怪叫播完整段。
+        与文本无关的 GPT 采样随机崩坏）或网络失败时在 _synth_stream 内部
+        重试一次，仍失败则丢弃该句，绝不把怪叫播完整段、也不回退批量。
         """
         for text, sfx in texts:
             if gen != self._gen:
                 return  # 打断：放弃剩余
             await self._synth_stream(text, gen, sfx)
 
-    async def _synth_stream(self, text: str, gen: int, sfx: str = "") -> None:
+    async def _synth_stream(
+        self, text: str, gen: int, sfx: str = "", _retried: bool = False
+    ) -> None:
         """Token 级流式合成一句（POST /tts/stream，SSE 边收边播）。
 
         对齐官方示例语义：每块音频到达即播放（audio.play()），每块随带的
         词级时间戳字幕增量立即入队（subtitlesqueue.add），句首块起即与
         播放逐词同步。缓存命中直接播放；否则流式合成，块间无重叠可直接
         拼接，整句写磁盘缓存（保持高频句只合成一次）。流式失败/无输出/
-        产物退化时回退 _synth_fallback 整句批量合成兜底。
+        产物退化时重试一次本路径（GSV 采样随机，重试大概率正常），仍失败
+        则丢弃该句——只走 /tts/stream，不回退 /tts/batch。
         """
         speaker_audio, prompt_audio, prompt_text = self._ref_params()
         key = _tts_cache_key(text, speaker_audio, prompt_audio, prompt_text)
@@ -708,12 +714,13 @@ class TTSEngine(BaseTTSAdapter):
                 if _is_degraded_audio(
                     len(audio_data) / 32000, len(text)
                 ) or _has_burst_noise(audio_data):
-                    # 拖长音怪叫/尖峰噪声（采样随机崩坏）：回退整句重合成重播
+                    # 拖长音怪叫/尖峰噪声（采样随机崩坏）：重试一次流式重播
                     console.warn(
                         f"TTS 流式检测到异常合成（文本 {len(text)} 字、音频 "
-                        f"{len(audio_data) / 32000:.1f}s），回退整句合成…"
+                        f"{len(audio_data) / 32000:.1f}s），重试…"
                     )
-                    await self._synth_fallback(text, gen)
+                    if not _retried:
+                        await self._synth_stream(text, gen, sfx, _retried=True)
                 else:
                     wav_bytes = await asyncio.to_thread(
                         _encode_wav_bytes, audio_data, 32000
@@ -723,23 +730,19 @@ class TTSEngine(BaseTTSAdapter):
         except Exception as e:
             self._player.abort_stream()  # 失败：终止增量会话
             if gen == self._gen:
-                console.dim(f"TTS 流式合成失败（{e}），回退整句合成…")
-                await self._synth_fallback(text, gen)
-
-    async def _synth_fallback(self, text: str, gen: int) -> None:
-        """流式失败/退化兜底：整句批量合成（_synth_one 带重试+退化丢弃）后整体播放。"""
-        retried = await self._synth_one(text, gen)
-        if retried is not None and gen == self._gen:
-            audio_data, sr2 = retried
-            self._player.emit(audio_data, sr2, text, _fallback_subtitles(text), gen)
+                console.dim(f"TTS 流式合成失败（{e}）")
+                if not _retried:
+                    # 采样随机/瞬时网络抖动：重试一次，仍失败则丢弃该句
+                    await self._synth_stream(text, gen, sfx, _retried=True)
 
     async def _synth_one(self, text: str, gen: int):
-        """回退路径：单独批量合成一句并下载解码，返回 (audio_data, sr)。
+        """整句批量合成一句并下载解码，返回 (audio_data, sr)。
 
-        合成失败（服务端偶发 500/网络抖动）或音频退化（时长异常 = 拖长音
-        怪叫，与文本无关的 GPT 采样随机崩坏）时的兜底。合成失败或退化都
+        仅供 provider.synthesize（一次性产出 wav 字节的对外交付接口）复用，
+        主播说话不再走此路径。合成失败（服务端偶发 500/网络抖动）或音频
+        退化（时长异常 = 拖长音怪叫，与文本无关的 GPT 采样随机崩坏）都
         重试一次——GSV 采样随机，重试大概率正常；两次仍失败返回 None，由
-        调用方放弃该句，绝不把怪叫播出去。命中磁盘缓存时跳过合成直接解码。
+        调用方放弃，绝不把怪叫交付出去。命中磁盘缓存时跳过合成直接解码。
         """
         speaker_audio, prompt_audio, prompt_text = self._ref_params()
         payload = {

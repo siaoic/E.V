@@ -46,6 +46,9 @@ _SLOW_RETRIEVE_TIMEOUT = 5.0
 _MAX_TURNS = 60
 # 记忆文件过期天数（超期未更新则被衰减清理）
 _MEMORY_TTL_DAYS = int(os.getenv("MEMORY_TTL_DAYS", "60"))
+# 经验教训（lesson 类，track=lesson）过期天数：比普通记忆衰减更快
+# （5.9 差异化衰减，复盘经验时效性强，不必留 60 天）
+_MEMORY_LESSON_TTL_DAYS = int(os.getenv("MEMORY_LESSON_TTL_DAYS", "30"))
 # 语义去重阈值（向量余弦相似度）：新记忆与同归属者已有记忆的相似度达到
 # 该值视为近似重复跳过——防止同一事实的不同说法反复入库污染检索
 _SEMANTIC_DUP_THRESHOLD = 0.9
@@ -896,6 +899,15 @@ class MemoryManager:
                 self._turns = self._turns[-_MAX_TURNS:]
             if self.started_at is None and self._turns:
                 self.started_at = self._turns[0]["timestamp"]
+        # 会话落库旁路（3.7，ENABLE_SESSION_SEARCH 门控）：只录 user/assistant
+        # 文本（record_turn_queued 内部过滤），失败静默，绝不阻塞对话主流程
+        try:
+            from src.llm.sessiondb import record_turn_queued
+            record_turn_queued(
+                self.started_at or "boot", role, str(content or "").strip(),
+                datetime.now().isoformat())
+        except Exception:
+            pass
 
     # ---------- 归属与文件工具 ----------
 
@@ -1334,18 +1346,26 @@ class MemoryManager:
         return len(id_list)
 
     def decay_stale_memories(self) -> int:
-        """清理超过 TTL 未更新的记忆，返回清理条数。"""
+        """清理超过 TTL 未更新的记忆，返回清理条数。
+
+        5.9 差异化衰减：lesson 类（track=lesson）用更短 TTL
+        （MEMORY_LESSON_TTL_DAYS 默认 30 天），普通记忆仍用 MEMORY_TTL_DAYS（60 天）。
+        """
         service = self._ensure_service()
         with self._io_lock:
             rows = service.database.recall_file_repo.list_recall_files(
                 {"user__in": [_USER_DEFAULT, _USER_SELF]}
             ).values()
-            cutoff = datetime.now(timezone.utc) - timedelta(days=_MEMORY_TTL_DAYS)
-            stale = [
-                r for r in rows
-                if r.updated_at is not None
-                and _to_utc(r.updated_at) < cutoff
-            ]
+            now = datetime.now(timezone.utc)
+            stale = []
+            for r in rows:
+                if r.updated_at is None:
+                    continue
+                ttl = (_MEMORY_LESSON_TTL_DAYS
+                       if getattr(r, "track", "memory") == "lesson"
+                       else _MEMORY_TTL_DAYS)
+                if _to_utc(r.updated_at) < now - timedelta(days=ttl):
+                    stale.append(r)
             if not stale:
                 return 0
             id_list = [r.id for r in stale]

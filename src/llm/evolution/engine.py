@@ -12,6 +12,7 @@
 from __future__ import annotations
 
 import asyncio
+import re
 import time
 
 from openai import AsyncOpenAI
@@ -26,6 +27,7 @@ from .profile import ProfileEvolution
 from .prompts import (
     CFG, _HERMES_COMBINED_REVIEW_PROMPT, _REVIEW_OUTPUT_PROTOCOL,
 )
+from .provenance import background_review_context
 from .skills import SkillEvolution
 from .topics import TopicEvolution
 
@@ -34,6 +36,46 @@ def _format_turns(turns: list[dict]) -> str:
     """把对话轮次格式化为复盘素材文本（区分弹幕/主播/AI 三方角色）。"""
     from tools.memory import memory
     return memory.format_turns_text(turns)
+
+
+# 5.9 禁止沉淀清单（对齐 hermes prompt 纪律）：命中即丢弃，不写永久经验。
+# 环境依赖失败、负面断言、未解决失败会固化成「工具坏了」类拒绝长期误导。
+_BLOCKED_LESSON_PATTERNS = (
+    r"未找到|找不到|无法连接|连接失败|连接不上|连接超时",
+    r"command not found|no such file|no such directory|not found",
+    r"不可用|坏了|不能用|无法使用|用不了|打不开",
+    r"未解决|没有解决|待解决|没解决|还没解决",
+)
+_BLOCKED_LESSON_RE = re.compile("|".join(_BLOCKED_LESSON_PATTERNS))
+
+
+def _is_blocked_lesson(text: str) -> bool:
+    """经验教训文本是否命中禁止沉淀清单（环境失败/负面断言/未解决）。"""
+    return bool(_BLOCKED_LESSON_RE.search(text))
+
+
+def _maybe_suggest_review() -> None:
+    """复盘落地后提示「周期性回顾」建议（5.14 接线，consent-first）。
+
+    只在确有进化沉淀时挂一条建议（source=evolution），dedup 锁死保证只
+    建议一次；主播 !suggestions accept 后才转 scheduler 定时任务，
+    绝不自动建 job。任何失败静默，不影响复盘。
+    """
+    try:
+        from src.agent.suggestions import add_suggestion
+        add_suggestion(
+            title="周期性进化回顾",
+            description="定期复盘画像/经验/话术/技能的变化，持续校准人设与策略",
+            source="evolution",
+            job_spec={
+                "when": "daily 09:30",
+                "task": "回顾最近一段时间的自我进化沉淀（画像/经验/话术/技能变化），"
+                        "总结得失并输出改进建议",
+            },
+            dedup_key="evolution:periodic-review",
+        )
+    except Exception:
+        pass
 
 
 class EvolutionEngine:
@@ -49,6 +91,7 @@ class EvolutionEngine:
         self._last_review = 0.0      # 上次复盘时间戳（节流用）
         self._last_prune = 0.0       # 上次技能库审阅时间戳（节流用）
         self._turns_since_review = 0  # 上次复盘后新增的对话轮次
+        self._last_active_at = 0.0   # 5.4：最近一次活跃对话时间（空闲门控用）
         self._review_lock = asyncio.Lock()  # 串行化对话后复盘与定期复盘
         self._client: AsyncOpenAI | None = None
         self._model = ""
@@ -127,6 +170,8 @@ class EvolutionEngine:
         self._turns_since_review += 1
         if not turns:
             return
+        # 5.4：有真实对话到达 → 刷新活跃时间（空闲门控依据）
+        self._last_active_at = time.time()
         async with self._review_lock:
             # 拿锁后二次判定（与定期提示并发时防止重复触发）
             now = time.time()
@@ -141,7 +186,9 @@ class EvolutionEngine:
             except Exception as e:
                 console.warn(f"[进化] 复盘失败（不影响运行）：{e}")
                 METRICS.incr(EVENT_REVIEW_FAILED)
-            await self._maybe_run_prune()
+            # 对话刚结束：技能库审阅要求"空闲 EVOLUTION_CURATOR_IDLE_HOURS"才跑，
+            # 避免开播活跃期后台大动作（定期 tick 路径不受此门控，见 periodic_tick）
+            await self._maybe_run_prune(require_idle=True)
 
     async def periodic_tick(self, turns: list[dict],
                             proactive=None) -> None:
@@ -162,6 +209,12 @@ class EvolutionEngine:
                 return
             if self._turns_since_review < 1:
                 return  # 上次复盘后没有新对话，不重复复盘
+            # 5.12 活跃抑制：距最后一条真实对话太近 → 本轮跳过，
+            # 避免对话间隙/开播活跃期反复触发（低频复盘让位给在线互动）；
+            # 0 表示不抑制（默认 300s，回退默认参数即现状行为）
+            min_active_gap = getattr(cfg, "EVOLUTION_MIN_ACTIVE_GAP", 300) or 0
+            if min_active_gap > 0 and now - self._last_active_at < min_active_gap:
+                return
             self._turns_since_review = 0
             self._last_review = now
             try:
@@ -169,7 +222,7 @@ class EvolutionEngine:
             except Exception as e:
                 console.warn(f"[进化] 定期复盘失败（不影响运行）：{e}")
                 METRICS.incr(EVENT_REVIEW_FAILED)
-            await self._maybe_run_prune()
+            await self._maybe_run_prune(require_idle=False)
             await self._maybe_run_prompt_evo(turns[-12:])
 
     async def _maybe_run_prompt_evo(self, turns: list[dict]) -> None:
@@ -185,15 +238,25 @@ class EvolutionEngine:
         except Exception as e:
             console.dim(f"[进化] GEPA 提示词进化跳过：{e}")
 
-    async def _maybe_run_prune(self) -> None:
-        """节流执行技能库审阅（每天至多一次，失败不影响运行）。"""
+    async def _maybe_run_prune(self, *, require_idle: bool = False) -> None:
+        """节流执行技能库审阅（每天至多一次，失败不影响运行）。
+
+        5.4 空闲门控：require_idle=True（对话后路径）时要求距上次活跃对话超过
+        EVOLUTION_CURATOR_IDLE_HOURS 小时才执行，避免开播活跃期后台大动作；
+        定期 tick 路径（require_idle=False）不受限，保持每天至少一次审阅机会。
+        """
         now = time.time()
         if now - self._last_prune < CFG.prune_interval_seconds:
             return
+        if require_idle:
+            idle_hours = getattr(config.cfg, "EVOLUTION_CURATOR_IDLE_HOURS", 0.0) or 0.0
+            if idle_hours > 0 and now - self._last_active_at < idle_hours * 3600:
+                return  # 仍在活跃期，推迟到空闲（定期 tick 会补审）
         self._last_prune = now
         try:
-            await self.skills.maybe_prune(
-                client=self._ensure_main_client(), model=self._main_model)
+            with background_review_context():
+                await self.skills.maybe_prune(
+                    client=self._ensure_main_client(), model=self._main_model)
         except Exception as e:
             console.warn(f"[进化] 技能库审阅失败（不影响运行）：{e}")
 
@@ -222,6 +285,24 @@ class EvolutionEngine:
                 user_content += "\n\n[SKILL USAGE STATS]\n" + usage
         except Exception:
             pass
+        # 5.6 复盘信号强化：追加最近观众负反馈素材（吐槽/打断/否定），
+        # 引导 LLM 优先 skill_patch 修正对应技能或移除失效话术；失败静默
+        try:
+            from .feedback import feedback_section
+            fb = feedback_section(max_events=10)
+            if fb:
+                user_content += fb
+        except Exception:
+            pass
+        # 5.11 复盘素材升级：跨会话召回（ENABLE_SESSION_SEARCH 门控）。
+        # 用本轮关键词精确检索历史对话（含观众纠正/负反馈），失败静默
+        try:
+            from .recall import cross_session_recall
+            recall_block = cross_session_recall(recent)
+            if recall_block:
+                user_content += recall_block
+        except Exception:
+            pass
         console.dim("[进化] 开始复盘最近对话...")
         # 候选模型链：管家模型（智谱，首选）→ 主模型（DeepSeek，故障兜底）。
         # 任一模型调用失败自动换下一个，全挂才跳过本次（不阻断主流程）。
@@ -239,10 +320,16 @@ class EvolutionEngine:
                 {"role": "user", "content": user_content},
             ],
             label="复盘",
+            task="review",
         )
         if data is None:
             return
-        await self._apply_review(data, proactive)
+        # 5.5：复盘落地链（技能沉淀/修补等）标记为后台来源（created_by=agent）
+        with background_review_context():
+            await self._apply_review(data, proactive)
+        # 5.14 接线：复盘有沉淀时提示「周期性回顾」建议（consent-first，
+        # 绝不自动建 job；dedup 锁死保证只建议一次）
+        _maybe_suggest_review()
 
     async def _apply_review(self, data: dict, proactive) -> None:
         """把复盘结果分七类落地（技能 / 修补 / 话题 / 经验 / 话术 / 回评 / 画像）。"""
@@ -273,7 +360,20 @@ class EvolutionEngine:
     # ---------- 行为反思（经验教训写记忆库） ----------
 
     async def _save_lesson(self, lesson: str) -> None:
-        """把复盘出的经验教训写入记忆库（后续检索可带出）。"""
+        """把复盘出的经验教训写入记忆库（前置禁止沉淀过滤 + 差异化衰减）。
+
+        5.9 纪律（对齐 hermes 禁止沉淀清单）：环境依赖失败、负面断言、
+        未解决失败不写成永久经验——会固化成「工具坏了」类拒绝，长期误导；
+        通过后按 lesson 类（track=lesson）落盘，TTL 更短
+        （MEMORY_LESSON_TTL_DAYS 默认 30 天，比普通记忆 60 天衰减更快）。
+        """
+        lesson = (lesson or "").strip()
+        if not lesson:
+            return
+        if _is_blocked_lesson(lesson):
+            console.dim(
+                f"[进化] 行为反思被过滤（禁止沉淀：环境失败/负面断言/未解决）：{lesson}")
+            return
         try:
             from tools.memory import memory
             mm = memory.get_manager()
@@ -282,6 +382,7 @@ class EvolutionEngine:
                 "description": "进化/经验教训",
                 "content": lesson,
                 "user": mm.self_user_id,
+                "track": "lesson",  # 5.9：lesson 类记忆差异化衰减（30 天）
             }])
         except Exception as e:
             console.warn(f"[进化] 经验教训写入失败：{e}")

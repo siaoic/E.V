@@ -1,0 +1,1904 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>E.V 控制中心</title>
+<script src="vendor/vue.global.prod.js"></script>
+<style>
+  /* ================================================================
+     控制中心 · Tauri 2 + Vue 3 预览样式
+     视觉移植自 dsh-web-ui 皮肤：鲸吟（whale-song）+ E.V 角色风
+     （E.V 配色源自本项目 ui/control_center.ui 角色色：米色/薄荷/玫红/浅蓝/暖棕）
+     布局与功能面参考现有 PySide6 控制中心（ui/control_center.ui）
+     ================================================================ */
+
+  /* --- 调色板（4 组合：皮肤 × 主题）------------------------------ */
+
+  /* 鲸吟 · 浅色（默认） */
+  :root {
+    --bg-base: rgba(255, 255, 255, 0.42);
+    --bg-layer-1: rgba(244, 248, 253, 0.48);
+    --bg-layer-2: rgba(235, 242, 250, 0.52);
+    --bg-layer-3: rgba(226, 236, 248, 0.55);
+    --label-primary: #0a1e4a;
+    --label-secondary: #16315f;
+    --label-tertiary: #33528a;
+    --label-caption: #46608c;
+    --label-dimmed: #5b7399;
+    --brand-primary: #4d8fd4;
+    --brand-hover: #5c9cdb;
+    --border-l1: rgba(26, 58, 122, 0.15);
+    --border-l2: rgba(26, 58, 122, 0.22);
+    --border-l3: rgba(26, 58, 122, 0.32);
+    --button-primary-fill: #4d8fd4;
+    --button-primary-hover: #5c9cdb;
+    --bubble-user: #d9e9f5;
+    --bubble-assistant: rgba(255, 255, 255, 0.6);
+    --sidebar-fill: rgba(242, 247, 252, 0.56);
+    --sidebar-nav-active: #d9e9f5;
+    --sidebar-nav-hover: #e5f0f9;
+    --input-major: rgba(255, 255, 255, 0.6);
+    --interactive-hover: rgba(77, 143, 212, 0.08);
+    --interactive-active: rgba(77, 143, 212, 0.14);
+    --success: #2e8e52;
+    --warn: #d9b45b;
+    --error: #c00000;
+    --gold: #d9b45b;
+    --memory-core: #8c64c8;
+    --memory-state: #468cd2;
+    --memory-pref: #e6823c;
+    --memory-archive: #5aa064;
+    --art: url('assets/whale.webp');
+    --scrim: linear-gradient(rgba(240, 246, 252, 0.05) 0%, rgba(234, 241, 250, 0.11) 55%, rgba(228, 237, 249, 0.16) 100%);
+    --bg-page: #eef3fa;
+    /* 圆角体系（对齐 ui/control_center.ui QSS）：sm 8 按钮/槽位，md 10 输入/卡片，lg 12 绑定大区，xl 14 弹窗/文本编辑 */
+    --radius-sm: 8px;
+    --radius-md: 10px;
+    --radius-lg: 12px;
+    --radius-xl: 14px;
+  }
+
+  /* E.V 角色风 · 浅色（源自 ui/control_center.ui 角色色：
+     米色 #E6D5B8 背景/开衫 · 薄荷 #78C8BC 主操作/蝴蝶结 ·
+     玫红 #DC5A69 导航选中/缎带/删除 · 浅蓝 #9CC8E0 动作区/裙子 ·
+     暖深棕 #5B4636 正文文字） */
+  body[data-skin="ev"][data-theme="light"] {
+    --bg-base: rgba(253, 248, 238, 0.72);
+    --bg-layer-1: rgba(252, 250, 245, 0.72);
+    --bg-layer-2: rgba(246, 241, 231, 0.78);
+    --bg-layer-3: rgba(240, 234, 221, 0.82);
+    --label-primary: #5b4636;
+    --label-secondary: #6e5945;
+    --label-tertiary: #8a7460;
+    --label-caption: #8f7a63;
+    --label-dimmed: #b5a287;
+    --brand-primary: #78c8bc;
+    --brand-hover: #8ad2c6;
+    --border-l1: rgba(200, 185, 158, 0.35);
+    --border-l2: rgba(200, 185, 158, 0.5);
+    --border-l3: rgba(143, 200, 188, 0.55);
+    --button-primary-fill: #5eb4a3;
+    --button-primary-hover: #6fc0b0;
+    --bubble-user: rgba(120, 200, 188, 0.28);
+    --bubble-assistant: rgba(255, 255, 255, 0.55);
+    --sidebar-fill: rgba(248, 243, 230, 0.6);
+    --sidebar-nav-active: rgba(220, 90, 105, 0.14);
+    --sidebar-nav-hover: rgba(120, 200, 188, 0.14);
+    --input-major: rgba(252, 250, 245, 0.65);
+    --interactive-hover: rgba(120, 200, 188, 0.08);
+    --interactive-active: rgba(120, 200, 188, 0.16);
+    --success: #3e9e6b;
+    --warn: #d9a94f;
+    --error: #dc5a69;
+    --gold: #d9a94f;
+    --memory-core: #8c64c8;
+    --memory-state: #468cd2;
+    --memory-pref: #e6823c;
+    --memory-archive: #5aa064;
+    --nav-active: #dc5a69;
+    --art: linear-gradient(135deg, #fbf6ea 0%, #f5eedc 55%, #efe6d0 100%);
+    --scrim: linear-gradient(rgba(120, 200, 188, 0.04) 0%, rgba(220, 90, 105, 0.04) 100%);
+    --bg-page: #fbf6ea;
+  }
+
+  /* --- 基础 ------------------------------------------------------ */
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  html, body { height: 100%; }
+
+  body {
+    font-family: -apple-system, "Segoe UI", Roboto, "PingFang SC",
+      "Microsoft YaHei", sans-serif;
+    color: var(--label-primary);
+    /* 主题兜底底色：WebView2 渲染完成/背景图加载前不显示纯白 */
+    background-color: var(--bg-page);
+    background-image: var(--scrim), var(--art);
+    background-size: cover, cover;
+    background-position: center;
+    background-attachment: fixed;
+    background-repeat: no-repeat;
+    overflow: hidden;
+    transition: color 0.25s ease;
+    display: flex; align-items: center; justify-content: center;
+  }
+
+  .app {
+    display: flex; flex-direction: column;
+    width: 100vw; height: 100vh;
+    /* 界面文本默认不可选中复制（拖拽页面不会误选文字）；
+       仅控制台日志与表单输入重新允许选中（见下方 user-select: text 覆盖） */
+    user-select: none;
+    -webkit-user-select: none;
+  }
+  /* 控制台日志可复制（对齐 Qt 日志只读可选中语义） */
+  .log-panel .lp-body, .mcp-editor { user-select: text; -webkit-user-select: text; }
+  /* 表单输入/文本域：用户自己输入的内容可选中复制 */
+  input, textarea, select { user-select: text; -webkit-user-select: text; }
+
+  /* --- 顶栏 ------------------------------------------------------ */
+  .topbar {
+    display: flex; align-items: center; gap: 14px;
+    padding: 0 18px; height: 52px;
+    background: var(--bg-base);
+    border-bottom: 1px solid var(--border-l1);
+    flex-shrink: 0;
+  }
+  .topbar .logo { display: flex; align-items: center; gap: 9px; font-weight: 600; font-size: 14px; }
+  .topbar .spacer { flex: 1; }
+  .seg { display: flex; background: var(--interactive-hover); border: 1px solid var(--border-l1); border-radius: var(--radius-sm); padding: 3px; gap: 2px; }
+  .seg button {
+    border: 0; background: transparent; color: var(--label-secondary);
+    font-size: 13px; font-family: inherit; padding: 6px 14px; border-radius: 8px;
+    cursor: pointer; transition: background-color .13s ease, color .13s ease;
+  }
+  .seg button:hover { background: var(--interactive-active); color: var(--label-primary); }
+  .seg button.active { background: var(--button-primary-fill); color: #fff; }
+  .icon-btn {
+    width: 34px; height: 34px; border: 1px solid var(--border-l1); border-radius: var(--radius-sm);
+    background: var(--bg-layer-1); color: var(--label-secondary); cursor: pointer;
+    display: grid; place-items: center;
+    transition: background-color .13s ease, color .13s ease;
+  }
+  .icon-btn:hover { background: var(--interactive-active); color: var(--label-primary); }
+
+  /* --- 主体 ------------------------------------------------------ */
+  .main { flex: 1; display: flex; min-height: 0; }
+
+  /* 图标栏 */
+  .rail {
+    width: 54px; background: var(--bg-base); border-right: 1px solid var(--border-l1);
+    display: flex; flex-direction: column; align-items: center; padding: 10px 0; gap: 8px; flex-shrink: 0;
+  }
+  .rail .icon-btn { width: 38px; height: 38px; }
+  .rail .icon-btn.active { background: var(--nav-active, var(--button-primary-fill)); border-color: transparent; color: #fff; }
+
+  /* 页面标题区 */
+  .page-head {
+    display: flex; align-items: center; gap: 10px;
+    padding: 0 24px; height: 52px;
+    background: var(--bg-layer-1);
+    border-bottom: 1px solid var(--border-l1);
+    flex-shrink: 0;
+  }
+  .page-head .p-title { font-size: 15px; font-weight: 600; color: var(--label-primary); }
+  .page-head .p-sub { font-size: 12px; color: var(--label-caption); }
+  .page-head .spacer { flex: 1; }
+
+  /* 内容区 */
+  .content { flex: 1; overflow-y: auto; padding: 22px 24px; }
+  .content::-webkit-scrollbar { width: 10px; }
+  .content::-webkit-scrollbar-thumb { background: var(--border-l2); border-radius: 5px; border: 2px solid transparent; background-clip: content-box; }
+  .content::-webkit-scrollbar-thumb:hover { background: var(--brand-primary); background-clip: content-box; }
+  .content::-webkit-scrollbar-track { background: transparent; }
+  /* 隐藏全部滚动条（对齐 Qt _hide_scrollbars：视觉清爽，滚轮/键盘滚动保留） */
+  ::-webkit-scrollbar { display: none; }
+
+  /* 卡片 */
+  .card {
+    background: var(--bg-layer-1);
+    border: 1px solid var(--border-l1);
+    border-radius: var(--radius-md);
+    padding: 16px 18px;
+    margin-bottom: 14px;
+  }
+  .card-title {
+    font-size: 13px; font-weight: 600; color: var(--label-primary);
+    display: flex; align-items: center; gap: 8px; margin-bottom: 12px;
+  }
+  .card-title::before { content: ''; width: 4px; height: 14px; border-radius: 2px; background: var(--button-primary-fill); }
+
+  /* 表单 */
+  .field { display: flex; align-items: center; gap: 12px; margin-bottom: 12px; }
+  .field label { width: 128px; font-size: 13px; color: var(--label-secondary); flex-shrink: 0; }
+  .field input[type="text"], .field input[type="password"], .field select, .field textarea {
+    flex: 1; min-width: 0;
+    background: var(--input-major);
+    border: 1px solid var(--border-l2);
+    border-radius: var(--radius-md);
+    color: var(--label-primary);
+    font-family: inherit; font-size: 13px;
+    padding: 8px 12px;
+    outline: none;
+    transition: border-color .13s ease;
+  }
+  .field input:focus, .field select:focus, .field textarea:focus { border-color: var(--brand-primary); }
+  .field .hint { font-size: 12px; color: var(--label-caption); }
+  /* 输入框占位文字：用次级色而非默认浅灰，保证明显可读 */
+  input::placeholder, textarea::placeholder { color: var(--label-tertiary); opacity: 1; }
+  .checkbox-row { display: flex; align-items: center; gap: 9px; font-size: 13px; color: var(--label-secondary); margin-bottom: 10px; }
+  .checkbox-row input { accent-color: var(--button-primary-fill); width: 15px; height: 15px; }
+  /* 设置页选项面板：2×3 复选网格（对齐 Qt control_panel_frame 的 QGridLayout） */
+  .opts-grid { display: grid; grid-template-columns: repeat(3, 1fr); gap: 6px 18px; }
+  .opts-grid .checkbox-row { margin-bottom: 0; }
+
+  /* --- LLM 页：AI 人设大文本框（对齐 Qt ed_prompt） -------------- */
+  .prompt-label { font-size: 13px; color: var(--label-secondary); }
+  .prompt-area {
+    width: 100%; min-height: 220px; box-sizing: border-box;
+    /* resize: none —— 对齐 Qt ed_prompt（QTextEdit 不可拖动拉伸），
+       防止拖动变形撑乱页面布局 */
+    resize: none;
+    background: var(--input-major); border: 1px solid var(--border-l2); border-radius: var(--radius-xl);
+    color: var(--label-primary); font-family: inherit; font-size: 13px;
+    padding: 10px 12px; outline: none; line-height: 1.6;
+  }
+  .prompt-area:focus { border-color: var(--brand-primary); }
+  /* LLM 页：flex 纵向布局，人设大文本框撑满剩余空间 → 底部贴齐内容区底部（22px），
+     与启动页输入框底部位置一致（内容不满一屏时不再悬空留白） */
+  .llm-page { display: flex; flex-direction: column; min-height: 100%; gap: 10px; }
+  /* LLM 配置页：直接照搬 ui page_llm（control_center.ui）——无卡片纯表单。
+     VBox spacing 10、QFormLayout 行距 12、QLineEdit padding 6px 9px、label 自适应列宽 */
+  .llm-form { display: flex; flex-direction: column; gap: 12px; }
+  .llm-row { display: flex; align-items: center; gap: 12px; }
+  .llm-row label { font-size: 13px; color: var(--label-primary); min-width: 88px; }
+  .llm-row input {
+    flex: 1; min-width: 0;
+    background: var(--input-major); border: 1px solid var(--border-l2); border-radius: 10px;
+    color: var(--label-primary); font-family: inherit; font-size: 13px; padding: 6px 9px; outline: none;
+  }
+  .llm-row input:focus { border-color: var(--brand-primary); }
+  .llm-page .prompt-area { flex: 1; }
+
+  /* --- 自定义外观面板（顶栏调色板按钮弹出） ---------------------- */
+  .custom-wrap { position: relative; }
+  .custom-panel {
+    position: absolute; right: 0; top: 44px; z-index: 60;
+    width: 304px; padding: 14px; border-radius: var(--radius-md);
+    background: var(--bg-layer-2); border: 1px solid var(--border-l2);
+    box-shadow: 0 12px 32px rgba(0, 0, 0, 0.18);
+  }
+  .custom-panel .cp-title { font-size: 13px; font-weight: 600; color: var(--label-primary); margin-bottom: 12px; }
+  .cp-row { display: flex; align-items: center; gap: 10px; margin-bottom: 12px; font-size: 12px; color: var(--label-secondary); }
+  .cp-row > span { flex-shrink: 0; width: 74px; white-space: nowrap; }
+  .cp-row .cp-val { width: 44px; text-align: right; color: var(--label-caption); }
+  .cp-row input[type="range"] { flex: 1; accent-color: var(--brand-primary); }
+  .cp-row input[type="color"] { width: 40px; height: 26px; border: 1px solid var(--border-l2); border-radius: 6px; background: transparent; padding: 2px; cursor: pointer; }
+  .cp-row input[type="file"] { display: none; }
+  .cp-file { flex: 1; min-width: 0; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; cursor: pointer; }
+  .cp-actions { display: flex; gap: 8px; }
+  .cp-actions .btn { flex: 1; padding: 7px 0; }
+
+  /* 启动页顶栏操作按钮（对齐 Qt btn_toggle/btn_clear_log/btn_close 96px 宽） */
+  .tb-btn { min-width: 96px; text-align: center; }
+
+  /* 按钮 */
+  .btn {
+    border: 0; border-radius: var(--radius-sm); font-family: inherit; font-size: 13px;
+    padding: 8px 18px; cursor: pointer;
+    transition: background-color .13s ease;
+  }
+  .btn-primary { background: var(--button-primary-fill); color: #fff; }
+  .btn-primary:hover { background: var(--button-primary-hover); }
+  .btn-ghost { background: transparent; color: var(--label-secondary); border: 1px solid var(--border-l2); }
+  .btn-ghost:hover { background: var(--interactive-active); color: var(--label-primary); }
+  .btn-danger { background: var(--error); color: #fff; }
+  .btn-danger:hover { opacity: .88; }
+  /* 按下反馈：轻微下沉 + 变暗（对齐 Qt closeBtn/deleteBtn 的 :pressed 态） */
+  .btn:active { transform: translateY(1px); filter: brightness(.94); }
+  /* 保存成功反馈：按钮变红显示「已保存」（与停止按钮同色），1.5s 后恢复 */
+  .btn-primary.saved { background: var(--error); border-color: var(--error); }
+  /* 下拉框：照搬 ui QComboBox（control_center.ui 706-751）——米白渐变底 + 14px 圆角 + CSS 下箭头 + 薄荷聚焦 */
+  select, .field select, select.model-sel, select.idle-sel {
+    appearance: none; -webkit-appearance: none; box-sizing: border-box;
+    background-image:
+      url("data:image/svg+xml;charset=utf-8,%3Csvg xmlns='http://www.w3.org/2000/svg' width='12' height='12' viewBox='0 0 12 12'%3E%3Cpath d='M2 4l4 4 4-4' fill='none' stroke='%235B4636' stroke-width='2' stroke-linecap='round'/%3E%3C/svg%3E"),
+      linear-gradient(180deg, rgba(252, 250, 245, 1) 0%, rgba(248, 246, 240, 1) 100%);
+    background-repeat: no-repeat;
+    background-position: right 10px center, 0 0;
+    border: 1px solid rgba(180, 200, 195, 200);
+    border-radius: 14px;
+    padding: 6px 34px 6px 9px;
+  }
+  select:focus, .field select:focus, select.model-sel:focus, select.idle-sel:focus {
+    border-color: rgb(120, 200, 188);
+    background-color: rgba(230, 245, 240, 1);
+  }
+
+  /* 状态胶囊 */
+  .pill { font-size: 11px; padding: 3px 10px; border-radius: 999px; border: 1px solid var(--border-l2); color: var(--label-secondary); }
+  .pill.on { color: var(--success); border-color: var(--success); background: rgba(46, 142, 82, 0.08); }
+  /* 运行模式胶囊：固定最小宽度，切换模式时文字长度变化不抖动 */
+  .page-head .pill.on { display: inline-flex; align-items: center; justify-content: center; min-width: 112px; text-align: center; white-space: nowrap; }
+
+  /* --- 启动页：模式行 + 双栏日志 + 底部输入（对齐 Qt） ----------- */
+  .launch-page { display: flex; flex-direction: column; height: 100%; }
+  .launch-top { display: flex; align-items: center; gap: 16px; margin-bottom: 12px; }
+  .radio-label { display: flex; align-items: center; gap: 6px; font-size: 13px; color: var(--label-secondary); cursor: pointer; }
+  .radio-label input { accent-color: var(--button-primary-fill); width: 15px; height: 15px; }
+  .launch-top .spacer { flex: 1; }
+  /* 下拉框（对齐 Qt QComboBox：米白渐变底 + 薄荷聚焦边 + 右侧下拉箭头区） */
+  .select-wrap { position: relative; display: inline-flex; }
+  /* 运行模式/模型下拉框（对齐 Qt QComboBox：米白渐变 + 14px 圆角 + CSS 下箭头 + 薄荷聚焦） */
+  select.model-sel, select.idle-sel {
+    appearance: none; -webkit-appearance: none; box-sizing: border-box;
+    background-image:
+      url("data:image/svg+xml;charset=utf-8,%3Csvg xmlns='http://www.w3.org/2000/svg' width='12' height='12' viewBox='0 0 12 12'%3E%3Cpath d='M2 4l4 4 4-4' fill='none' stroke='%235B4636' stroke-width='2' stroke-linecap='round'/%3E%3C/svg%3E"),
+      linear-gradient(180deg, rgba(252, 250, 245, 1) 0%, rgba(248, 246, 240, 1) 100%);
+    background-repeat: no-repeat;
+    background-position: right 10px center, 0 0;
+    border: 1px solid rgba(180, 200, 195, 200);
+    border-radius: 14px;
+    padding: 6px 34px 6px 9px;
+    color: var(--label-primary); font-family: inherit;
+    outline: none; cursor: pointer;
+  }
+  select.model-sel:focus, select.idle-sel:focus {
+    border-color: rgb(120, 200, 188);
+    background-color: rgba(230, 245, 240, 1);
+  }
+  select.model-sel { min-width: 320px; font-size: 13px; }
+  select.model-sel:disabled { opacity: 0.5; cursor: not-allowed; }
+  .select-wrap.disabled::after { opacity: 0.4; }
+  select.idle-sel { min-width: 180px; font-size: 12px; }
+  .log-split { display: flex; flex: 1; min-height: 0; }
+  .log-panel { background: var(--bg-layer-1); border: 1px solid var(--border-l1); border-radius: var(--radius-xl); display: flex; flex-direction: column; flex: 1; min-width: 0; }
+  .log-panel .lp-head { display: flex; align-items: center; gap: 8px; padding: 12px 16px; border-bottom: 1px solid var(--border-l1); font-size: 12px; font-weight: 600; color: var(--label-secondary); }
+  .log-panel .lp-body { flex: 1; padding: 12px 16px; font-family: Consolas, monospace; font-size: 12px; line-height: 1.75; color: var(--label-tertiary); overflow-y: auto; }
+  .log-divider { width: 1px; background: var(--border-l1); margin: 0 14px; }
+  .log-line .t { color: var(--label-dimmed); margin-right: 8px; }
+  .log-line.user { color: var(--label-primary); }
+  .log-line.sys { color: var(--brand-primary); }
+  /* 输入卡片：上间距 = 内容区底部内边距（22px），保证输入框距日志面板与距窗口底部一致 */
+  .launch-input { margin-top: 22px; }
+  /* 输入卡片：发送按钮/文件选项收进卡片内，对齐 index.html 的 composer */
+  .launch-input .input-card {
+    background: var(--input-major); border: 1px solid var(--border-l2); border-radius: var(--radius-md);
+    padding: 12px 14px; transition: border-color .13s ease;
+  }
+  .launch-input .input-card:focus-within { border-color: var(--brand-primary); }
+  .launch-input textarea {
+    width: 100%; border: 0; background: transparent; resize: none; outline: none;
+    font-family: inherit; font-size: 13.5px; color: var(--label-primary);
+    min-height: 44px; line-height: 1.6;
+  }
+  .launch-input textarea::placeholder { color: var(--label-caption); }
+  .launch-input .input-tools { display: flex; align-items: center; gap: 6px; margin-top: 6px; }
+  .launch-input .tool-chip {
+    font-size: 12px; color: var(--label-secondary); padding: 4px 10px;
+    border: 1px solid var(--border-l2); border-radius: 999px;
+    background: var(--interactive-hover); cursor: pointer;
+    transition: background-color .13s ease, color .13s ease;
+  }
+  .launch-input .tool-chip:hover { background: var(--interactive-active); color: var(--label-primary); }
+  .launch-input .tool-chip input[type="file"] { display: none; }
+  .launch-input .send-btn {
+    margin-left: auto; border: 0; border-radius: var(--radius-sm);
+    background: var(--button-primary-fill); color: #fff;
+    font-size: 13px; font-family: inherit; font-weight: 500;
+    padding: 7px 18px; cursor: pointer;
+    transition: background-color .13s ease;
+  }
+  .launch-input .send-btn:hover { background: var(--button-primary-hover); }
+
+  /* --- 记忆页 ---------------------------------------------------- */
+  .memory-toolbar { display: flex; gap: 10px; margin-bottom: 14px; align-items: center; }
+  .memory-toolbar input[type="text"] {
+    flex: 1; background: var(--input-major); border: 1px solid var(--border-l2); border-radius: var(--radius-md);
+    color: var(--label-primary); font-family: inherit; font-size: 13px; padding: 8px 12px; outline: none;
+  }
+  /* 角色卡片（对齐 Qt 图谱 user 簇：每个角色一张卡，点击弹出该角色记忆列表） */
+  .role-card { cursor: pointer; transition: border-color .13s ease, background-color .13s ease; }
+  .role-card:hover { border-color: var(--brand-primary); background: var(--bg-layer-2); }
+  .role-card .role-head { display: flex; align-items: center; gap: 8px; }
+  .role-card .role-head .user-dot { width: 12px; height: 12px; }
+  .role-preview {
+    display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical;
+    overflow: hidden; white-space: pre-line;
+    font-size: 12px; color: var(--label-caption); line-height: 1.7;
+    margin: 10px 0 0; flex: 1;
+  }
+  /* 角色记忆列表弹窗（对齐 Qt MemoryListDialog）：行内 徽标+名称+摘要+时间+删除 */
+  .role-list-card .role-list { max-height: 340px; overflow-y: auto; display: flex; flex-direction: column; gap: 6px; }
+  .role-item {
+    display: flex; align-items: center; gap: 10px; padding: 8px 10px;
+    border-radius: var(--radius-sm); background: var(--bg-layer-2); border: 1px solid var(--border-l1);
+    cursor: pointer; transition: border-color .13s ease, background-color .13s ease;
+  }
+  .role-item:hover { border-color: var(--brand-primary); }
+  .role-item .chip { font-size: 11px; padding: 2px 9px; border-radius: 999px; color: #fff; flex-shrink: 0; }
+  .role-item-main { flex: 1; min-width: 0; }
+  .role-item-name { font-size: 13px; color: var(--label-primary); line-height: 1.5; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .role-item-snippet {
+    font-size: 11px; color: var(--label-dimmed); line-height: 1.5; margin-top: 2px;
+    overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+  }
+  .role-item .m-time { font-size: 11px; color: var(--label-dimmed); flex-shrink: 0; }
+  .role-item .mem-del { flex-shrink: 0; }
+  /* 详情弹窗盖在列表弹窗之上（列表→点某条→详情） */
+  .mem-modal-top { z-index: 110; }
+  /* 记忆详情弹窗（对齐 Qt MemoryDetailDialog：类型徽标/摘要/分隔线/正文/底栏，
+     点空白或关闭按钮关闭，长文内部滚动） */
+  .mem-modal {
+    position: fixed; inset: 0; z-index: 100;
+    /* 透明遮罩：查看记忆/角色等弹窗时背景完全不变暗，仅弹窗卡片自身浮起 */
+    background: rgba(0, 0, 0, 0);
+    display: flex; align-items: center; justify-content: center;
+    padding: 24px;
+  }
+  /* 关闭确认弹窗（替换原生 confirm）：窄卡居中圆角。
+     布局对齐 ui/dialogs/confirm.py _ConfirmDialog：标题/正文居中 + 分隔线 +
+     取消靠左/确认靠右两端对齐；取消=米灰底深棕字（closeBtn），确认=浅红底深红字（deleteBtn） */
+  .mem-modal-card.dialog-card { width: 360px; text-align: center; border-radius: var(--radius-xl); }
+  .dialog-title { font-size: 15px; font-weight: 700; color: var(--label-primary); }
+  .dialog-desc { font-size: 13px; color: var(--label-caption); line-height: 1.8; margin: 12px 0 16px; }
+  .dialog-divider { height: 1px; background: var(--border-l1); margin-bottom: 14px; }
+  .dialog-actions { display: flex; justify-content: space-between; gap: 10px; }
+  .dialog-actions .btn { padding: 7px 22px; }
+  /* 取消：米灰底深棕字（对齐 closeBtn 色值） */
+  .dialog-actions .btn-ghost { background: rgb(237, 232, 220); border: 0; color: rgb(114, 95, 77); }
+  .dialog-actions .btn-ghost:hover { background: rgb(228, 220, 203); color: rgb(114, 95, 77); }
+  /* 确认关闭：浅红底深红字（对齐 deleteBtn 色值） */
+  .dialog-actions .btn-danger { background: rgba(196, 86, 76, 0.12); color: rgb(176, 70, 62); }
+  .dialog-actions .btn-danger:hover { background: rgba(196, 86, 76, 0.22); color: rgb(176, 70, 62); }
+  /* 弹窗入场：淡入 + 上移 14px（对齐 Qt _play_show 动画） */
+  .mem-modal-card { animation: modal-in .24s ease; }
+  @keyframes modal-in {
+    from { opacity: 0; transform: translateY(14px); }
+    to { opacity: 1; transform: translateY(0); }
+  }
+  .mem-modal-card {
+    width: min(560px, 100%);
+    max-height: calc(100vh - 48px);
+    overflow-y: auto;
+    background: var(--bg-page); border: 1px solid var(--border-l2); border-radius: var(--radius-xl);
+    padding: 18px 20px;
+    box-shadow: 0 12px 32px rgba(0, 0, 0, 0.22);
+  }
+  /* 类型徽标 / chips：半透明同色底 + 同色文字（对齐 Qt _make_type_badge / _make_chip） */
+  .type-badge, .mem-chip {
+    display: inline-flex; align-items: center; gap: 4px; flex-shrink: 0;
+    background: color-mix(in srgb, var(--chip-color) 15%, transparent);
+    border-radius: 10px;
+  }
+  .type-badge { padding: 3px 10px 3px 9px; }
+  .type-badge .type-dot { font-size: 8px; color: var(--chip-color); }
+  .type-badge .type-text { font-size: 12px; font-weight: 700; color: var(--chip-color); }
+  .mem-chip { font-size: 12px; border-radius: 9px; padding: 2px 10px; color: var(--chip-color); }
+  /* 标题行：徽标 + 记忆名 + 右上 chips */
+  .mem-modal-title { display: flex; align-items: center; gap: 10px; }
+  .mem-modal-name { flex: 1; min-width: 0; font-size: 15px; font-weight: 700; color: var(--label-primary); }
+  .mem-modal-chips { display: inline-flex; align-items: center; gap: 6px; flex-shrink: 0; }
+  /* 摘要 + 分隔线 + 正文全文（内部滚动） */
+  .mem-desc { font-size: 13px; color: var(--label-caption); line-height: 1.7; margin-top: 10px; }
+  .mem-divider { height: 1px; background: var(--border-l2); margin: 14px 0 12px; }
+  .mem-body {
+    font-size: 13px; color: var(--label-primary); line-height: 1.9;
+    white-space: pre-line; max-height: 260px; overflow-y: auto;
+  }
+  /* 底栏：更新时间 + 删除 + 关闭 */
+  .mem-bottom { display: flex; align-items: center; gap: 8px; margin-top: 14px; }
+  .mem-bottom .m-time { font-size: 12px; color: var(--label-dimmed); }
+  .mem-bottom .spacer { flex: 1; }
+
+  /* --- 设置页：小节 ---------------------------------------------- */
+  .section-title {
+    font-size: 13px; font-weight: 600; color: var(--label-primary);
+    border-left: 4px solid var(--button-primary-fill); padding-left: 10px;
+    margin: 18px 0 12px; display: flex; align-items: center; gap: 8px;
+  }
+  .section-title:first-child { margin-top: 0; }
+
+  /* --- 表情动作页：表情/动作双绑定区（对齐 Qt） ------------------ */
+  .face-page { display: flex; flex-direction: column; }
+  .face-title {
+    font-size: 17px; font-weight: bold; color: var(--label-primary);
+    border-bottom: 1px solid var(--border-l1); padding-bottom: 8px; margin-bottom: 10px;
+  }
+  .zone-head {
+    display: flex; align-items: center; gap: 8px; margin: 14px 0 8px;
+    font-size: 12px; font-weight: 600; color: var(--label-secondary);
+  }
+  .zone-head .spacer { flex: 1; }
+  /* 表情页首个分区标题：贴齐内容区顶部（去掉 14px 默认上边距，与其它页首元素对齐） */
+  .face-page > .zone-head:first-child { margin-top: 0; }
+  /* E.V 主题：表情动作页分区标题用玫红（对齐 ui/control_center.ui 玫红标题色 rgb(220,90,105)） */
+  body[data-skin="ev"] .face-page .zone-head { color: rgb(220, 90, 105); }
+  .zone-card {
+    background: var(--bg-layer-2); border: 1px solid var(--border-l2); border-radius: var(--radius-lg);
+    padding: 12px;
+  }
+  .emotion-grid { display: grid; grid-template-columns: repeat(3, 1fr); gap: 10px; }
+  .emotion-card {
+    background: var(--bg-layer-1); border: 1px solid var(--border-l1); border-radius: var(--radius-md);
+    padding: 12px; text-align: center; cursor: pointer;
+    transition: border-color .13s ease, box-shadow .13s ease;
+  }
+  .emotion-card:hover { border-color: var(--brand-primary); }
+  /* 拖拽悬停目标：主色描边高亮（对齐 Qt 拖入槽位时的聚焦语义） */
+  .emotion-card.drag-over { border-color: var(--brand-primary); box-shadow: 0 0 0 2px color-mix(in srgb, var(--brand-primary) 25%, transparent); }
+  .emotion-card .e-name { font-size: 14px; font-weight: 600; color: var(--label-primary); margin-bottom: 8px; }
+  .e-slot {
+    background: var(--bg-base); border: 1.5px dashed var(--border-l3); border-radius: var(--radius-sm);
+    color: var(--label-caption); font-size: 12px; padding: 6px; min-height: 34px;
+    display: flex; flex-wrap: wrap; gap: 4px; align-items: center; justify-content: center;
+  }
+  .e-empty { color: var(--label-dimmed); font-size: 12px; }
+  /* 已绑定项：可点击解除（对齐 Qt 情绪卡上已绑表情标签） */
+  .bind-chip {
+    display: inline-flex; align-items: center; gap: 3px;
+    background: color-mix(in srgb, var(--brand-primary) 15%, transparent);
+    color: var(--brand-primary); border-radius: 6px; padding: 2px 6px;
+    font-size: 11px; cursor: pointer;
+  }
+  .bind-chip:hover { background: color-mix(in srgb, var(--brand-primary) 30%, transparent); }
+  .lib-card { background: var(--bg-layer-1); border: 1px solid var(--border-l1); border-radius: var(--radius-lg); padding: 12px; margin-top: 10px; }
+  .lib-title { display: flex; align-items: center; gap: 8px; font-size: 12px; color: var(--label-secondary); margin-bottom: 10px; }
+  .lib-title .spacer { flex: 1; }
+  .idle-label { font-size: 12px; color: var(--label-secondary); }
+  .lib-grid { display: grid; grid-template-columns: repeat(4, 1fr); gap: 8px; }
+  .lib-btn {
+    background: var(--input-major); border: 1px solid var(--border-l2); border-radius: var(--radius-md);
+    color: var(--label-primary); font-family: inherit; font-size: 12px; padding: 8px 6px; height: 40px;
+    cursor: pointer; transition: background-color .13s ease;
+  }
+  .lib-btn:hover { background: var(--interactive-active); border-color: var(--brand-primary); }
+  .zone-status { font-size: 12px; color: var(--label-caption); margin-top: 10px; text-align: right; }
+
+  /* --- 插件页：卡片网格 ------------------------------------------ */
+  .plugin-grid { display: grid; grid-template-columns: repeat(3, 1fr); gap: 14px; }
+  /* 插件配置页：独立视图（对齐 Qt stack_tools 配置页：返回在头部左上方） */
+  .plugin-config-page { display: flex; flex-direction: column; min-height: 100%; }
+  .pc-back { min-width: 84px; }
+  .plugin-card {
+    background: var(--bg-layer-1); border: 1px solid var(--border-l1); border-radius: var(--radius-md);
+    padding: 16px; display: flex; flex-direction: column; gap: 8px;
+  }
+  .plugin-card .p-name { font-size: 13px; font-weight: 600; color: var(--label-primary); display: flex; align-items: center; gap: 8px; }
+  /* 插件类型徽章（MCP / 外部 / 本地）靠右显示（对齐 Qt plugin_card 右上角类型标签） */
+  .plugin-card .p-name-text { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .plugin-card .pill.kind { font-size: 10px; padding: 1px 8px; color: var(--label-caption); flex-shrink: 0; }
+  /* 状态着色（对齐 Qt plugin_card._status_html：✅绿 / ⚠️橙 / ⭕灰） */
+  .plugin-card .p-status { font-size: 12px; font-weight: 600; }
+  .plugin-card .p-status.ok { color: var(--success); }
+  .plugin-card .p-status.warn { color: var(--warn); }
+  .plugin-card .p-status.off { color: var(--label-dimmed); }
+  .plugin-card .p-desc { font-size: 12px; color: var(--label-caption); line-height: 1.6; flex: 1; }
+  /* 按钮行靠右（对齐 Qt plugin_card 的操作按钮右对齐） */
+  .plugin-card .p-actions { display: flex; justify-content: flex-end; gap: 8px; }
+  .mcp-editor { min-height: 260px; font-family: Consolas, monospace; font-size: 12px; line-height: 1.6; }
+
+  /* --- 记忆页：角色卡片 ------------------------------------------ */
+  /* 用户簇心圆点（对齐 Qt 图谱 _USER_COLOR 暖青(88,170,168)） */
+  .user-dot { width: 10px; height: 10px; border-radius: 50%; background: rgb(88, 170, 168); flex-shrink: 0; }
+  .mem-user { font-size: 13px; font-weight: 600; color: var(--label-primary); }
+  .mem-count { font-size: 11px; color: var(--label-caption); background: var(--interactive-hover); padding: 2px 8px; border-radius: 999px; }
+  .mem-empty { text-align: center; color: var(--label-caption); font-size: 13px; padding: 40px 0; }
+
+  /* --- 关于页 ---------------------------------------------------- */
+  .about-hero { text-align: center; padding: 30px 0 10px; }
+  .about-hero .a-title { font-size: 22px; font-weight: 700; color: var(--label-primary); margin-bottom: 6px; }
+  .about-hero .a-ver { font-size: 13px; color: var(--label-caption); }
+
+  /* --- 底部状态栏 ------------------------------------------------ */
+  .statusbar {
+    display: flex; align-items: center; gap: 16px;
+    height: 40px; padding: 0 18px;
+    background: var(--bg-base); border-top: 1px solid var(--border-l1);
+    font-size: 12px; color: var(--label-caption); flex-shrink: 0;
+  }
+  .statusbar .dot { width: 8px; height: 8px; border-radius: 50%; background: var(--success); display: inline-block; margin-right: 5px; }
+
+  /* 页面切换过渡 */
+  .page-enter-active, .page-leave-active { transition: opacity .18s ease, transform .18s ease; }
+  .page-enter-from { opacity: 0; transform: translateY(6px); }
+  .page-leave-to { opacity: 0; }
+
+  /* 窄屏断点：exe 窗口 940 宽时内容区约 838px（减去图标栏 54 + 内边距 48），
+     必须保持 3 列布局与网页一致；只有窗口缩到 800 以下（内容区 <700）才降级 1 列 */
+  @media (max-width: 800px) {
+    .emotion-grid, .plugin-grid { grid-template-columns: 1fr; }
+    .lib-grid { grid-template-columns: repeat(2, 1fr); }
+    .opts-grid { grid-template-columns: 1fr; }
+  }
+</style>
+</head>
+<body data-skin="ev" data-theme="light">
+<div id="app" v-cloak>
+  <div class="app">
+    <!-- 顶栏 -->
+    <header class="topbar">
+      <div class="logo">
+        <span>E.V</span>
+      </div>
+      <!-- 顶栏操作（对齐 Qt horizontalLayout_topbar：启动/清空日志/保存 每个页面都显示） -->
+      <button class="btn tb-btn" :class="running ? 'btn-danger' : 'btn-primary'"
+              @click="toggleRunning">{{ running ? '停止' : '启动' }}</button>
+      <button class="btn btn-ghost tb-btn" @click="clearLogs">清空日志</button>
+      <button v-if="['llm', 'settings', 'face'].includes(page)" class="btn btn-primary tb-btn" :class="{ saved: saveState === 'saved' }" @click="saveCurrent">{{ saveState === 'saved' ? '已保存' : '保存' }}</button>
+      <div class="spacer"></div>
+      <div class="seg">
+        <button v-for="s in skins" :key="s.id" :class="{ active: skin === s.id }" @click="skin = s.id">{{ s.name }}</button>
+      </div>
+      <div class="custom-wrap">
+        <button class="icon-btn" :class="{ active: showCustom }" title="自定义背景与颜色" @click="showCustom = !showCustom">
+          <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+            <circle cx="13.5" cy="6.5" r=".5"/><circle cx="17.5" cy="10.5" r=".5"/><circle cx="8.5" cy="7.5" r=".5"/><circle cx="6.5" cy="12.5" r=".5"/>
+            <path d="M12 2C6.5 2 2 6.5 2 12s4.5 10 10 10c.926 0 1.648-.746 1.648-1.688 0-.437-.18-.835-.437-1.125-.29-.289-.438-.652-.438-1.125a1.64 1.64 0 0 1 1.668-1.668h1.996c3.051 0 5.555-2.503 5.555-5.554C21.965 6.012 17.461 2 12 2z"/>
+          </svg>
+        </button>
+        <div v-if="showCustom" class="custom-panel">
+          <div class="cp-title">自定义外观</div>
+          <div class="cp-row">
+            <span>背景图</span>
+            <label class="cp-file btn-ghost" style="text-align:center; padding:6px 0; border:1px dashed var(--border-l3); border-radius:8px;">
+              {{ customBgName || '选择图片…' }}
+              <input type="file" accept="image/*" @change="onBgPick" />
+            </label>
+          </div>
+          <div class="cp-row">
+            <span>背景亮度</span>
+            <input type="range" min="0" max="100" v-model.number="customDim" />
+            <span class="cp-val">{{ customDim }}%</span>
+          </div>
+          <div class="cp-row">
+            <span>面板不透明度</span>
+            <input type="range" min="20" max="100" v-model.number="customOpacity" />
+            <span class="cp-val">{{ customOpacity }}%</span>
+          </div>
+          <div class="cp-row">
+            <span>主色</span>
+            <input type="color" :value="customBrand || '#4d8fd4'" @input="customBrand = $event.target.value" />
+            <span class="cp-val" style="width:auto;">{{ customBrand || '跟随皮肤' }}</span>
+          </div>
+          <div class="cp-row">
+            <span>文字色</span>
+            <input type="color" :value="customLabel || '#0a1e4a'" @input="customLabel = $event.target.value" />
+            <span class="cp-val" style="width:auto;">{{ customLabel || '跟随皮肤' }}</span>
+          </div>
+          <div class="cp-row">
+            <span>次级文字</span>
+            <input type="color" :value="customLabel2 || '#16315f'" @input="customLabel2 = $event.target.value" />
+            <span class="cp-val" style="width:auto;">{{ customLabel2 || '跟随皮肤' }}</span>
+          </div>
+          <div class="cp-row">
+            <span>边框色</span>
+            <input type="color" :value="customBorder || '#1a3a7a'" @input="customBorder = $event.target.value" />
+            <span class="cp-val" style="width:auto;">{{ customBorder || '跟随皮肤' }}</span>
+          </div>
+          <div class="cp-actions">
+            <button class="btn btn-ghost" @click="resetCustom">恢复默认</button>
+          </div>
+        </div>
+      </div>
+      <button class="icon-btn" title="关闭控制中心" @click="closeWin">
+        <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+          <path d="M18 6 6 18M6 6l12 12"/>
+        </svg>
+      </button>
+    </header>
+
+    <div class="main">
+      <!-- 左侧图标导航 -->
+      <nav class="rail">
+        <button v-for="p in pages" :key="p.id" class="icon-btn" :class="{ active: page === p.id }"
+                :title="p.name" @click="page = p.id">
+          <svg width="17" height="17" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" v-html="p.icon"></svg>
+        </button>
+      </nav>
+
+      <!-- 主内容区 -->
+      <section class="chat" style="flex:1; display:flex; flex-direction:column; min-width:0;">
+        <!-- 页面标题 -->
+        <div class="page-head">
+          <!-- 插件配置页：返回按钮放左上方（对齐 Qt stack_tools 配置页 btn_plugin_back） -->
+          <button v-if="page === 'plugins' && configPlugin" class="btn btn-ghost pc-back" @click="closePluginConfig">← 返回</button>
+          <span class="p-title">{{ page === 'plugins' && configPlugin ? '插件配置' : current.name }}</span>
+          <span class="p-sub">{{ page === 'plugins' && configPlugin ? '配置 ' + configPlugin.name : current.sub }}</span>
+          <div class="spacer"></div>
+          <button v-if="page === 'plugins' && configPlugin" class="btn btn-primary tb-btn" @click="savePluginConfig">保存配置</button>
+          <span class="pill on">运行模式：{{ runMode }}</span>
+        </div>
+
+        <div class="content">
+          <transition name="page" mode="out-in">
+            <!-- ========== 启动页（对齐 Qt：模式行/双栏日志/底部输入） ========== -->
+            <div v-if="page === 'launch'" key="launch" class="launch-page">
+              <div class="launch-top">
+                <label class="radio-label"><input type="radio" name="runmode" :checked="runMode === 'VTS'" @change="runMode = 'VTS'" />VTubeStudio 虚拟主播</label>
+                <label class="radio-label"><input type="radio" name="runmode" :checked="runMode === '桌宠'" @change="runMode = '桌宠'" />桌面宠物</label>
+                <div class="spacer"></div>
+                <div class="select-wrap" :class="{ disabled: runMode === 'VTS' }">
+                  <select class="model-sel" v-model="petModel" :disabled="runMode === 'VTS'" :title="runMode === 'VTS' ? '桌宠模式可用' : '切换 Live2D 模型，立即生效'">
+                    <option v-for="m in petModels" :key="m" :value="m">{{ m }}</option>
+                  </select>
+                </div>
+              </div>
+              <div class="log-split">
+                <div class="log-panel">
+                  <div class="lp-head">对话（弹幕 · LLM发言 · 回复）</div>
+                  <div class="lp-body">
+                    <div v-for="(l, i) in chatLogs" :key="i" class="log-line" :class="l.cls"><span class="t">{{ l.t }}</span>{{ l.text }}</div>
+                  </div>
+                </div>
+                <div class="log-divider"></div>
+                <div class="log-panel">
+                  <div class="lp-head">工具日志（TTS · 记忆 · MCP）</div>
+                  <div class="lp-body">
+                    <div v-for="(l, i) in toolLogs" :key="i" class="log-line" :class="l.cls"><span class="t">{{ l.t }}</span>{{ l.text }}</div>
+                  </div>
+                </div>
+              </div>
+              <div class="launch-input">
+                <div class="input-card">
+                  <textarea rows="1" placeholder="发送消息给 AI（回车发送，Shift+Enter 换行）" @keydown.enter.exact.prevent="sendMessage"></textarea>
+                  <div class="input-tools">
+                    <label class="tool-chip" title="选择要发送的文件">
+                      <input type="file" @change="onFilePick" />
+                      {{ attachName || '+ 文件' }}
+                    </label>
+                    <button class="send-btn" @click="sendMessage">发送</button>
+                  </div>
+                </div>
+              </div>
+            </div>
+
+            <!-- ========== LLM 配置页（对齐 Qt：API 三行 + 人设大文本框，标题由顶部 page-head 显示） ========== -->
+            <div v-else-if="page === 'llm'" key="llm" class="llm-page">
+              <!-- 直接照搬 ui page_llm：无卡片纯表单（QFormLayout 行距 12，label 自适应列宽） -->
+              <div class="llm-form">
+                <div class="llm-row"><label>API KEY：</label><input type="password" v-model="llm.apiKey" /></div>
+                <div class="llm-row"><label>API URL：</label><input type="text" v-model="llm.baseUrl" /></div>
+                <div class="llm-row"><label>模型名称：</label><input type="text" v-model="llm.model" /></div>
+              </div>
+              <div class="prompt-label">AI 人设（SYSTEM_PROMPT）：</div>
+              <textarea class="prompt-area" v-model="llm.systemPrompt" placeholder="在这里编辑 AI 的虚拟主播人设…"></textarea>
+            </div>
+
+            <!-- ========== 记忆页（角色卡片：每个角色一张卡，点击弹出该角色记忆列表） ========== -->
+            <div v-else-if="page === 'memory'" key="memory">
+              <div class="memory-toolbar">
+                <input type="text" placeholder="搜索记忆关键词…" v-model="memQuery" />
+                <button class="btn btn-ghost" @click="loadMemory">刷新</button>
+                <span class="hint" style="margin-left:auto;">共 {{ memTotal }} 个记忆文件</span>
+              </div>
+              <div v-if="memError" class="mem-empty">记忆库读取失败：{{ memError }}（确认主程序已运行并导出 data/memory_graph.json）</div>
+              <div v-else-if="!memoryGroups.length" class="mem-empty">暂无记忆</div>
+              <!-- 角色卡片（对齐 Qt 图谱 user 簇：每个角色一张卡，点击弹出记忆列表弹窗） -->
+              <div class="plugin-grid role-grid">
+                <div v-for="g in memoryGroups" :key="g.user" class="plugin-card role-card" @click="openRole(g)">
+                  <div class="role-head">
+                    <span class="user-dot"></span>
+                    <span class="mem-user">{{ displayUser(g.user) }}</span>
+                    <span class="mem-count">{{ g.items.length }} 条</span>
+                  </div>
+                  <div class="role-preview">{{ rolePreview(g) }}</div>
+                </div>
+              </div>
+            </div>
+
+            <!-- ========== 设置页（对齐 Qt：选项面板 + TTS/STT/Agent/嵌入/B站表单） ========== -->
+            <div v-else-if="page === 'settings'" key="settings" class="settings-page">
+
+              <!-- 选项：2×3 复选面板（对齐 control_panel_frame） -->
+              <div class="section-title">选项</div>
+              <div class="card">
+                <div class="opts-grid">
+                  <label class="checkbox-row"><input type="checkbox" v-model="settings.plugins" />启用插件</label>
+                  <label class="checkbox-row"><input type="checkbox" v-model="settings.proactive" />主动对话</label>
+                  <label class="checkbox-row"><input type="checkbox" v-model="settings.filter" />内容过滤</label>
+                  <label class="checkbox-row"><input type="checkbox" v-model="settings.stt" />语音识别</label>
+                  <label class="checkbox-row"><input type="checkbox" v-model="settings.emotion" />情绪控制</label>
+                  <label class="checkbox-row"><input type="checkbox" v-model="settings.danmaku" />弹幕回复</label>
+                </div>
+              </div>
+
+              <!-- TTS 参考音频（对齐 formLayout_settings） -->
+              <div class="section-title">参考音频</div>
+              <div class="card">
+                <div class="field"><label>参考音频：</label><input type="text" v-model="settings.ttsAudio" placeholder="GPT-SoVITS 参考音频路径（可拖拽音频，留空 = 关闭 TTS）" /></div>
+                <div class="field"><label>音频文本：</label><input type="text" v-model="settings.ttsText" placeholder="参考音频文本" /></div>
+                <div class="field"><label>辅助参考：</label><input type="text" v-model="settings.ttsAudios" placeholder="辅助参考音频，多个用 | 分隔（可拖拽多个音频，与主参考混合）" /></div>
+              </div>
+
+              <!-- 语音识别（对齐 label_title_stt + formLayout_stt） -->
+              <div class="section-title">语音识别</div>
+              <div class="card">
+                <div class="field"><label>API Key：</label><input type="text" v-model="settings.sttKey" placeholder="SiliconFlow API Key（留空复用 .env 的 SILICONFLOW_API_KEY）" /></div>
+                <div class="field"><label>API URL：</label><input type="text" v-model="settings.sttUrl" placeholder="留空 = 与 SiliconFlow 共用服务（默认 https://api.siliconflow.cn/v1）" /></div>
+                <div class="field"><label>模型名称：</label><input type="text" v-model="settings.sttModel" placeholder="STT_MODEL（默认 FunAudioLLM/SenseVoiceSmall）" /></div>
+              </div>
+
+              <!-- Agent 模型（对齐 label_title_butler + formLayout_butler） -->
+              <div class="section-title">Agent 模型</div>
+              <div class="card">
+                <div class="field"><label>API KEY：</label><input type="password" v-model="settings.butlerKey" placeholder="Agent 服务 API Key" /></div>
+                <div class="field"><label>API URL：</label><input type="text" v-model="settings.butlerUrl" placeholder="Agent 服务地址（OpenAI 兼容）" /></div>
+                <div class="field"><label>模型名称：</label><input type="text" v-model="settings.butlerModel" placeholder="Agent 模型" /></div>
+              </div>
+
+              <!-- 嵌入模型（对齐 label_title_emb + formLayout_emb） -->
+              <div class="section-title">嵌入模型</div>
+              <div class="card">
+                <div class="field"><label>API KEY：</label><input type="password" v-model="settings.embKey" placeholder="嵌入服务 API Key" /></div>
+                <div class="field"><label>API URL：</label><input type="text" v-model="settings.embUrl" placeholder="嵌入服务地址（OpenAI 兼容）" /></div>
+                <div class="field"><label>模型名称：</label><input type="text" v-model="settings.embModel" placeholder="嵌入模型（默认 bge-m3）" /></div>
+              </div>
+
+              <!-- B 站弹幕（对齐 label_title_bili + formLayout_bili） -->
+              <div class="section-title">B 站弹幕</div>
+              <div class="card">
+                <div class="field"><label>直播间号：</label><input type="text" v-model="settings.biliRoom" placeholder="BILI_ROOM_ID（0 = 不连弹幕仅起网页）" /></div>
+                <div class="field"><label>登录令牌：</label><input type="password" v-model="settings.biliSessdata" placeholder="B站 Cookie（填了弹幕用户名不打码；留空可连但用户名打码）" /></div>
+                <div class="field"><label>网页端口：</label><input type="text" v-model="settings.biliPort" placeholder="BILI_SERVER_PORT（默认 8766）" /></div>
+              </div>
+            </div>
+
+            <!-- ========== 表情动作页（对齐 Qt face_page：真实模型库 + 拖拽绑定/解除 + 一键还原） ========== -->
+            <div v-else-if="page === 'face'" key="face" class="face-page">
+
+              <!-- 表情绑定区（对齐 Qt 表情绑定区：6 情绪槽卡片 2×3 + 一键还原，拖入表情绑定） -->
+              <div class="zone-head">
+                <span>表情绑定区域（拖拽下方表情按钮到对应情绪卡片绑定）</span>
+                <div class="spacer"></div>
+                <button class="btn btn-ghost" @click="resetExpr">↺ 一键还原表情</button>
+              </div>
+              <div class="zone-card">
+                <div class="emotion-grid">
+                  <div v-for="e in emotions" :key="e.name" class="emotion-card"
+                       :class="{ 'drag-over': face.dragOverEmo === e.name }"
+                       @dragover.prevent="face.dragOverEmo = e.name"
+                       @drop.prevent="onFaceDrop($event, e.name); face.dragOverEmo = null">
+                    <div class="e-name">{{ e.name }}</div>
+                    <div class="e-slot">
+                      <span v-for="b in faceBinds(e.name).expression" :key="b" class="bind-chip"
+                            :title="'点击解除：' + b" @click.stop="unbindExpr(e.name, b)">{{ b }} ×</span>
+                      <span v-if="!faceBinds(e.name).expression.length" class="e-empty">拖入表情到此绑定</span>
+                    </div>
+                  </div>
+                </div>
+              </div>
+              <div class="lib-card">
+                <div class="lib-title">表情按钮（点击试播，拖拽到上方情绪卡片绑定，再拖同名 = 解除）</div>
+                <div class="lib-grid">
+                  <button v-for="b in face.exprLib" :key="b" class="lib-btn"
+                          v-show="!isExprBoundAny(b)" draggable="true"
+                          @dragstart="onFaceDragStart($event, 'expression', b)"
+                          @dragend="face.dragOverEmo = null"
+                          @click="previewExpr(b)">{{ b }}</button>
+                  <span v-if="!face.exprLib.length" class="e-empty" style="grid-column: 1 / -1; text-align: center;">该模型没有可用的表情</span>
+                </div>
+              </div>
+
+              <!-- 动作绑定区（对齐 Qt 动作绑定区 + 默认待机动作下拉） -->
+              <div class="zone-head">
+                <span>动作绑定区域（拖拽下方动作按钮到对应情绪卡片绑定）</span>
+                <div class="spacer"></div>
+                <button class="btn btn-ghost" @click="resetMotion">↺ 一键还原动作</button>
+              </div>
+              <div class="zone-card">
+                <div class="emotion-grid">
+                  <div v-for="e in emotions" :key="e.name" class="emotion-card"
+                       :class="{ 'drag-over': face.dragOverEmo === e.name }"
+                       @dragover.prevent="face.dragOverEmo = e.name"
+                       @drop.prevent="onFaceDrop($event, e.name); face.dragOverEmo = null">
+                    <div class="e-name">{{ e.name }}</div>
+                    <div class="e-slot">
+                      <span v-for="b in faceBinds(e.name).motion" :key="b" class="bind-chip"
+                            :title="'点击解除：' + b" @click.stop="unbindMotion(e.name, b)">{{ b }} ×</span>
+                      <span v-if="!faceBinds(e.name).motion.length" class="e-empty">拖入动作到此绑定</span>
+                    </div>
+                  </div>
+                </div>
+              </div>
+              <div class="lib-card">
+                <div class="lib-title">
+                  <span>动作按钮（点击试播，拖拽到上方情绪卡片绑定，再拖同名 = 解除）</span>
+                  <div class="spacer"></div>
+                  <span class="idle-label">默认待机动作</span>
+                  <div class="select-wrap">
+                    <select class="idle-sel" v-model="face.idleMotion">
+                      <option value="">自动（智能匹配待机）</option>
+                      <option v-for="m in face.motionLib" :key="m" :value="m">{{ m }}</option>
+                    </select>
+                  </div>
+                </div>
+                <div class="lib-grid">
+                  <button v-for="b in face.motionLib" :key="b" class="lib-btn"
+                          v-show="!isMotionBoundAny(b)" draggable="true"
+                          @dragstart="onFaceDragStart($event, 'motion', b)"
+                          @dragend="face.dragOverEmo = null"
+                          @click="previewMotion(b)">{{ b }}</button>
+                  <span v-if="!face.motionLib.length" class="e-empty" style="grid-column: 1 / -1; text-align: center;">该模型没有可用的动作</span>
+                </div>
+              </div>
+              <div class="zone-status">{{ faceStatus() }}</div>
+            </div>
+
+            <!-- ========== 插件页（对齐 Qt plugin_card + stack_tools 列表/配置双视图） ========== -->
+            <div v-else-if="page === 'plugins'" key="plugins">
+              <!-- 配置视图（对齐 Qt stack_tools index=1：字段表单 / MCP JSON 编辑器） -->
+              <div v-if="configPlugin" class="plugin-config-page">
+                <div v-if="mcpServerKey" class="card">
+                  <div class="field"><label>说明</label><span class="hint">直接编辑该 MCP 服务器的 mcp_config.json 配置（JSON）</span></div>
+                  <textarea class="prompt-area mcp-editor" v-model="mcpDraft" spellcheck="false"></textarea>
+                </div>
+                <div v-else class="card">
+                  <div v-for="f in configFields" :key="f.envKey" class="field">
+                    <label>{{ f.label }}：</label>
+                    <input type="text" v-model="f.value" :placeholder="f.envKey" />
+                  </div>
+                </div>
+              </div>
+              <!-- 列表视图（对齐 Qt stack_tools index=0） -->
+              <div v-else-if="!plugins.length" class="mem-empty">
+                插件数据由 Tauri 后端动态提供（load_plugins，对齐 ui plugin_handler）。浏览器预览无后端时列表为空，请使用打包后的 exe。
+              </div>
+              <div v-else class="plugin-grid">
+                <!-- 启用/关闭只能通过按钮操作，点击卡片本身不触发（对齐 Qt 卡片仅展示） -->
+                <div v-for="p in plugins" :key="p.id" class="plugin-card">
+                  <div class="p-name">
+                    <span class="p-name-text">{{ p.name }}</span>
+                    <span class="pill kind">{{ p.kind }}</span>
+                  </div>
+                  <div class="p-status" :class="p.statusCls">{{ p.status }}</div>
+                  <div class="p-desc">{{ p.desc }}</div>
+                  <div class="p-actions">
+                    <button v-if="p.config" class="btn btn-ghost" @click="openPluginConfig(p)">配置</button>
+                    <button v-if="p.checkable" class="btn" :class="p.enabled ? 'btn-danger' : 'btn-primary'"
+                            @click="togglePlugin(p)">{{ p.enabled ? '关闭' : '启用' }}</button>
+                  </div>
+                </div>
+              </div>
+            </div>
+
+            <!-- ========== 关于页 ========== -->
+            <div v-else key="about">
+              <div class="about-hero">
+                <div class="a-title">E.V 控制中心</div>
+                <div class="a-ver">v0.9.0 · Tauri 2 + Vue 3 预览版</div>
+              </div>
+              <div class="card" style="max-width:520px; margin: 10px auto;">
+                <div class="field"><label>技术栈</label><span class="hint">Tauri 2 · Vue 3 · Rust</span></div>
+                <div class="field"><label>视觉风格</label><span class="hint">dsh-web-ui · 鲸吟 / E.V 角色风</span></div>
+                <div class="field"><label>来源</label><span class="hint">github.com/zhu1090093659/dsh-web-ui</span></div>
+              </div>
+            </div>
+          </transition>
+        </div>
+      </section>
+    </div>
+
+    <!-- 底部状态栏 -->
+    <footer class="statusbar">
+      <span><span class="dot"></span>{{ running ? '主程序运行中' : '主程序已停止' }}</span>
+      <span>本地 ASR 服务：{{ asrOk ? '在线' : '未连接' }}</span>
+      <span>TTS 服务：{{ ttsOk ? '在线' : '未连接' }}</span>
+      <span style="margin-left:auto;">{{ skinName }}</span>
+    </footer>
+
+    <!-- 角色记忆列表弹窗（对齐 Qt MemoryListDialog：点击角色卡弹出，
+         点某条记忆再弹详情；点空白/关闭按钮关闭） -->
+    <div v-if="roleModal" class="mem-modal" @click.self="closeRole">
+      <div class="mem-modal-card role-list-card">
+        <div class="mem-modal-title">
+          <span class="user-dot"></span>
+          <span class="mem-modal-name">{{ displayUser(roleModal.user) }}</span>
+          <span class="mem-count">{{ roleModal.items.length }} 条</span>
+        </div>
+        <div class="mem-divider"></div>
+        <div class="role-list">
+          <div v-for="m in roleModal.items" :key="m.id" class="role-item" @click="openMemoryDetail(m)">
+            <span class="chip" :style="{ background: memoryType(m).color }">{{ memoryType(m).text }}</span>
+            <div class="role-item-main">
+              <div class="role-item-name">{{ m.name }}</div>
+              <div class="role-item-snippet">{{ m.content }}</div>
+            </div>
+            <span class="m-time">{{ fmtTime(m.created_at) }}</span>
+            <button class="btn btn-ghost mem-del" title="删除这条记忆" @click.stop="deleteMemory(m.id)">删除</button>
+          </div>
+          <div v-if="!roleModal.items.length" class="mem-empty">该角色暂无记忆</div>
+        </div>
+        <div class="mem-bottom">
+          <div class="spacer"></div>
+          <button class="btn btn-primary" @click="closeRole">关闭</button>
+        </div>
+      </div>
+    </div>
+
+    <!-- 记忆详情弹窗（对齐 Qt MemoryDetailDialog：标题行/摘要/分隔线/正文/底栏，
+         点空白或关闭按钮关闭，长文内部滚动） -->
+    <div v-if="selectedMem" class="mem-modal mem-modal-top" @click.self="closeMemoryDetail">
+      <div class="mem-modal-card">
+        <!-- 1. 标题行：类型徽标（圆点●+名称，半透明同色底） + 记忆名 + 右上归属/类型 chips -->
+        <div class="mem-modal-title">
+          <span class="type-badge" :style="{ '--chip-color': memoryType(selectedMem).color }">
+            <span class="type-dot">●</span>
+            <span class="type-text">{{ memoryType(selectedMem).text }}</span>
+          </span>
+          <span class="mem-modal-name">{{ selectedMem.name || '记忆' }}</span>
+          <span class="mem-modal-chips">
+            <span class="mem-chip" :style="{ '--chip-color': memChipColor('user', selectedMem.user || 'chao') }">{{ displayUser(selectedMem.user || 'chao') }}</span>
+            <span class="mem-chip" :style="{ '--chip-color': memChipColor('track') }">{{ selectedMem.track || 'memory' }}</span>
+          </span>
+        </div>
+        <!-- 2. 一句话摘要（有才显示） -->
+        <div v-if="selectedMem.description" class="mem-desc">{{ selectedMem.description }}</div>
+        <!-- 3. 分隔线 -->
+        <div class="mem-divider"></div>
+        <!-- 4. 正文全文（只读，内部滚动，不撑大弹窗） -->
+        <div class="mem-body">{{ selectedMem.content || '（无正文内容）' }}</div>
+        <!-- 5. 底栏：更新时间 + 删除（确认后删除）+ 关闭 -->
+        <div class="mem-bottom">
+          <span class="m-time">更新于 {{ fmtFullTime(selectedMem.updated_at || selectedMem.created_at) }}</span>
+          <div class="spacer"></div>
+          <button class="btn btn-danger" @click="deleteMemory(selectedMem.id)">删除</button>
+          <button class="btn btn-primary" @click="closeMemoryDetail">关闭</button>
+        </div>
+      </div>
+    </div>
+
+    <!-- 关闭确认弹窗（替换原生 confirm：对齐 ui dialogs/confirm.py _ConfirmDialog，
+         标题/正文居中 + 分隔线 + 取消靠左/确认靠右） -->
+    <div v-if="showCloseConfirm" class="mem-modal dialog-modal" @click.self="showCloseConfirm = false">
+      <div class="mem-modal-card dialog-card">
+        <div class="dialog-title">确认要退出吗？</div>
+        <div class="dialog-desc">控制中心窗口将退出，主程序（vtuber）继续在后台运行。<br>如需停止主程序，请先点击顶栏「停止」。</div>
+        <div class="dialog-divider"></div>
+        <div class="dialog-actions">
+          <button class="btn btn-ghost" @click="showCloseConfirm = false">取消</button>
+          <button class="btn btn-danger" @click="doCloseWin">确认关闭</button>
+        </div>
+      </div>
+    </div>
+  </div>
+</div>
+
+<style>[v-cloak] { display: none; }</style>
+
+<script>
+const { createApp } = Vue;
+
+// Tauri 2 桥：打包 exe 内 window.__TAURI__ 由 withGlobalTauri 注入；
+// 浏览器预览（启动预览.bat）无桥 → 回退 localStorage / 静态文件模拟。
+const hasBackend = !!(window.__TAURI__ && window.__TAURI__.core && window.__TAURI__.core.invoke);
+const invoke = (...args) => window.__TAURI__.core.invoke(...args);
+
+const vm = createApp({
+  data() {
+    // 自定义外观持久化（颜色/透明度类，背景图 data URL 体积大不落盘）
+    let saved = {};
+    try { saved = JSON.parse(localStorage.getItem('cAppearance') || '{}'); } catch (e) { /* 忽略损坏的存储 */ }
+    // LLM 配置持久化（保存过的值优先，否则用默认）
+    let llmSaved = {};
+    try { llmSaved = JSON.parse(localStorage.getItem('llmCfg') || '{}'); } catch (e) { /* 忽略损坏的存储 */ }
+    return {
+      skins: [
+        { id: 'whale', name: '鲸吟' },
+        { id: 'ev', name: 'E.V' },
+      ],
+      skin: 'ev',
+      page: 'launch',
+      pages: [
+        { id: 'launch', name: '启动', sub: '主程序启停 · 对话/工具日志', icon: '<path d="M21 11.5a8.38 8.38 0 0 1-.9 3.8 8.5 8.5 0 0 1-7.6 4.7 8.38 8.38 0 0 1-3.8-.9L3 21l1.9-5.7a8.38 8.38 0 0 1-.9-3.8 8.5 8.5 0 0 1 4.7-7.6 8.38 8.38 0 0 1 3.8-.9h.5a8.48 8.48 0 0 1 8 8v.5z"/>' },
+        { id: 'llm', name: 'LLM 配置', sub: '对话模型 · 嵌入模型', icon: '<path d="M4 21v-7M4 10V3M12 21v-9M12 8V3M20 21v-5M20 12V3M1 14h6M9 8h6M17 16h6"/>' },
+        { id: 'settings', name: '设置', sub: '语音识别 · 弹幕 · 运行模式', icon: '<circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 0 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-4 0v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 0 1-2.83-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 0 1 2.83-2.83l.06.06a1.65 1.65 0 0 0 1.82.33H9a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 0 1 2.83 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82V9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z"/>' },
+        { id: 'face', name: '表情动作', sub: '情绪卡片 · VTS 绑定', icon: '<circle cx="12" cy="12" r="10"/><path d="M8 14s1.5 2 4 2 4-2 4-2"/><path d="M9 9.5h.01M15 9.5h.01"/>' },
+        { id: 'plugins', name: '插件', sub: '外部工具 · 服务托管', icon: '<path d="M4 7h16M7 7v-2h10v2M6 7l1 13h10l1-13"/><path d="M9 11h6M9 15h6"/>' },
+        { id: 'memory', name: '记忆', sub: '核心身份 · 长期偏好 · 历史摘要', icon: '<ellipse cx="12" cy="5" rx="9" ry="3"/><path d="M21 12c0 1.66-4 3-9 3s-9-1.34-9-3"/><path d="M3 5v14c0 1.66 4 3 9 3s9-1.34 9-3V5"/>' },
+        { id: 'about', name: '关于', sub: '版本与技术栈', icon: '<circle cx="12" cy="12" r="10"/><path d="M12 16v-4M12 8h.01"/>' },
+      ],
+      running: true,
+      runMode: '桌宠',
+      petModel: 'live2d/肥牛/feiniu.model3.json',
+      petModels: [
+        'live2d/肥牛/feiniu.model3.json',
+        'live2d/【免费版】悠小喵/悠小喵/悠小喵.model3.json',
+        'live2d/阿芙洛狄忒模型文件/fense/fense.model3.json',
+        'live2d/阿芙洛狄忒模型文件/fense_vts/fense.model3.json',
+        'live2d/yumi_vts/yumi.model3.json',
+        'live2d/mianfeimox/llny.model3.json',
+      ],
+      llmModels: ['qwen3-32b', 'qwen3-8b', 'deepseek-chat', 'gpt-4o-mini'],
+      asrOk: true,
+      ttsOk: true,
+      chatLogs: [],
+      toolLogs: [],
+      llm: {
+        apiKey: llmSaved.apiKey || '', baseUrl: llmSaved.baseUrl || 'http://127.0.0.1:11434/v1', model: llmSaved.model || 'qwen3-32b',
+        systemPrompt: llmSaved.systemPrompt || '你是「小鲸灵」，一位深海出生的元气虚拟主播。说话轻快活泼、爱用颜文字，'
+          + '会主动接梗、点歌互动。直播中记住每一位观众，用「指指点点」的梗拉近距离。'
+          + '当收到礼物时欢呼感谢，遇到恶意弹幕时撒娇式反击。',
+      },
+      settings: {
+        plugins: true, proactive: true, filter: true, stt: true, emotion: true, danmaku: true,
+        ttsAudio: '', ttsText: '', ttsAudios: '',
+        sttKey: '', sttUrl: '', sttModel: '',
+        butlerKey: '', butlerUrl: '', butlerModel: '',
+        embKey: '', embUrl: '', embModel: 'bge-m3',
+        biliRoom: '21452505', biliSessdata: '', biliPort: '8766',
+      },
+      memFiles: [],
+      memQuery: '',
+      memError: '',
+      selectedMem: null,   // 当前查看详情的记忆（null = 无详情弹窗）
+      roleModal: null,     // 当前打开的角色记忆列表弹窗 { user, items }（null = 无列表弹窗）
+      // 本会话/本地已删除的记忆 id（对齐 Qt _deleted_ids 语义，刷新后仍过滤）
+      deletedIds: JSON.parse(localStorage.getItem('memDeletedIds') || '[]'),
+      // 自定义外观（空值 = 跟随当前皮肤；设置后覆盖 CSS 变量）
+      showCustom: false,
+      customBg: '',
+      customBgName: '',
+      customDim: saved.dim || 0,
+      customOpacity: saved.opacity || 100,
+      customBrand: saved.brand || '',
+      customLabel: saved.label || '',
+      customLabel2: saved.label2 || '',
+      customBorder: saved.border || '',
+      emotions: [
+        { name: '开心' }, { name: '生气' }, { name: '疑惑' },
+        { name: '悲伤' }, { name: '害怕' }, { name: '厌恶' },
+      ],
+      // 表情/动作绑定（对齐 Qt FaceHandler：读真实模型库 vts_face_lib.json，
+      // 拖拽绑定/解除，映射随「更新配置」保存）
+      face: {
+        idleMotion: '',          // 默认待机动作（'' = 自动）
+        modelName: '',           // 当前模型名（读运行时扫描缓存）
+        exprLib: [],             // 模型自带表情（点击试播 / 拖拽绑定）
+        motionLib: [],           // 模型自带动作
+        libStatus: '',           // 模型库状态提示（对齐 Qt label_map_status）
+        lastStatus: '',          // 最近一次操作提示（绑定/还原）
+        dragOverEmo: null,       // 当前拖拽悬停的情绪卡（高亮）
+        binds: (() => {          // { 情绪: { expression: [...], motion: [...] } }
+          try { return JSON.parse(localStorage.getItem('faceMap') || '{}'); }
+          catch (e) { return {}; }
+        })(),
+      },
+      // 插件列表：由 Tauri 后端 load_all/load_plugins 动态提供（对齐 ui plugin_handler），
+      // 不在前端写死。浏览器预览无后端时为 []。
+      plugins: [],
+      // 插件配置页状态（对齐 Qt stack_tools：列表 ↔ 配置双视图）
+      configPlugin: null,   // 当前配置中的插件（null = 列表视图）
+      showCloseConfirm: false, // 关闭确认弹窗（替换原生 confirm）
+      saveState: 'idle', // 顶栏保存按钮反馈态：'idle' | 'saved'（保存成功变红显示已保存）
+      _saveTimer: null, // 保存反馈恢复定时器
+      configFields: [],     // 字段表单：[{ envKey, label, value }]
+      mcpServerKey: '',     // 非空 = MCP 配置（JSON 编辑器），值为服务器 key
+      mcpDraft: '',         // MCP 配置页：JSON 草稿
+      attachName: '',       // 输入区已选择的文件名（空 = 未选）
+      // 后端 load_all 返回的 .env 快照（插件配置页 / 启动页取当前值）
+      _env: {},
+    };
+  },
+  computed: {
+    current() {
+      return this.pages.find(p => p.id === this.page);
+    },
+    skinName() { return this.skins.find(s => s.id === this.skin).name; },
+    // 记忆按归属者分组（对齐 memory_graph 的 user 簇语义），支持关键词过滤
+    memoryGroups() {
+      const q = this.memQuery.trim().toLowerCase();
+      const groups = {};
+      for (const f of this.memFiles) {
+        if (this.deletedIds.includes(f.id)) continue;
+        if (q && !(f.name + ' ' + (f.content || '')).toLowerCase().includes(q)) continue;
+        const user = f.user || 'chao';
+        (groups[user] ||= []).push(f);
+      }
+      return Object.keys(groups).map(user => ({ user, items: groups[user] }));
+    },
+    memTotal() { return this.memFiles.length; },
+  },
+  methods: {
+    // ---- 后端接入：load_all 回填全部页面（浏览器预览回退现有模拟） ----
+    async loadAll() {
+      if (!hasBackend) {
+        this.loadMemory();
+        this.loadFaceLib();
+        return;
+      }
+      try {
+        const d = await invoke('load_all');
+        const env = d.env || {};
+        this._env = env;
+        // LLM 页
+        this.llm.apiKey = env.LLM_API_KEY || '';
+        this.llm.baseUrl = env.LLM_BASE_URL || '';
+        this.llm.model = env.LLM_MODEL || '';
+        this.llm.systemPrompt = d.systemPrompt || this.llm.systemPrompt;
+        // 设置页：选项开关（字符串 true/false）
+        this.settings.plugins = env.TOOLS_ENABLED !== 'false';
+        this.settings.proactive = env.PROACTIVE_ENABLED !== 'false';
+        this.settings.filter = env.PROFANITY_FILTER_ENABLED !== 'false';
+        this.settings.stt = env.STT_ENABLED !== 'false';
+        this.settings.emotion = env.EMOTION_ACTOR_ENABLED !== 'false';
+        this.settings.danmaku = env.BILI_ENABLED === 'true';
+        this.settings.sttKey = env.STT_API_KEY || '';
+        this.settings.sttUrl = env.STT_BASE_URL || '';
+        this.settings.sttModel = env.STT_MODEL || '';
+        this.settings.ttsAudio = env.GPTSOVITS_REF_AUDIO || '';
+        this.settings.ttsText = env.GPTSOVITS_PROMPT_TEXT || '';
+        this.settings.ttsAudios = env.GPTSOVITS_REF_AUDIOS || '';
+        this.settings.butlerKey = env.BUTLER_API_KEY || '';
+        this.settings.butlerUrl = env.BUTLER_BASE_URL || '';
+        this.settings.butlerModel = env.BUTLER_MODEL || '';
+        this.settings.embKey = env.EMBEDDING_API_KEY || '';
+        this.settings.embUrl = env.EMBEDDING_BASE_URL || '';
+        this.settings.embModel = env.EMBEDDING_MODEL || '';
+        this.settings.biliRoom = env.BILI_ROOM_ID || '';
+        this.settings.biliSessdata = env.BILI_SESSDATA || '';
+        this.settings.biliPort = env.BILI_SERVER_PORT || '';
+        // 启动页：运行模式 / Live2D 模型 / 运行状态
+        this.runMode = env.RUN_MODE === 'pet' ? '桌宠' : 'VTS';
+        if (d.petModels && d.petModels.length) this.petModels = d.petModels;
+        if (env.PET_MODEL_PATH && this.petModels.includes(env.PET_MODEL_PATH)) {
+          this.petModel = env.PET_MODEL_PATH;
+        } else {
+          this.petModel = (d.petModels && d.petModels[0]) || '';
+        }
+        this.running = !!d.appRunning;
+        // 插件页
+        if (Array.isArray(d.plugins)) this.plugins = d.plugins;
+        // 表情动作页：模型库（vts_face_lib.json）+ 映射（emotion_map*.json）
+        if (d.faceLib && d.faceLib.model_name) {
+          this.face.modelName = d.faceLib.model_name;
+          this.face.exprLib = d.faceLib.expressions || [];
+          this.face.motionLib = d.faceLib.motions || [];
+          this.face.libStatus = `表情库已就绪（${d.faceLib.model_name}）：${this.face.exprLib.length} 个表情｜${this.face.motionLib.length} 个动作`;
+        }
+        if (d.emotionMap && typeof d.emotionMap === 'object') this.face.binds = d.emotionMap;
+        this.face.idleMotion = env.PET_IDLE_MOTION || '';
+        // 记忆页
+        if (d.memory && Array.isArray(d.memory.files)) {
+          this.memFiles = d.memory.files;
+          this.memError = '';
+        }
+      } catch (e) {
+        console.error('load_all 失败：', e);
+      }
+    },
+    // 重读插件行（启停切换后刷新卡片，对齐 Qt _fill_plugin_cards）
+    async refreshPlugins() {
+      if (!hasBackend) return;
+      try { this.plugins = await invoke('load_plugins'); }
+      catch (e) { console.error('load_plugins 失败：', e); }
+    },
+    // ---- 启动页：主程序 启动/停止（对齐 Qt ProcessHandler._toggle） ----
+    async toggleRunning() {
+      if (hasBackend) {
+        try {
+          if (this.running) {
+            // 优雅停止：发 /quit 走归档流程，进程退出后 app-finished 事件置 running=false
+            await invoke('stop_app');
+            this._logLocal('工具日志', '[控制中心] 正在停止主程序（优雅归档后退出）…');
+          } else {
+            const mode = this.runMode === '桌宠' ? 'pet' : 'vtuber';
+            const model = this.runMode === '桌宠' ? this.petModel : '';
+            await invoke('start_app', { mode, model });
+            this.running = true;
+            this._logLocal('工具日志', '[控制中心] 主程序已启动（日志实时滚动）');
+          }
+        } catch (e) {
+          alert('操作失败：' + e);
+        }
+      } else {
+        // 浏览器预览：仅本地切换状态
+        this.running = !this.running;
+      }
+    },
+    // 启动页输入：发送消息给主程序（对齐 Qt 输入框 write stdin；未运行回退本地记录）
+    sendMessage() {
+      const el = document.querySelector('.launch-input textarea');
+      const text = el ? el.value.trim() : '';
+      if (!text) return;
+      el.value = '';
+      if (hasBackend && this.running) {
+        invoke('send_cmd', { line: text }).catch(e => console.error('send_cmd 失败：', e));
+        this.chatLogs.push({ t: this._now(), cls: 'user', text: text });
+      } else {
+        this.chatLogs.push({
+          t: this._now(), cls: 'user',
+          text: text + (hasBackend && !this.running ? '（主程序未运行，未发送）' : ''),
+        });
+      }
+    },
+    _now() {
+      return new Date().toTimeString().slice(0, 5);
+    },
+    _logLocal(panel, text) {
+      const line = { t: this._now(), cls: 'sys', text };
+      if (panel === '工具日志') this.toolLogs.push(line);
+      else this.chatLogs.push(line);
+    },
+    // 主程序 stdout 日志分流：CHAT_TAG（\u2060）包裹的片段归「对话」栏，其余归「工具日志」
+    // （对齐 Qt ProcessHandler._log：按标记切分；这里每行整行判定）
+    _routeLog(line) {
+      const clean = String(line).replace(/\u2060/g, '').replace(/\x1b\[[0-9;]*m/g, '');
+      if (!clean) return;
+      const isChat = String(line).includes('\u2060');
+      const entry = { t: this._now(), cls: isChat ? '' : 'sys', text: clean };
+      (isChat ? this.chatLogs : this.toolLogs).push(entry);
+      if (this.toolLogs.length > 2000) this.toolLogs.shift();
+      if (this.chatLogs.length > 2000) this.chatLogs.shift();
+    },
+    // 日志窗口自动滚动：新内容到达即滚到底部，保证最新日志始终可见
+    // （监控性质，以看最新为主；批量回填/单条到达均跟随）
+    _autoScrollLogs() {
+      document.querySelectorAll('.log-split .lp-body').forEach((el) => {
+        el.scrollTop = el.scrollHeight;
+      });
+    },
+    // 设置页保存：差分写 .env（值=空或代码默认 → skipDefault 移除行，对齐 Qt _update_env_skip_default）
+    saveSettings() {
+      // B站房间号/端口必须是纯数字（对齐 Qt 保存前校验，避免主程序 int() 崩溃）
+      if (this.settings.biliRoom.trim() && !/^\d+$/.test(this.settings.biliRoom.trim())) {
+        alert('BILI_ROOM_ID 必须是纯数字，当前输入：' + this.settings.biliRoom);
+        return;
+      }
+      if (this.settings.biliPort.trim() && !/^\d+$/.test(this.settings.biliPort.trim())) {
+        alert('BILI_SERVER_PORT 必须是纯数字，当前输入：' + this.settings.biliPort);
+        return;
+      }
+      const entries = [
+        { key: 'TOOLS_ENABLED', value: this.settings.plugins ? 'true' : 'false', skipDefault: true },
+        { key: 'PROACTIVE_ENABLED', value: this.settings.proactive ? 'true' : 'false', skipDefault: true },
+        { key: 'PROFANITY_FILTER_ENABLED', value: this.settings.filter ? 'true' : 'false', skipDefault: true },
+        { key: 'STT_ENABLED', value: this.settings.stt ? 'true' : 'false', skipDefault: true },
+        { key: 'EMOTION_ACTOR_ENABLED', value: this.settings.emotion ? 'true' : 'false', skipDefault: true },
+        { key: 'BILI_ENABLED', value: this.settings.danmaku ? 'true' : 'false', skipDefault: true },
+        { key: 'STT_API_KEY', value: this.settings.sttKey.trim(), skipDefault: true },
+        { key: 'STT_BASE_URL', value: this.settings.sttUrl.trim(), skipDefault: true },
+        { key: 'STT_MODEL', value: this.settings.sttModel.trim(), skipDefault: true },
+        { key: 'GPTSOVITS_REF_AUDIO', value: this.settings.ttsAudio.trim(), skipDefault: false },
+        { key: 'GPTSOVITS_PROMPT_TEXT', value: this.settings.ttsText.trim(), skipDefault: false },
+        { key: 'GPTSOVITS_REF_AUDIOS', value: this.settings.ttsAudios.trim(), skipDefault: false },
+        { key: 'BUTLER_BASE_URL', value: this.settings.butlerUrl.trim(), skipDefault: false },
+        { key: 'BUTLER_MODEL', value: this.settings.butlerModel.trim(), skipDefault: false },
+        { key: 'BUTLER_API_KEY', value: this.settings.butlerKey.trim(), skipDefault: false },
+        { key: 'EMBEDDING_BASE_URL', value: this.settings.embUrl.trim(), skipDefault: false },
+        { key: 'EMBEDDING_MODEL', value: this.settings.embModel.trim(), skipDefault: false },
+        { key: 'EMBEDDING_API_KEY', value: this.settings.embKey.trim(), skipDefault: false },
+        { key: 'BILI_ROOM_ID', value: this.settings.biliRoom.trim(), skipDefault: true },
+        { key: 'BILI_SESSDATA', value: this.settings.biliSessdata.trim(), skipDefault: true },
+        { key: 'BILI_SERVER_PORT', value: this.settings.biliPort.trim(), skipDefault: true },
+      ];
+      if (hasBackend) {
+        invoke('save_env', { entries })
+          .then(() => {
+            this._env = Object.assign({}, this._env, this._entriesToMap(entries));
+            if (this.running) invoke('send_cmd', { line: '!config' }).catch(() => {});
+            this._logLocal('工具日志', '[控制中心] 设置已保存到 .env（已热更新）');
+            this._flashSaved();
+          })
+          .catch(e => alert('保存失败：' + e));
+      } else {
+        console.log('settings saved', JSON.stringify(this.settings));
+        this._flashSaved();
+      }
+    },
+    // entries → { key: value } 映射（合并进 _env 供插件配置页取最新值）
+    _entriesToMap(entries) {
+      const m = {};
+      for (const e of entries) if (e.value !== null && e.value !== undefined) m[e.key] = e.value;
+      return m;
+    },
+    // 保存成功反馈：按钮变红显示「已保存」，1.5s 后恢复（对齐 ui deleteBtn 玫红）
+    _flashSaved() {
+      this.saveState = 'saved';
+      clearTimeout(this._saveTimer);
+      this._saveTimer = setTimeout(() => { this.saveState = 'idle'; }, 1500);
+    },
+    // 顶栏「保存」：按当前页面分发到对应配置保存（对齐 Qt 全局 btn_save_config）
+    saveCurrent() {
+      if (this.page === 'llm') this.saveLlmConfig();
+      else if (this.page === 'settings') this.saveSettings();
+      else if (this.page === 'face') this.saveFaceConfig();
+    },
+    // LLM 配置保存：写 .env 三键 + 人设文件（保留 frontmatter），主程序运行中热更新
+    saveLlmConfig() {
+      const entries = [
+        { key: 'LLM_API_KEY', value: this.llm.apiKey.trim(), skipDefault: false },
+        { key: 'LLM_BASE_URL', value: this.llm.baseUrl.trim(), skipDefault: false },
+        { key: 'LLM_MODEL', value: this.llm.model.trim(), skipDefault: false },
+      ];
+      if (hasBackend) {
+        Promise.all([
+          invoke('save_env', { entries }),
+          invoke('save_system_prompt', { text: this.llm.systemPrompt }),
+        ])
+          .then(() => {
+            if (this.running) invoke('send_cmd', { line: '!config' }).catch(() => {});
+            this._logLocal('工具日志', '[控制中心] LLM 配置与人设已保存（已热更新）');
+            this._flashSaved();
+          })
+          .catch(e => alert('保存失败：' + e));
+      } else {
+        localStorage.setItem('llmCfg', JSON.stringify(this.llm));
+        console.log('llm config saved', JSON.stringify(this.llm));
+        this._flashSaved();
+      }
+    },
+    // ---- 表情动作页（对齐 Qt FaceHandler：真实模型库 + 拖拽绑定/解除 + 一键还原） ----
+    // 某情绪的绑定条目（无则返回空）
+    faceBinds(emo) {
+      const b = this.face.binds[emo];
+      return b ? { expression: b.expression || [], motion: b.motion || [] }
+               : { expression: [], motion: [] };
+    },
+    // 状态栏：最近一次操作提示优先，否则显示模型库状态（对齐 Qt label_map_status）
+    faceStatus() {
+      return this.face.lastStatus || this.face.libStatus;
+    },
+    // 绑定/解除切换（对齐 Qt _on_bind_expr/_on_bind_motion：同情绪可绑多个，再拖同名 = 解除）
+    _toggleFaceBind(emo, kind, name) {
+      const entry = (this.face.binds[emo] = this.face.binds[emo] || {});
+      const items = (entry[kind] = entry[kind] || []);
+      const label = kind === 'expression' ? '表情' : '动作';
+      if (items.includes(name)) items.splice(items.indexOf(name), 1);
+      else items.push(name);
+      if (!entry.expression && !entry.motion) delete this.face.binds[emo];
+      const status = items.length ? items.join('、') : '（无）';
+      this.face.lastStatus = `已绑定：${emo} → ${label} ${status}（点底部「更新配置」保存）`;
+    },
+    unbindExpr(emo, name) { this._toggleFaceBind(emo, 'expression', name); },
+    unbindMotion(emo, name) { this._toggleFaceBind(emo, 'motion', name); },
+    // 拖拽绑定：库按钮 → 情绪卡（对齐 Qt _DragButton 拖入槽位）
+    onFaceDragStart(e, kind, name) {
+      e.dataTransfer.setData('text/plain', JSON.stringify({ kind, name }));
+      e.dataTransfer.effectAllowed = 'copy';
+    },
+    onFaceDrop(e, emo) {
+      let d = null;
+      try { d = JSON.parse(e.dataTransfer.getData('text/plain')); } catch (err) { return; }
+      if (!d || !d.name) return;
+      if (d.kind === 'expression') this._toggleFaceBind(emo, 'expression', d.name);
+      else if (d.kind === 'motion') this._toggleFaceBind(emo, 'motion', d.name);
+    },
+    // 库按钮是否已绑定到任意情绪（对齐 Qt：已绑定按钮从库中隐藏）
+    isExprBoundAny(name) {
+      return this.emotions.some(e => this.faceBinds(e.name).expression.includes(name));
+    },
+    isMotionBoundAny(name) {
+      return this.emotions.some(e => this.faceBinds(e.name).motion.includes(name));
+    },
+    // 点击库按钮试播（对齐 Qt _preview_expr/_preview_motion；预览页主程序未运行）
+    previewExpr(name) {
+      this.face.lastStatus = `试播：/expr ${name}（主程序未运行，无法试播）`;
+      console.log('/expr ' + name);
+    },
+    previewMotion(name) {
+      this.face.lastStatus = `试播：/motion ${name}（主程序未运行，无法试播）`;
+      console.log('/motion ' + name);
+    },
+    // 一键还原：表情区 / 动作区各自批量清空（对齐 Qt _reset_expr/_reset_action）
+    resetExpr() {
+      for (const e of this.emotions) {
+        if (this.face.binds[e.name]) {
+          delete this.face.binds[e.name].expression;
+          if (!this.face.binds[e.name].motion) delete this.face.binds[e.name];
+        }
+      }
+      this.face.lastStatus = '已还原全部表情绑定（点底部「更新配置」保存）';
+    },
+    resetMotion() {
+      for (const e of this.emotions) {
+        if (this.face.binds[e.name]) {
+          delete this.face.binds[e.name].motion;
+          if (!this.face.binds[e.name].expression) delete this.face.binds[e.name];
+        }
+      }
+      this.face.idleMotion = '';   // 默认待机恢复「自动」
+      this.face.lastStatus = '已还原全部动作绑定（点底部「更新配置」保存）';
+    },
+    // 读运行时 VTS 扫描缓存（对齐 Qt _vts_face_lib）：模型自带表情/动作，非模拟数据
+    loadFaceLib() {
+      fetch('../../data/vts_face_lib.json')
+        .then(r => { if (!r.ok) throw new Error('HTTP ' + r.status); return r.json(); })
+        .then(d => {
+          if (d && d.model_name) {
+            this.face.modelName = d.model_name;
+            this.face.exprLib = d.expressions || [];
+            this.face.motionLib = d.motions || [];
+            this.face.libStatus = `表情库已就绪（${d.model_name}）：${this.face.exprLib.length} 个表情｜${this.face.motionLib.length} 个动作`;
+          } else {
+            this.face.libStatus = 'VTS 表情库未就绪：请先启动主程序连接 VTubeStudio（自动扫描后本页自动刷新）';
+          }
+        })
+        .catch(() => {
+          this.face.libStatus = 'VTS 表情库未就绪：请先启动主程序连接 VTubeStudio（自动扫描后本页自动刷新）';
+        });
+    },
+    // 表情动作保存：写 emotion_map*.json + PET_IDLE_MOTION，主程序运行中热更新
+    // （对齐 Qt FaceHandler._save_map + config_handler 的 PET_IDLE_MOTION 保存）
+    saveFaceConfig() {
+      if (hasBackend) {
+        Promise.all([
+          invoke('save_emotion_map', { data: this.face.binds }),
+          invoke('save_env', {
+            entries: [{ key: 'PET_IDLE_MOTION', value: this.face.idleMotion.trim(), skipDefault: true }],
+          }),
+        ])
+          .then(() => {
+            if (this.running) invoke('send_cmd', { line: '!config' }).catch(() => {});
+            this.face.lastStatus = '已保存表情/动作绑定（主程序已热更新生效）';
+            this._flashSaved();
+          })
+          .catch(e => { this.face.lastStatus = '保存失败：' + e; });
+      } else {
+        localStorage.setItem('faceMap', JSON.stringify(this.face.binds));
+        this.face.lastStatus = '已保存表情/动作绑定（刷新页面后仍保留）';
+        console.log('face config saved', JSON.stringify(this.face.binds));
+        this._flashSaved();
+      }
+    },
+    // ---- 插件页 ----
+    // 启用/关闭只能通过按钮操作（对齐 Qt _on_plugin_toggle：写 .env / mcp_config /
+    // enabled_plugins.json，或启停 mindcraft 服务进程）
+    async togglePlugin(p) {
+      if (!p.checkable) return;
+      const next = !p.enabled;
+      if (hasBackend) {
+        try {
+          await invoke('set_plugin', { id: p.id, enabled: next });
+          if (p.id === 'service:mindcraft') {
+            // 外部服务进程状态实时维护，本地立即更新（避免整页重读）
+            p.enabled = next;
+            p.status = next ? '✅ 运行中' : '⭕ 已停止';
+            p.statusCls = next ? 'ok' : 'off';
+          } else {
+            // .env 布尔 / MCP 重命名 / 插件清单：重读卡片行（对齐 Qt _fill_plugin_cards）
+            await this.refreshPlugins();
+          }
+        } catch (e) {
+          alert('操作失败：' + e);
+        }
+      } else {
+        // 浏览器预览：仅本地切换状态
+        p.enabled = next;
+        p.statusCls = next ? 'ok' : 'off';
+        p.status = next ? '✅ 已启用' : '⭕ 已关闭';
+      }
+    },
+    // 打开插件配置页（对齐 Qt _open_plugin_config：字段表单 / MCP JSON 编辑器）
+    openPluginConfig(p) {
+      if (p.id.startsWith('mcp_server:')) {
+        // MCP 服务器：JSON 编辑器（对齐 _mcp_server_json / _save_mcp_server_json）
+        const key = p.id.slice('mcp_server:'.length);
+        if (hasBackend) {
+          invoke('load_mcp_json', { key })
+            .then(raw => { this.mcpDraft = raw; })
+            .catch(() => { this.mcpDraft = '{}'; });
+        } else {
+          const savedMcp = JSON.parse(localStorage.getItem('mcpCfg') || '{}');
+          this.mcpDraft = JSON.stringify(savedMcp[key] || {
+            command: 'npx',
+            args: ['-y', key],
+            timeout: 120,
+            description: '',
+          }, null, 2);
+        }
+        this.mcpServerKey = key;
+        this.configFields = [];
+      } else {
+        // 字段表单：定义与当前值由后端 load_plugins 携带（对齐 ui constants.PLUGIN_CONFIG_FIELDS）
+        this.configFields = (p.fields || []).map(f => ({
+          envKey: f.envKey, label: f.label, value: f.value ?? '',
+        }));
+        this.mcpServerKey = '';
+        this.mcpDraft = '';
+      }
+      this.configPlugin = p;
+    },
+    // 保存插件配置：MCP 校验 JSON 后写回 mcp_config.json；字段表单写 .env
+    // （对齐 Qt _save_mcp_server_json / env_helpers._update_env）
+    savePluginConfig() {
+      const id = this.configPlugin.id;
+      if (id.startsWith('mcp_server:')) {
+        let cfg;
+        try {
+          cfg = JSON.parse(this.mcpDraft);
+          if (!cfg || typeof cfg !== 'object' || Array.isArray(cfg)) {
+            throw new Error('JSON 必须是对象');
+          }
+        } catch (e) {
+          alert('JSON 格式错误：' + e.message);
+          return;
+        }
+        if (hasBackend) {
+          invoke('save_mcp_json', { key: this.mcpServerKey, value: JSON.stringify(cfg) })
+            .then(() => this.closePluginConfig())
+            .catch(e => alert('保存失败：' + e));
+        } else {
+          const saved = JSON.parse(localStorage.getItem('mcpCfg') || '{}');
+          saved[this.mcpServerKey] = cfg;
+          localStorage.setItem('mcpCfg', JSON.stringify(saved));
+          this.closePluginConfig();
+        }
+      } else {
+        if (hasBackend) {
+          // 全部字段写 .env（空值 = 移除该行，回退代码默认）
+          const entries = this.configFields.map(f => ({
+            key: f.envKey,
+            value: f.value.trim() || null,
+            skipDefault: false,
+          }));
+          invoke('save_env', { entries })
+            .then(() => this.closePluginConfig())
+            .catch(e => alert('保存失败：' + e));
+        } else {
+          const saved = JSON.parse(localStorage.getItem('pluginCfg') || '{}');
+          for (const f of this.configFields) saved[f.envKey] = f.value;
+          localStorage.setItem('pluginCfg', JSON.stringify(saved));
+          this.closePluginConfig();
+        }
+      }
+    },
+    // 返回插件列表（对齐 Qt _close_plugin_config）
+    closePluginConfig() {
+      this.configPlugin = null;
+      this.configFields = [];
+      this.mcpServerKey = '';
+      this.mcpDraft = '';
+    },
+    // ---- 自定义外观 ----
+    // 选择本地图片作为背景（data URL 注入 --art）
+    onBgPick(e) {
+      const f = e.target.files && e.target.files[0];
+      if (!f) return;
+      const rd = new FileReader();
+      rd.onload = () => { this.customBg = rd.result; this.customBgName = f.name; };
+      rd.readAsDataURL(f);
+      e.target.value = '';
+    },
+    resetCustom() {
+      this.customBg = ''; this.customBgName = '';
+      this.customDim = 0; this.customOpacity = 100;
+      this.customBrand = ''; this.customLabel = '';
+      this.customLabel2 = ''; this.customBorder = '';
+      this.applyCustom();
+    },
+    // 解析 rgb()/rgba() 字符串 → { r, g, b, a }
+    _alphaOf(color) {
+      const m = String(color).match(/[\d.]+/g);
+      if (!m || m.length < 3) return null;
+      return { r: +m[0], g: +m[1], b: +m[2], a: m.length >= 4 ? +m[3] : 1 };
+    },
+    // 把自定义值写入 body 内联 CSS 变量（覆盖皮肤调色板，不修改源样式）
+    applyCustom() {
+      const st = document.body.style;
+      if (this.customBg) st.setProperty('--art', `url('${this.customBg}')`);
+      else st.removeProperty('--art');
+      const a = (this.customDim / 100) * 0.65;
+      if (this.customDim > 0)
+        st.setProperty('--scrim', `linear-gradient(rgba(255,255,255,${a}) 0%, rgba(255,255,255,${a}) 100%)`);
+      else st.removeProperty('--scrim');
+      // 面板不透明度：按当前皮肤的各底色 rgba 等比缩放 alpha（100 = 跟随皮肤）
+      const bgVars = ['--bg-base', '--bg-layer-1', '--bg-layer-2', '--bg-layer-3', '--sidebar-fill', '--input-major'];
+      const op = this.customOpacity / 100;
+      if (this.customOpacity >= 20 && this.customOpacity < 100) {
+        const cs = getComputedStyle(document.body);
+        for (const v of bgVars) {
+          const c = this._alphaOf(cs.getPropertyValue(v));
+          if (c) st.setProperty(v, `rgba(${c.r}, ${c.g}, ${c.b}, ${+(c.a * op).toFixed(3)})`);
+        }
+      } else {
+        for (const v of bgVars) st.removeProperty(v);
+      }
+      if (this.customBrand) {
+        st.setProperty('--brand-primary', this.customBrand);
+        st.setProperty('--brand-hover', this.customBrand);
+        st.setProperty('--button-primary-fill', this.customBrand);
+        st.setProperty('--button-primary-hover', this.customBrand);
+      } else {
+        st.removeProperty('--brand-primary');
+        st.removeProperty('--brand-hover');
+        st.removeProperty('--button-primary-fill');
+        st.removeProperty('--button-primary-hover');
+      }
+      if (this.customLabel) st.setProperty('--label-primary', this.customLabel);
+      else st.removeProperty('--label-primary');
+      if (this.customLabel2) st.setProperty('--label-secondary', this.customLabel2);
+      else st.removeProperty('--label-secondary');
+      // 边框色：同色三级透明度（对齐默认 border-l1/l2/l3 层级）
+      if (this.customBorder) {
+        const c = this._alphaOf(this.customBorder);
+        if (c) {
+          st.setProperty('--border-l1', `rgba(${c.r}, ${c.g}, ${c.b}, 0.16)`);
+          st.setProperty('--border-l2', `rgba(${c.r}, ${c.g}, ${c.b}, 0.24)`);
+          st.setProperty('--border-l3', `rgba(${c.r}, ${c.g}, ${c.b}, 0.34)`);
+        }
+      } else {
+        st.removeProperty('--border-l1');
+        st.removeProperty('--border-l2');
+        st.removeProperty('--border-l3');
+      }
+      // 持久化（背景图 data URL 体积大，不落盘）
+      localStorage.setItem('cAppearance', JSON.stringify({
+        dim: this.customDim, opacity: this.customOpacity,
+        brand: this.customBrand, label: this.customLabel,
+        label2: this.customLabel2, border: this.customBorder,
+      }));
+    },
+    // 读取主程序导出的记忆图谱快照（与 Qt 记忆页同源 data/memory_graph.json）
+    loadMemory() {
+      fetch('../../data/memory_graph.json')
+        .then(r => {
+          if (!r.ok) throw new Error('HTTP ' + r.status);
+          return r.json();
+        })
+        .then(data => {
+          this.memFiles = Array.isArray(data.files) ? data.files : [];
+          this.memError = '';
+        })
+        .catch(e => {
+          this.memFiles = [];
+          this.memError = e.message;
+        });
+    },
+    // ---- 记忆页 ----
+    // 记忆类别徽标（对齐 Qt _memory_type_label + constants.py 配色）：
+    // 实体记忆(core/实体记忆 前缀) > 语义层(layer 前缀) > track 兜底
+    memoryType(m) {
+      const layers = {
+        core: ['核心身份', 'var(--memory-core)'],
+        state: ['关系状态', 'var(--memory-state)'],
+        preference: ['长期偏好', 'var(--memory-pref)'],
+        archive: ['历史摘要', 'var(--memory-archive)'],
+      };
+      const tracks = {
+        skill: ['技能', 'rgb(230,130,60)'],
+        memory: ['记忆', 'var(--memory-state)'],
+      };
+      const desc = String(m.description || '').trim();
+      if (desc.startsWith('core/实体记忆')) {
+        return { text: '实体记忆', color: 'var(--memory-core)' };
+      }
+      const prefix = desc.split('/')[0].trim().toLowerCase();
+      if (layers[prefix]) return { text: layers[prefix][0], color: layers[prefix][1] };
+      const tr = String(m.track || 'memory');
+      const t = tracks[tr];
+      return t ? { text: t[0], color: t[1] } : { text: tr, color: 'rgb(150,150,150)' };
+    },
+    // 弹窗右上 chips 配色（对齐 Qt MemoryDetailDialog._chips）：
+    // 归属：self 紫(140,100,200) / 其他观众 蓝(60,95,160)；类型：灰棕(150,143,130)
+    memChipColor(kind, user) {
+      if (kind === 'user') return user === 'self' ? 'rgb(140,100,200)' : 'rgb(60,95,160)';
+      return 'rgb(150,143,130)';
+    },
+    // 删除记忆：本会话 + localStorage 持久化过滤（对齐 Qt _on_memory_deleted
+    // 本地过滤语义；真实库由主程序管理，预览页只读快照不写回）
+    deleteMemory(id) {
+      if (!id) return;
+      if (!confirm('确定删除这条记忆？\n\n删除后仅从本次预览视图移除\n（真实记忆库由主程序管理）。')) return;
+      this.deletedIds = [...this.deletedIds, id];
+      localStorage.setItem('memDeletedIds', JSON.stringify(this.deletedIds));
+      // 删除的是当前详情中的记忆 → 关闭详情；列表弹窗同步移除该条
+      if (this.selectedMem && this.selectedMem.id === id) this.closeMemoryDetail();
+      if (this.roleModal) this.roleModal.items = this.roleModal.items.filter(i => i.id !== id);
+    },
+    // 点击列表中的某条记忆：弹出详情弹窗（对齐 Qt MemoryDetailDialog）
+    openMemoryDetail(m) { this.selectedMem = m; },
+    // 关闭记忆详情弹窗
+    closeMemoryDetail() { this.selectedMem = null; },
+    // 点击角色卡片：打开该角色记忆列表弹窗（对齐 Qt 图谱点用户名 → MemoryListDialog）
+    openRole(g) {
+      this.roleModal = { user: g.user, items: [...g.items] };
+    },
+    // 关闭角色记忆列表弹窗
+    closeRole() { this.roleModal = null; },
+    // 角色卡片摘要：最新一条记忆的正文/名称（数据源最新在前，取首条）
+    rolePreview(g) {
+      const items = g.items;
+      if (!items.length) return '暂无记忆';
+      const first = items[0];
+      return String(first.content || first.name || '').slice(0, 80);
+    },
+    displayUser(user) {
+      if (user === 'self') return '我自己';
+      if (user === 'chao') return '你';
+      return user;
+    },
+    fmtTime(ts) { return String(ts || '').slice(0, 16); },
+    fmtFullTime(ts) { return String(ts || '').replace('T', ' ').slice(0, 19); },
+    // ---- 启动页顶栏操作 ----
+    clearLogs() { this.chatLogs = []; this.toolLogs = []; },
+    // 输入区文件选项：选中后显示文件名，随后清空 input 以便重复选择同一文件
+    onFilePick(e) {
+      const f = e.target.files && e.target.files[0];
+      this.attachName = f ? f.name : '';
+      e.target.value = '';
+    },
+    // 关闭控制中心：先弹圆角确认框（对齐 ui 关闭语义），确认后才真正关窗；
+    // 主程序子进程不受影响，继续运行；浏览器预览回退 window.close()
+    closeWin() {
+      this.showCloseConfirm = true;
+    },
+    doCloseWin() {
+      this.showCloseConfirm = false;
+      this.showCustom = false;
+      if (hasBackend && window.__TAURI__.window) {
+        window.__TAURI__.window.getCurrentWindow().close();
+      } else if (window.__bridge) {
+        window.__bridge.closeWindow();
+      } else {
+        window.close();  // 预览页无法真正退出窗口，浏览器会忽略
+      }
+    },
+  },
+  mounted() {
+    this.applyCustom();  // 恢复持久化的自定义外观（内联变量覆盖皮肤）
+    this.loadAll();      // 后端：load_all 回填全部页面；浏览器预览回退 loadMemory/loadFaceLib
+  },
+  watch: {
+    // 新日志到达时自动滚到底部（两个日志窗口都跟随最新内容）
+    // 数组变异（push/shift）不改变引用，需 deep 监听才能触发
+    chatLogs: {
+      deep: true,
+      handler() { this.$nextTick(() => this._autoScrollLogs()); },
+    },
+    toolLogs: {
+      deep: true,
+      handler() { this.$nextTick(() => this._autoScrollLogs()); },
+    },
+    skin(v) { document.body.dataset.skin = v; },
+    customBg() { this.applyCustom(); },
+    customDim() { this.applyCustom(); },
+    customOpacity() { this.applyCustom(); },
+    customBrand() { this.applyCustom(); },
+    customLabel() { this.applyCustom(); },
+    customLabel2() { this.applyCustom(); },
+    customBorder() { this.applyCustom(); },
+  },
+}).mount('#app');
+// 暴露根实例（事件桥脚本转发主程序日志 / 退出事件用）
+window.__evControlCenter = vm;
+</script>
+<script>
+  // 无系统标题栏（decorations:false）：顶栏空白处按住可拖动窗口。
+  // Tauri exe 走 window.startDragging；浏览器预览无桥则静默跳过。
+  // 同时挂主程序日志/退出事件（app-log → 分栏，app-finished → 状态复位）。
+  (function () {
+    const tauri = window.__TAURI__;
+    if (!tauri || !tauri.event) return;
+    // 顶栏拖动（避开按钮/输入控件）
+    var topbar = document.querySelector('.topbar');
+    if (topbar && tauri.window) {
+      var win = tauri.window.getCurrentWindow();
+      topbar.addEventListener('mousedown', function (e) {
+        if (e.target.closest('button') || e.target.closest('input') ||
+            e.target.closest('select') || e.target.closest('label') ||
+            e.target.closest('.seg') || e.target.closest('.custom-wrap')) return;
+        win.startDragging();
+      });
+    }
+    // 日志分流 + 退出监听（经 window.__evControlCenter 调用实例方法）
+    tauri.event.listen('app-log', function (ev) {
+      var line = ev.payload && ev.payload.line;
+      if (!line) return;
+      if (window.__evControlCenter && typeof window.__evControlCenter._routeLog === 'function') {
+        window.__evControlCenter._routeLog(line);
+      }
+    });
+    tauri.event.listen('app-finished', function () {
+      if (window.__evControlCenter) window.__evControlCenter.running = false;
+    });
+    // 插件启停/外部服务退出 → 刷新插件卡片（对齐 Qt _fill_plugin_cards）
+    tauri.event.listen('plugins-changed', function () {
+      if (window.__evControlCenter &&
+          typeof window.__evControlCenter.refreshPlugins === 'function') {
+        window.__evControlCenter.refreshPlugins();
+      }
+    });
+  })();
+</script>
+</body>
+</html>

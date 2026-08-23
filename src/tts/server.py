@@ -9,6 +9,7 @@ gsv_tts.TTS 类（不改其任何代码），额外提供 /tts/stream Token 级�
 """
 
 import sys
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
 # 项目根 = src/tts/server.py 的上三层；tools/gsv_tts 含 gsv_tts 包（官方原版）
@@ -21,6 +22,7 @@ from fastapi.responses import FileResponse, StreamingResponse  # noqa: E402
 from pydantic import BaseModel  # noqa: E402
 from typing import List, Optional  # noqa: E402
 from gsv_tts import TTS  # noqa: E402
+import asyncio  # noqa: E402
 import base64  # noqa: E402
 import json  # noqa: E402
 import logging  # noqa: E402
@@ -37,6 +39,11 @@ output_dir = _TOOLS_GSV / "output"
 output_dir.mkdir(exist_ok=True)
 
 tts: Optional[TTS] = None
+
+# 专用推理线程池：对齐 bench_gsv_modes.py 的进程内直连路径。单线程保证
+# 串行推理（与 tts._infer_lock 双层保障），避免默认线程池被多请求/中断残留
+# 任务占用，逐块编码也在工作线程内完成，事件循环不参与 CPU 加工。
+_infer_executor = ThreadPoolExecutor(max_workers=1, thread_name_prefix="gsv-infer")
 
 temp_dir = tempfile.mkdtemp(prefix="gsv_tts_")
 
@@ -162,32 +169,52 @@ async def tts_stream(request: TTSStreamRequest):
             )
 
         async def gen():
-            async for chunk in tts.infer_stream_async(
-                spk_audio_path=speaker_audio,
-                prompt_audio_path=prompt_audio,
-                prompt_audio_text=prompt_text,
-                text=request.text,
-                return_subtitles=True,
-                stream_mode="token",
-                stream_chunk=request.stream_chunk,
-                overlap_len=request.overlap_len,
-                boost_first_chunk=True,
-                top_k=request.top_k,
-                top_p=request.top_p,
-                temperature=request.temperature,
-                repetition_penalty=request.repetition_penalty,
-                noise_scale=request.noise_scale,
-                speed=request.speed,
-            ):
-                audio = (chunk.audio_data * 32767).astype(np.int16).tobytes()
-                event = {
-                    "audio": base64.b64encode(audio).decode("ascii"),
-                    "subtitles": chunk.subtitles,
-                    "orig_text": chunk.orig_text,
-                    "audio_len_s": chunk.audio_len_s,
-                }
-                yield f"data: {json.dumps(event, ensure_ascii=False)}\n\n"
-            yield 'data: {"done": true}\n\n'
+            loop = asyncio.get_running_loop()
+            queue: asyncio.Queue = asyncio.Queue()
+
+            def _worker():
+                """专用线程内直跑官方 infer_stream（与 bench_gsv_modes.py 进程内
+                路径一致），逐块 int16/base64/SSE 编码全部在工作线程完成，事件
+                循环只负责转发，避免与 GPT 解码争抢 CPU。
+                """
+                try:
+                    with tts._infer_lock:
+                        for chunk in tts.infer_stream(
+                            spk_audio_path=speaker_audio,
+                            prompt_audio_path=prompt_audio,
+                            prompt_audio_text=prompt_text,
+                            text=request.text,
+                            return_subtitles=True,
+                            stream_mode="token",
+                            stream_chunk=request.stream_chunk,
+                            overlap_len=request.overlap_len,
+                            boost_first_chunk=True,
+                            top_k=request.top_k,
+                            top_p=request.top_p,
+                            temperature=request.temperature,
+                            repetition_penalty=request.repetition_penalty,
+                            noise_scale=request.noise_scale,
+                            speed=request.speed,
+                        ):
+                            audio = (chunk.audio_data * 32767).astype(np.int16).tobytes()
+                            event = {
+                                "audio": base64.b64encode(audio).decode("ascii"),
+                                "subtitles": chunk.subtitles,
+                                "orig_text": chunk.orig_text,
+                                "audio_len_s": chunk.audio_len_s,
+                            }
+                            loop.call_soon_threadsafe(
+                                queue.put_nowait, f"data: {json.dumps(event, ensure_ascii=False)}\n\n"
+                            )
+                finally:
+                    loop.call_soon_threadsafe(queue.put_nowait, 'data: {"done": true}\n\n')
+
+            loop.run_in_executor(_infer_executor, _worker)
+            while True:
+                line = await queue.get()
+                yield line
+                if line == 'data: {"done": true}\n\n':
+                    break
 
         return StreamingResponse(gen(), media_type="text/event-stream")
     except HTTPException:

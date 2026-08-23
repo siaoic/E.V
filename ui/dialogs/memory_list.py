@@ -10,7 +10,41 @@ from PySide6.QtWidgets import (
 from tools.memory import memory
 from tools.memory.memory_graph import _display_user
 from ui.dialogs.confirm import ConfirmDialog
-from ui.dialogs.memory_detail import _make_type_badge, _memory_type_label
+from ui.dialogs.memory_detail import MemoryDetailDialog, _memory_type_label
+
+
+class _ClickableRow(QFrame):
+    """列表行容器：点击行本体（非按钮）发出 clicked(node) 信号。
+
+    对齐预览页 .role-item@click → openMemoryDetail；QPushButton 的
+    mouseRelease 事件不传播到父 QFrame，所以删除按钮点击不会误触行点击。
+    """
+
+    clicked = Signal(object)  # 参数：node dict
+
+    def __init__(self, node: dict, parent: QWidget) -> None:
+        super().__init__(parent)
+        self._node = node
+
+    def mouseReleaseEvent(self, event) -> None:
+        if event.button() == Qt.MouseButton.LeftButton:
+            self.clicked.emit(self._node)
+        super().mouseReleaseEvent(event)
+
+
+def _make_type_chip(text: str, color: QColor, parent: QWidget) -> QLabel:
+    """列表行的胶囊式类型 chip（对齐预览页 .role-item .chip）：
+    纯色背景 + 白字 + 999px 圆角，区别于详情弹窗的 _make_type_badge
+    （半透明同色底 + 圆点+类型名）。"""
+    chip = QLabel(text, parent)
+    chip.setObjectName("rowChip")
+    c = color
+    chip.setStyleSheet(
+        f"#rowChip {{ background: rgb({c.red()},{c.green()},{c.blue()});"
+        f" color: #fff; border-radius: 999px;"
+        f" padding: 2px 9px; font-size: 11px;"
+        f" font-family: \"微软雅黑\"; }}")
+    return chip
 
 
 class MemoryListDialog(QDialog):
@@ -92,10 +126,11 @@ class MemoryListDialog(QDialog):
                 int(screen.availableGeometry().height() * 0.6))
 
         # 阴影（画在卡片上；四周 margins 已为阴影留空间）
+        # 对齐预览页 .mem-modal-card box-shadow: 0 12px 32px rgba(0,0,0,0.22)
         shadow = QGraphicsDropShadowEffect(card)
-        shadow.setBlurRadius(24)
-        shadow.setOffset(0, 6)
-        shadow.setColor(QColor(0, 0, 0, 60))
+        shadow.setBlurRadius(32)
+        shadow.setOffset(0, 12)
+        shadow.setColor(QColor(0, 0, 0, 56))
         card.setGraphicsEffect(shadow)
 
     def _rebuild_list(self) -> None:
@@ -106,7 +141,7 @@ class MemoryListDialog(QDialog):
             if w is not None:
                 w.deleteLater()
         if not self._memories:
-            empty = QLabel("（该用户暂无记忆）", self._list_container)
+            empty = QLabel("该角色暂无记忆", self._list_container)
             empty.setObjectName("metaLabel")
             empty.setAlignment(Qt.AlignmentFlag.AlignCenter)
             self._list_layout.addWidget(empty)
@@ -120,39 +155,49 @@ class MemoryListDialog(QDialog):
         self._list_layout.addStretch(1)
 
     def _make_row(self, node: dict) -> QWidget:
-        """单条记忆行：类型徽标 + 名称/内容/更新时间 + 删除按钮。"""
-        row = QWidget(self._list_container)
+        """单条记忆行（对齐预览页 .role-item）：胶囊式类型 chip + 名称/摘要 +
+        右侧更新时间 + 删除按钮，整行单排布。点击行本体弹详情弹窗。"""
+        row = _ClickableRow(node, self._list_container)
         row.setObjectName("memRow")
+        row.clicked.connect(self._show_detail_dialog)
         lay = QHBoxLayout(row)
-        lay.setContentsMargins(12, 10, 12, 10)
-        lay.setSpacing(12)
+        # padding 10/8/10/8、gap 10 对齐预览页 .role-item
+        lay.setContentsMargins(10, 8, 10, 8)
+        lay.setSpacing(10)
 
-        # 行首类型徽标（与图谱节点配色一致）
+        # 行首：胶囊式类型 chip（纯色背景 + 白字，区别于详情弹窗的圆点徽标）
         track = str(node.get("track") or "memory")
         type_text, type_color = _memory_type_label(node, track)
-        lay.addWidget(_make_type_badge(type_text, type_color, row))
+        lay.addWidget(_make_type_chip(type_text, type_color, row))
 
+        # 中部：名称（上） + 摘要（下），均单行 ellipsis 截断
+        # （对齐预览页 .role-item-name / .role-item-snippet 的 nowrap + ellipsis）
         info = QVBoxLayout()
-        info.setSpacing(3)
+        info.setSpacing(2)
         name = str(node.get("name") or "").strip()
         if name:
             name_label = QLabel(name, row)
             name_label.setObjectName("rowName")
+            # 单行截断对齐预览页 .role-item-name nowrap
+            name_label.setWordWrap(False)
             info.addWidget(name_label)
         content = str(node.get("content") or "").strip()
         if content:
             content_label = QLabel(content, row)
             content_label.setObjectName("rowContent")
-            content_label.setWordWrap(True)
+            # 单行截断对齐预览页 .role-item-snippet nowrap
+            content_label.setWordWrap(False)
             info.addWidget(content_label)
-        updated = node.get("updated_at") or node.get("created_at") or ""
-        if updated:
-            meta = QLabel(
-                "更新于 " + str(updated).replace("T", " ")[:19], row)
-            meta.setObjectName("metaLabel")
-            info.addWidget(meta)
         lay.addLayout(info, 1)
 
+        # 右侧：更新时间紧凑显示（仅 yyyy-MM-dd HH:MM 对齐 .m-time 11px）
+        updated = node.get("updated_at") or node.get("created_at") or ""
+        if updated:
+            meta = QLabel(str(updated).replace("T", " ")[:16], row)
+            meta.setObjectName("metaLabel")
+            lay.addWidget(meta)
+
+        # 删除按钮
         delete_btn = QPushButton("删除", row)
         delete_btn.setObjectName("deleteBtn")
         delete_btn.setCursor(Qt.CursorShape.PointingHandCursor)
@@ -192,19 +237,50 @@ class MemoryListDialog(QDialog):
         self._rebuild_list()
         self.deleted.emit(node_id)
 
+    def _show_detail_dialog(self, node: dict) -> None:
+        """列表行点击：弹出该条记忆详情弹窗（对齐预览页 openMemoryDetail）。
+
+        详情弹窗的 parent 是本列表弹窗（叠加在上层）；删除成功后从本列表
+        的 _memories 过滤并重建，同时转发 deleted 信号给控制中心刷新网格。
+        """
+        if getattr(self, "_detail_dlg", None) is not None:
+            self._detail_dlg.close()  # 先关旧详情弹窗（避免叠加）
+        dlg = MemoryDetailDialog(node, self)
+        dlg.deleted.connect(self._on_detail_deleted)
+        self._detail_dlg = dlg
+        dlg.show()
+        dlg.raise_()
+        dlg.activateWindow()
+
+    def _on_detail_deleted(self, node_id: str) -> None:
+        """详情弹窗内删除成功：从列表过滤 + 重建 + 转发给控制中心刷新网格。"""
+        self._memories = [
+            m for m in self._memories if str(m.get("id")) != node_id]
+        self._rebuild_list()
+        self.deleted.emit(node_id)
+
     def _apply_style(self) -> None:
         self.setStyleSheet(
             "QDialog { background: transparent; }"
-            "#dialogCard { background-color: rgb(252, 250, 245);"
+            # 卡片背景对齐预览页 .mem-modal-card: var(--bg-page) #fbf6ea +
+            # 1px border-l2 + 14px 圆角
+            "#dialogCard { background-color: rgb(251, 246, 234);"
+            " border: 1px solid rgba(200, 185, 158, 130);"
             " border-radius: 14px; }"
             "#titleLabel { color: rgb(40, 35, 25); font-size: 15px;"
             " font-weight: bold; font-family: \"微软雅黑\"; }"
-            "#divider { background-color: rgba(140, 135, 125, 60); }"
-            "#memRow { background-color: rgb(247, 244, 238);"
-            " border-radius: 10px; }"
+            # 分隔线对齐预览页 .mem-divider: var(--border-l2) 0.5 alpha
+            "#divider { background-color: rgba(200, 185, 158, 128); }"
+            # 行：layer-2 米色 + 1px border-l1 + 8px 圆角对齐预览页 .role-item
+            "#memRow { background-color: rgba(246, 241, 231, 199);"
+            " border: 1px solid rgba(200, 185, 158, 90);"
+            " border-radius: 8px; }"
+            # 悬停描边对齐预览页 .role-item:hover border-color: var(--brand-primary)
+            "#memRow:hover { border: 1px solid rgba(120, 200, 188, 230); }"
             "#rowName { color: rgb(40, 35, 25); font-size: 13px;"
             " font-weight: bold; font-family: \"微软雅黑\"; }"
-            "#rowContent { color: rgb(70, 65, 55); font-size: 12px;"
+            # 摘要 11px 次级色对齐预览页 .role-item-snippet label-dimmed
+            "#rowContent { color: rgb(120, 110, 100); font-size: 11px;"
             " font-family: \"微软雅黑\"; }"
             "#metaLabel { color: rgb(160, 155, 145); font-size: 11px;"
             " font-family: \"微软雅黑\"; }"

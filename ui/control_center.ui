@@ -73,8 +73,13 @@ QStackedWidget {
 }
 
 /* 页面背景 */
-QWidget#page, QWidget#page_llm, QWidget#page_memory, QWidget#page_settings, QWidget#page_about, QWidget#page_tools {
+QWidget#page, QWidget#page_llm, QWidget#page_settings, QWidget#page_about, QWidget#page_tools {
 	background-color: transparent;
+}
+
+/* 记忆页背景对齐预览页 var(--bg-page) #fbf6ea（米黄纯色，非渐变） */
+QWidget#page_memory {
+	background-color: rgb(251, 246, 234);
 }
 
 /* 标签样式 - 暖深棕文字（角色奶茶棕深调） */
@@ -613,18 +618,19 @@ QFrame#plugin_card[checkable="false"] {
 		stop:0 rgba(244, 244, 240, 200), stop:1 rgba(238, 238, 234, 200));
 }
 
-/* 插件名：浅蓝粗体（角色裙子色，与配置标题同款） */
+/* 插件名：浅蓝粗体（角色裙子色，与配置标题同款；过长 ellipsis 截断对齐预览页 .p-name-text） */
 QLabel#plugin_card_name {
 	color: rgb(63, 110, 146);
-	font-size: 14px;
+	font-size: 13px;
 	font-weight: bold;
 	background: transparent;
 }
 
-/* 插件状态说明 / 类型徽标 */
+/* 插件状态说明（对齐预览页 .p-status：12px 加粗，着色由内联 span 决定） */
 QLabel#plugin_card_status {
 	background: transparent;
 	font-size: 12px;
+	font-weight: bold;
 }
 
 QLabel#plugin_card_desc {
@@ -633,12 +639,65 @@ QLabel#plugin_card_desc {
 	font-size: 12px;
 }
 
+/* 类型徽章（对齐预览页 .pill.kind：胶囊 999px + 1px 边框 + 10px 字号） */
 QLabel#plugin_card_kind {
+	background: transparent;
+	color: rgb(120, 110, 100);
+	border: 1px solid rgba(180, 200, 195, 180);
+	border-radius: 999px;
+	padding: 1px 8px;
+	font-size: 10px;
+}
+
+/* 角色卡片（对齐预览页 .role-card 复用 .plugin-card 视觉：
+   var(--bg-layer-1) 0.72 + 1px var(--border-l1) 0.35 + 10px 圆角） */
+QFrame#role_card {
+	background: rgba(252, 250, 245, 184);
+	border: 1px solid rgba(200, 185, 158, 90);
+	border-radius: 10px;
+}
+
+/* 悬停：薄荷描边 + layer-2 米色底（对齐预览页 .role-card:hover） */
+QFrame#role_card:hover {
+	border: 1px solid rgba(120, 200, 188, 230);
+	background: rgba(246, 241, 231, 199);
+}
+
+/* 用户圆点：12px 薄荷色实心圆（对齐预览页 .user-dot: rgb(88, 170, 168)） */
+QLabel#role_dot {
+	background: rgb(88, 170, 168);
+	border-radius: 6px;
+}
+
+/* 用户名：13px 加粗深棕（对齐预览页 .mem-user: 13px 600 primary） */
+QLabel#role_user {
+	color: rgb(40, 35, 25);
+	font-size: 13px;
+	font-weight: bold;
+	background: transparent;
+}
+
+/* 记忆数胶囊：11px caption 色 + 米色底 + 999px 圆角（对齐预览页 .mem-count） */
+QLabel#role_count {
 	background: rgba(143, 200, 188, 70);
 	color: rgb(63, 110, 146);
-	border-radius: 4px;
-	padding: 1px 6px;
+	border-radius: 999px;
+	padding: 2px 8px;
 	font-size: 11px;
+}
+
+/* 摘要预览：12px caption 色（对齐预览页 .role-preview: 12px caption line-height 1.7） */
+QLabel#role_preview {
+	color: rgb(120, 110, 100);
+	font-size: 12px;
+	background: transparent;
+}
+
+/* 空状态：居中 caption 13px（对齐预览页 .mem-empty） */
+QLabel#mem_empty {
+	color: rgb(120, 110, 100);
+	font-size: 13px;
+	background: transparent;
 }
 
 /* 启用/关闭切换按钮：绿=启用动作，灰=关闭动作 */

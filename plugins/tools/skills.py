@@ -30,6 +30,16 @@ from src.utils import config, console
 # skill usage counters——但 hermes 明确 use=0 不作为归档依据，这里同样只供参考）
 _USAGE_PATH = os.path.join(config.cfg.DATA_ROOT, "skill_usage.json")
 
+# 5.2 技能生命周期状态机（对标 hermes tools/skill_usage.py）：
+# - active→stale 30 天未活动；stale→archived 90 天未活动（与 curator.py 阈值对齐）
+# - 状态只是 usage 里的标记（复盘/展示参考），不移动目录——目录归档仍由
+#   evolution.skills.maybe_prune 执行；pinned 技能永不自动迁移
+_STALE_AFTER_DAYS = 30
+_ARCHIVE_AFTER_DAYS = 90
+_STATE_ACTIVE = "active"
+_STATE_STALE = "stale"
+_STATE_ARCHIVED = "archived"
+
 _SKILL_FILENAME = "SKILL.md"
 """技能定义文件名"""
 
@@ -334,24 +344,108 @@ class SkillManager:
             return {}
 
     def _save_usage(self) -> None:
-        """覆写技能使用统计文件（失败静默，统计丢失不影响功能）。"""
+        """原子覆写技能使用统计文件（tmp + os.replace；失败静默，统计丢失不影响功能）。"""
         try:
             os.makedirs(os.path.dirname(_USAGE_PATH), exist_ok=True)
-            with open(_USAGE_PATH, "w", encoding="utf-8") as f:
+            tmp = _USAGE_PATH + ".tmp"
+            with open(tmp, "w", encoding="utf-8") as f:
                 json.dump(self._usage, f, ensure_ascii=False, indent=2)
+            os.replace(tmp, _USAGE_PATH)
         except OSError:
             pass
 
-    def record_usage(self, name: str) -> None:
-        """记录一次技能使用：load 次数 +1 并更新最近使用时间。"""
+    def _new_usage_entry(self, name: str) -> dict:
+        """新建/补齐技能使用条目（5.2 扩展字段，兼容旧记录缺省值）。"""
+        entry = self._usage.setdefault(name, {
+            "loads": 0, "last_used": 0.0,
+            "views": 0, "patches": 0, "last_activity": 0.0,
+            "state": _STATE_ACTIVE, "pinned": False, "created_by": "",
+        })
+        # 旧记录补齐新增字段（增量兼容：不破坏已有 loads/last_used）
+        entry.setdefault("views", 0)
+        entry.setdefault("patches", 0)
+        entry.setdefault("last_activity", 0.0)
+        entry.setdefault("state", _STATE_ACTIVE)
+        entry.setdefault("pinned", False)
+        entry.setdefault("created_by", "")
+        return entry
+
+    def _bump(self, name: str, field: str) -> None:
+        """原子递增某个计数并刷新 last_activity（loads/views/patches）。"""
         with self._skills_lock:
-            entry = self._usage.setdefault(name, {"loads": 0, "last_used": 0.0})
-            entry["loads"] = int(entry.get("loads") or 0) + 1
-            entry["last_used"] = time.time()
+            entry = self._new_usage_entry(name)
+            entry[field] = int(entry.get(field) or 0) + 1
+            entry["last_activity"] = time.time()
+            if field == "loads":
+                entry["last_used"] = entry["last_activity"]
             self._save_usage()
 
+    def record_usage(self, name: str) -> None:
+        """记录一次技能 load：loads +1 并更新最近使用时间（load_skill 调用点）。"""
+        self._bump(name, "loads")
+
+    def bump_view(self, name: str) -> None:
+        """记录一次技能查看（read_skill_resource 命中细节资源，视图信号）。"""
+        self._bump(name, "views")
+
+    def bump_patch(self, name: str) -> None:
+        """记录一次技能被打补丁（evolution.skills.apply_patch 成功后调用）。"""
+        self._bump(name, "patches")
+
+    def set_state(self, name: str, state: str) -> None:
+        """显式设置技能生命周期状态（active/stale/archived）。"""
+        with self._skills_lock:
+            entry = self._new_usage_entry(name)
+            if state in (_STATE_ACTIVE, _STATE_STALE, _STATE_ARCHIVED):
+                entry["state"] = state
+            self._save_usage()
+
+    def set_pinned(self, name: str, pinned: bool) -> None:
+        """标记技能是否 pin 保护（pin 技能永不自动迁移/合并/归档）。"""
+        with self._skills_lock:
+            entry = self._new_usage_entry(name)
+            entry["pinned"] = bool(pinned)
+            self._save_usage()
+
+    def mark_created_by(self, name: str, who: str) -> None:
+        """标记技能创建来源（agent=复盘/后台沉淀，user=用户/主播前台写入）。
+
+        后台创建的技能进入 curator 管理范围；用户前台写入的技能永不自动策展
+        （对标 hermes tools/skill_provenance.py 的 created_by 边界）。
+        """
+        with self._skills_lock:
+            entry = self._new_usage_entry(name)
+            entry["created_by"] = who
+            self._save_usage()
+
+    def apply_automatic_transitions(self) -> dict:
+        """纯确定性生命周期状态迁移（不调 LLM）：active→stale→archived。
+
+        - 阈值：30/90 天未活动（last_activity，兼容旧记录回落 last_used）；
+        - pinned 技能跳过；只更新 usage 标记不移动目录（目录归档由 curator 执行）；
+        - 返回迁移摘要 {"active_to_stale": [...], "stale_to_archived": [...]}。
+        """
+        with self._skills_lock:
+            now = time.time()
+            changed: dict[str, list] = {"active_to_stale": [], "stale_to_archived": []}
+            for name, entry in self._usage.items():
+                if entry.get("pinned"):
+                    continue
+                state = entry.get("state") or _STATE_ACTIVE
+                activity = entry.get("last_activity") or entry.get("last_used") or 0.0
+                age_days = (now - activity) / 86400.0
+                if state == _STATE_ACTIVE and age_days > _STALE_AFTER_DAYS:
+                    entry["state"] = _STATE_STALE
+                    changed["active_to_stale"].append(name)
+                elif state == _STATE_STALE and age_days > _ARCHIVE_AFTER_DAYS:
+                    entry["state"] = _STATE_ARCHIVED
+                    changed["stale_to_archived"].append(name)
+            if changed["active_to_stale"] or changed["stale_to_archived"]:
+                self._save_usage()
+        return changed
+
     def usage_of(self, name: str) -> Optional[dict]:
-        """返回单个技能的使用统计（{loads, last_used}），未使用过返回 None。"""
+        """返回单个技能的使用统计（含生命周期状态），未使用过返回 None。"""
         with self._skills_lock:
             entry = self._usage.get(name)
             return dict(entry) if entry else None
@@ -365,10 +459,21 @@ class SkillManager:
         lines = []
         for name, entry in sorted(usage.items()):
             loads = int(entry.get("loads") or 0)
-            last_used = entry.get("last_used") or 0.0
-            stamp = (time.strftime("%m-%d %H:%M", time.localtime(last_used))
-                     if last_used else "从未")
-            lines.append(f"- {name}: loads={loads}, last_used={stamp}")
+            views = int(entry.get("views") or 0)
+            patches = int(entry.get("patches") or 0)
+            state = entry.get("state") or _STATE_ACTIVE
+            last_activity = entry.get("last_activity") or entry.get("last_used") or 0.0
+            stamp = (time.strftime("%m-%d %H:%M", time.localtime(last_activity))
+                     if last_activity else "从未")
+            flags = []
+            if entry.get("pinned"):
+                flags.append("pinned")
+            if entry.get("created_by"):
+                flags.append(f"created_by={entry['created_by']}")
+            suffix = f" ({', '.join(flags)})" if flags else ""
+            lines.append(
+                f"- {name}: state={state}, loads={loads}, views={views}, "
+                f"patches={patches}, last_activity={stamp}{suffix}")
         return "\n".join(lines)
 
 

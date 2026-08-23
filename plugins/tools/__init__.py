@@ -27,9 +27,11 @@ from plugins.tools.time import _get_current_time
 from plugins.tools.weather import _get_weather
 from plugins.tools.skill_loader import _load_skill, _read_skill_resource
 from plugins.tools.memory_tools import _remember_fact, _forget_memory
+from plugins.tools.curated_memory import _memory_curated
 from plugins.tools.screen import _look_at_screen
 from plugins.tools.sfx import _play_sound_effect, _list_sound_effects
 from plugins.tools.diary import _write_diary
+from plugins.tools.session_search import _session_search
 from src.mcp.llm_bridge import call_mcp_tool, get_mcp_tools_for_llm
 from plugins.manager import get_default_manager, tool_name
 
@@ -54,11 +56,40 @@ _LOCAL_REGISTRY = {
     "read_skill_resource": _read_skill_resource,
     "remember_fact": _remember_fact,
     "forget_memory": _forget_memory,
+    "memory": _memory_curated,
     "look_at_screen": _look_at_screen,
     "play_sound_effect": _play_sound_effect,
     "list_sound_effects": _list_sound_effects,
     "write_diary": _write_diary,
+    "session_search": _session_search,
 }
+
+
+# ---------------------------------------------------------------------------
+# ToolRegistry 注册（3.2）：本地内置工具注册进统一注册表（门控 + JSON 归一化）
+# ---------------------------------------------------------------------------
+
+def _register_local_tools() -> None:
+    """把本地内置工具注册进 ToolRegistry（幂等：已注册跳过）。
+
+    handler 包一层 lambda(args) 适配注册表调用约定（handler(args: dict)），
+    不改动各工具实现本身（红线：行为 100% 不变）；toolset 统一 "local"。
+    """
+    from src.agent.tool_registry import tool_registry
+    for tool_def in _LOCAL_TOOL_DEFS:
+        function = tool_def.get("function") or {}
+        name = function.get("name")
+        impl = _LOCAL_REGISTRY.get(name)
+        if not name or impl is None:
+            continue
+        if tool_registry.get_entry(name) is not None:
+            continue
+        tool_registry.register(
+            name,
+            "local",
+            function,
+            handler=lambda args, impl=impl: impl(**(args or {})),
+        )
 
 
 # ---------------------------------------------------------------------------
@@ -66,10 +97,12 @@ _LOCAL_REGISTRY = {
 # ---------------------------------------------------------------------------
 
 
-def get_merged_tools(mcp=None) -> List[dict]:
+def get_merged_tools(mcp=None, toolset: str = "") -> List[dict]:
     """合并本地工具 + MCP 工具 → OpenAI Function Calling 格式。
 
     对标 live-2d(2) 的 getMergedToolsList()：MCP 工具优先，本地工具兜底。
+    toolset 非空时按工具集门控过滤（3.3，仅影响内置工具；MCP/插件不受影响）；
+    为空 = 全量，等价旧行为。
     """
     tools: List[dict] = []
 
@@ -106,6 +139,9 @@ def get_merged_tools(mcp=None) -> List[dict]:
     if config.cfg.MEMORY_ENABLED:
         available_names.add("remember_fact")
         available_names.add("forget_memory")
+    # L2 纯文本长期记忆工具（MEMORY.md/USER.md，Hermes 式 memory 工具）
+    if config.cfg.MEMORY_CURATED_ENABLED:
+        available_names.add("memory")
     # 屏幕视觉（截屏 + 多模态描述），不依赖外部 key
     if config.cfg.TOOL_LOOK_SCREEN_ENABLED:
         available_names.add("look_at_screen")
@@ -116,6 +152,9 @@ def get_merged_tools(mcp=None) -> List[dict]:
     # 写日记（LLM 自行判断何时记录当天，素材取 memory 会话轮次）
     if config.cfg.TOOL_WRITE_DIARY_ENABLED:
         available_names.add("write_diary")
+    # 会话搜索（3.7）：精确检索历史对话，默认关闭（ENABLE_SESSION_SEARCH）
+    if config.cfg.ENABLE_SESSION_SEARCH:
+        available_names.add("session_search")
 
     # 与 MCP 工具重名的本地工具跳过（外部服务器优先，避免 LLM 调用歧义）
     existing_names = {t["function"]["name"] for t in tools}
@@ -123,6 +162,11 @@ def get_merged_tools(mcp=None) -> List[dict]:
         name = tool_def["function"]["name"]
         if name in available_names and name not in existing_names:
             tools.append(tool_def)
+
+    # 工具集门控（3.3）：非空 toolset 只暴露该场景内置工具；空 = 全量（旧行为）
+    if toolset:
+        from src.agent.toolsets import filter_tool_defs
+        tools = filter_tool_defs(tools, toolset)
 
     return tools
 
@@ -144,7 +188,15 @@ async def call_tool(name: str, args: dict, mcp=None) -> str:
         if plugin_result is not None:
             return plugin_result
 
-    # 3) 本地工具兜底
+    # 3) 本地工具：TOOL_REGISTRY 开启时走注册表（统一门控 + JSON 归一化）；
+    #    未注册（未开启或该工具未入表）回退直连旧路径（行为 100% 不变）
+    if config.cfg.TOOL_REGISTRY:
+        _register_local_tools()
+        from src.agent.tool_registry import tool_registry
+        registry_result = await tool_registry.dispatch_async(name, args or {})
+        if registry_result is not None:
+            return registry_result
+
     impl = _LOCAL_REGISTRY.get(name)
     if impl is not None:
         return await impl(**(args or {}))
@@ -167,6 +219,8 @@ def get_local_tool_names() -> List[str]:
     if config.cfg.MEMORY_ENABLED:
         names.add("remember_fact")
         names.add("forget_memory")
+    if config.cfg.MEMORY_CURATED_ENABLED:
+        names.add("memory")
     if config.cfg.TOOL_LOOK_SCREEN_ENABLED:
         names.add("look_at_screen")
     if config.cfg.TOOL_PLAY_SFX_ENABLED:
@@ -174,6 +228,8 @@ def get_local_tool_names() -> List[str]:
         names.add("list_sound_effects")
     if config.cfg.TOOL_WRITE_DIARY_ENABLED:
         names.add("write_diary")
+    if config.cfg.ENABLE_SESSION_SEARCH:
+        names.add("session_search")
     return sorted(names)
 
 

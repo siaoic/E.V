@@ -8,6 +8,7 @@ import asyncio
 import copy
 
 from src.utils import console
+from plugins.base import VALID_HOOKS
 
 
 class _Storage:
@@ -164,6 +165,27 @@ class PluginContext:
     def unregister_tool(self, name: str) -> None:
         """移除本插件动态注册的工具。"""
         self._manager.unregister_dynamic_tool(self._plugin_name, name)
+
+    # ---- 钩子 / 记忆 provider（3.11 编程式注册 API） ----
+
+    def register_hook(self, name: str, fn) -> None:
+        """编程式注册钩子回调：name 必须在 VALID_HOOKS 白名单内。
+
+        转发到管理器事件总线（与 on() 同一分发路径，钩子异常由管理器
+        逐个容错）。未知钩子名直接抛错拒绝（fail-closed）。
+        """
+        if name not in VALID_HOOKS:
+            raise ValueError(
+                f"未知钩子名：{name}（可用：{sorted(VALID_HOOKS)}）")
+        self._manager.on(name, fn, self._plugin_name)
+
+    def register_memory_provider(self, provider) -> None:
+        """编程式注册记忆 provider（预留接口，转发到管理器暂存）。
+
+        提供方需实现 query / save 语义的自定义记忆后端；目前为增量注册
+        能力（不改变现有 memU 检索路径），后续记忆检索可注入第三方实现。
+        """
+        self._manager.register_memory_provider(self._plugin_name, provider)
 
     # ---- 插件间通信 ----
 

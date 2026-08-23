@@ -90,20 +90,7 @@ class InputHandler(BaseHandler):
                 text = input_fut.result()
                 # ---- 拒收：主动 / 弹幕正在播报 → 丢本条，换新 input_fut 继续等 ----
                 if is_rejecting_input():
-                    if text in ("/quit", "/exit", "/q"):
-                        # 停止命令穿透拒收：播报中也能优雅退出。否则控制中心
-                        # 点停止发的 /quit 被丢弃，30 秒窗口耗尽被强杀，记忆
-                        # 归档全部丢失。
-                        return text
-                    if text.startswith("!"):
-                        # 控制中心热更新命令（!config/!tts/!tools/!model 等）：
-                        # 不是用户发言，即使正在播报也照常执行，避免命令被吞
-                        try:
-                            await runtime.dispatch(text)
-                        except Exception as e:
-                            console.error(f"[控制中心] 命令执行失败：{e}")
-                    else:
-                        console.dim("[输入丢弃] 正在回复弹幕 / 主动说话，忽略本次键盘输入")
+                    console.dim("[输入丢弃] 正在回复弹幕 / 主动说话，忽略本次键盘输入")
                     input_fut = loop.run_in_executor(None, lambda: input(""))
                     continue
                 if runtime.proactive is not None:

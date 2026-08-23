@@ -1,0 +1,599 @@
+<!DOCTYPE html>
+<html lang="zh">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+    <title>投票弹窗 · 焦糖栗子</title>
+    <style>
+        * {
+            margin: 0;
+            padding: 0;
+            box-sizing: border-box;
+            font-family: Georgia, 'Times New Roman', 'STSong', 'SimSun', serif;
+        }
+        body {
+            min-height: 100vh;
+            background: #f2ebe5;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            padding: 20px;
+        }
+
+        /* 模拟背景 */
+        .bg-mock {
+            color: #8a7a6a;
+            font-size: 14px;
+            letter-spacing: 1px;
+            text-align: center;
+            opacity: 0.5;
+            max-width: 320px;
+            border: 1px dashed #c8b8a8;
+            padding: 30px 20px;
+            background: #fcf8f4;
+            box-shadow: 4px 4px 0 #c8b8a8;
+        }
+        .bg-mock .emoji-big {
+            font-size: 40px;
+            display: block;
+            margin-bottom: 10px;
+        }
+
+        /* ===== 投票弹窗 — 从右往左滑入 ===== */
+        .vote-popup {
+            position: fixed;
+            top: 30px;
+            right: 30px;
+            width: 340px;
+            max-width: 92vw;
+            background: #fdfdfb;
+            border: 2.5px solid #5e2c2c;
+            box-shadow: 8px 8px 0 #5e2c2c, 0 6px 24px rgba(94, 44, 44, 0.18);
+            z-index: 999;
+            transform: translateX(calc(100% + 40px));
+            opacity: 0;
+            transition: transform 0.45s cubic-bezier(0.22, 1, 0.36, 1), opacity 0.4s ease;
+            pointer-events: none;
+            border-radius: 0;
+            overflow: hidden;
+        }
+        .vote-popup.active {
+            transform: translateX(0);
+            opacity: 1;
+            pointer-events: auto;
+        }
+
+        /* 纸张纹理 */
+        .vote-popup::before {
+            content: '';
+            position: absolute;
+            inset: 0;
+            background-image:
+                radial-gradient(ellipse at 20% 30%, rgba(160, 120, 60, 0.08) 0%, transparent 55%),
+                radial-gradient(ellipse at 80% 70%, rgba(180, 130, 80, 0.10) 0%, transparent 55%);
+            pointer-events: none;
+            z-index: 0;
+        }
+
+        /* 报头 */
+        .vote-header {
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+            padding: 12px 18px;
+            background: #5e2c2c;
+            border-bottom: 2px solid #3d1a1a;
+            position: relative;
+            z-index: 1;
+        }
+        .vote-header-left {
+            display: flex;
+            align-items: center;
+            gap: 10px;
+        }
+        .vote-icon {
+            width: 28px;
+            height: 28px;
+            background: #fdfdfb;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            font-weight: 900;
+            font-size: 18px;
+            color: #5e2c2c;
+            font-family: 'Courier New', monospace;
+            border: 1.5px solid #5e2c2c;
+        }
+        .vote-title {
+            font-size: 15px;
+            font-weight: 800;
+            color: #fdfdfb;
+            letter-spacing: 2.5px;
+            text-transform: uppercase;
+            font-family: 'Courier New', Courier, monospace;
+        }
+        .vote-close {
+            background: none;
+            border: none;
+            color: #fdfdfb;
+            font-size: 24px;
+            line-height: 1;
+            cursor: pointer;
+            padding: 0 4px;
+            opacity: 0.8;
+            transition: 0.2s;
+            font-weight: 300;
+            font-family: 'Courier New', monospace;
+        }
+        .vote-close:hover {
+            opacity: 1;
+            transform: rotate(90deg);
+        }
+
+        /* 主体 */
+        .vote-body {
+            padding: 22px 20px 18px;
+            color: #5e2c2c;
+            position: relative;
+            z-index: 1;
+            background: #fdfdfb;
+        }
+        .vote-question {
+            font-size: 20px;
+            font-weight: 700;
+            line-height: 1.4;
+            margin-bottom: 16px;
+            padding-left: 14px;
+            border-left: 5px solid #e8a4a4;
+            font-family: Georgia, 'Times New Roman', serif;
+            letter-spacing: 0.3px;
+        }
+
+        /* 选项 + 进度条 */
+        .vote-options {
+            display: flex;
+            flex-direction: column;
+            gap: 14px;
+            margin-bottom: 18px;
+        }
+        .vote-option {
+            cursor: pointer;
+            transition: 0.2s;
+            border-radius: 0;
+        }
+        .vote-option .opt-row {
+            display: flex;
+            align-items: center;
+            gap: 12px;
+            background: #f8f4ef;
+            border: 1.5px solid #c8b8a8;
+            padding: 8px 14px 8px 10px;
+            box-shadow: 2px 2px 0 #c8b8a8;
+            transition: 0.15s;
+        }
+        .vote-option:hover .opt-row {
+            background: #efe6de;
+            border-color: #5e2c2c;
+            box-shadow: 3px 3px 0 #5e2c2c;
+            transform: translate(-1px, -1px);
+        }
+        .vote-option:active .opt-row {
+            transform: translate(2px, 2px);
+            box-shadow: 1px 1px 0 #5e2c2c;
+        }
+        .vote-option .opt-letter {
+            width: 26px;
+            height: 26px;
+            background: #5e2c2c;
+            color: #fdfdfb;
+            text-align: center;
+            line-height: 26px;
+            font-weight: 900;
+            font-size: 14px;
+            font-family: 'Courier New', monospace;
+            flex-shrink: 0;
+        }
+        .vote-option .opt-text {
+            flex: 1;
+            font-size: 16px;
+            font-weight: 500;
+            letter-spacing: 0.3px;
+        }
+        .vote-option .opt-percent {
+            font-weight: 800;
+            font-size: 16px;
+            color: #5e2c2c;
+            min-width: 44px;
+            text-align: right;
+            font-family: 'Courier New', monospace;
+        }
+
+        /* 进度条 */
+        .vote-option .opt-bar-bg {
+            width: 100%;
+            height: 6px;
+            background: #e8ddd0;
+            margin-top: 4px;
+            border-radius: 0;
+            overflow: hidden;
+            border: 1px solid #c8b8a8;
+        }
+        .vote-option .opt-bar-fill {
+            height: 100%;
+            width: 0%;
+            background: #5e2c2c;
+            transition: width 0.45s cubic-bezier(0.22, 1, 0.36, 1);
+            border-radius: 0;
+        }
+
+        /* 选中高亮 */
+        .vote-option.selected .opt-row {
+            background: #efe6de;
+            border-color: #5e2c2c;
+            box-shadow: 3px 3px 0 #5e2c2c;
+        }
+        .vote-option.selected .opt-bar-fill {
+            background: #3d1a1a;
+        }
+
+        /* 底部按钮 */
+        .vote-actions {
+            display: flex;
+            gap: 12px;
+            justify-content: flex-end;
+            margin-top: 4px;
+        }
+        .vote-btn {
+            padding: 8px 22px;
+            border: 2px solid #5e2c2c;
+            background: #fdfdfb;
+            color: #5e2c2c;
+            font-weight: 800;
+            font-size: 13px;
+            letter-spacing: 1.8px;
+            text-transform: uppercase;
+            cursor: pointer;
+            transition: 0.15s;
+            box-shadow: 3px 3px 0 #5e2c2c;
+            font-family: 'Courier New', Courier, monospace;
+            border-radius: 0;
+        }
+        .vote-btn-primary {
+            background: #5e2c2c;
+            color: #fdfdfb;
+            box-shadow: 3px 3px 0 #3d1a1a;
+        }
+        .vote-btn-primary:hover {
+            background: #3d1a1a;
+            transform: translate(-1px, -1px);
+            box-shadow: 4px 4px 0 #3d1a1a;
+        }
+        .vote-btn-primary:active {
+            transform: translate(2px, 2px);
+            box-shadow: 1px 1px 0 #3d1a1a;
+        }
+        .vote-btn-secondary:hover {
+            background: #efe6de;
+            transform: translate(-1px, -1px);
+            box-shadow: 4px 4px 0 #5e2c2c;
+        }
+
+        /* 触发按钮 & toast */
+        .trigger-btn {
+            position: fixed;
+            bottom: 30px;
+            right: 30px;
+            background: #5e2c2c;
+            color: #fdfdfb;
+            border: 2px solid #5e2c2c;
+            box-shadow: 5px 5px 0 #3d1a1a;
+            padding: 12px 24px;
+            font-size: 14px;
+            font-weight: 800;
+            letter-spacing: 2px;
+            cursor: pointer;
+            text-transform: uppercase;
+            font-family: 'Courier New', monospace;
+            z-index: 998;
+            transition: 0.15s;
+            border-radius: 0;
+        }
+        .trigger-btn:hover {
+            transform: translate(-2px, -2px);
+            box-shadow: 7px 7px 0 #3d1a1a;
+            background: #3d1a1a;
+        }
+        .trigger-btn:active {
+            transform: translate(3px, 3px);
+            box-shadow: 2px 2px 0 #3d1a1a;
+        }
+        .vote-toast {
+            position: fixed;
+            bottom: 100px;
+            right: 30px;
+            background: #fdfdfb;
+            border: 1.5px solid #5e2c2c;
+            padding: 6px 16px;
+            font-size: 13px;
+            font-weight: 600;
+            color: #5e2c2c;
+            box-shadow: 3px 3px 0 #5e2c2c;
+            opacity: 0;
+            transition: 0.25s;
+            pointer-events: none;
+            font-family: 'Courier New', monospace;
+            letter-spacing: 0.5px;
+        }
+        .vote-toast.show {
+            opacity: 1;
+            bottom: 120px;
+        }
+
+        @media (max-width: 500px) {
+            .vote-popup {
+                top: 16px;
+                right: 12px;
+                width: 92vw;
+                max-width: 340px;
+            }
+            .vote-question {
+                font-size: 18px;
+            }
+            .vote-option .opt-text {
+                font-size: 15px;
+            }
+            .vote-btn {
+                padding: 6px 16px;
+                font-size: 11px;
+            }
+        }
+    </style>
+</head>
+<body>
+    <div class="bg-mock">
+        <span class="emoji-big">📊</span>
+        <div>投票弹窗 · 百分比</div>
+        <div style="font-size:13px; margin-top:12px; opacity:0.7;">右下角按钮呼出</div>
+        <div style="font-size:11px; margin-top:20px; border-top:1px dashed #c8b8a8; padding-top:12px;">
+            ⚡ 弹幕数据在左侧面板展示
+        </div>
+    </div>
+
+    <!-- ===== 投票弹窗 ===== -->
+    <div class="vote-popup" id="votePopup">
+        <div class="vote-header">
+            <div class="vote-header-left">
+                <span class="vote-icon">📊</span>
+                <span class="vote-title">弹幕投票</span>
+            </div>
+            <button class="vote-close" id="voteCloseBtn">✕</button>
+        </div>
+        <div class="vote-body">
+            <div class="vote-question">🍂 秋日甜香 · 你选哪一味？</div>
+            <div class="vote-options" id="voteOptions">
+                <!-- 选项A -->
+                <div class="vote-option" data-value="A">
+                    <div class="opt-row">
+                        <span class="opt-letter">A</span>
+                        <span class="opt-text">焦糖栗子</span>
+                        <span class="opt-percent" id="percentA">0%</span>
+                    </div>
+                    <div class="opt-bar-bg"><div class="opt-bar-fill" id="barA" style="width:0%;"></div></div>
+                </div>
+                <!-- 选项B -->
+                <div class="vote-option" data-value="B">
+                    <div class="opt-row">
+                        <span class="opt-letter">B</span>
+                        <span class="opt-text">肉桂南瓜</span>
+                        <span class="opt-percent" id="percentB">0%</span>
+                    </div>
+                    <div class="opt-bar-bg"><div class="opt-bar-fill" id="barB" style="width:0%;"></div></div>
+                </div>
+                <!-- 选项C -->
+                <div class="vote-option" data-value="C">
+                    <div class="opt-row">
+                        <span class="opt-letter">C</span>
+                        <span class="opt-text">烤红薯</span>
+                        <span class="opt-percent" id="percentC">0%</span>
+                    </div>
+                    <div class="opt-bar-bg"><div class="opt-bar-fill" id="barC" style="width:0%;"></div></div>
+                </div>
+            </div>
+
+            <div class="vote-actions">
+                <button class="vote-btn vote-btn-secondary" id="voteResetBtn">重置</button>
+                <button class="vote-btn vote-btn-primary" id="voteSubmitBtn">投票</button>
+            </div>
+        </div>
+    </div>
+
+    <button class="trigger-btn" id="showVoteBtn">📮 打开投票</button>
+    <div class="vote-toast" id="voteToast">已记录你的选择</div>
+
+    <script>
+        (function() {
+            // ----- DOM refs -----
+            const popup = document.getElementById('votePopup');
+            const showBtn = document.getElementById('showVoteBtn');
+            const closeBtn = document.getElementById('voteCloseBtn');
+            const options = document.querySelectorAll('.vote-option');
+            const resetBtn = document.getElementById('voteResetBtn');
+            const submitBtn = document.getElementById('voteSubmitBtn');
+            const toast = document.getElementById('voteToast');
+
+            const percentA = document.getElementById('percentA');
+            const percentB = document.getElementById('percentB');
+            const percentC = document.getElementById('percentC');
+            const barA = document.getElementById('barA');
+            const barB = document.getElementById('barB');
+            const barC = document.getElementById('barC');
+
+            // ----- 投票数据 (模拟弹幕计数) -----
+            let votes = { A: 0, B: 0, C: 0 };
+            let selectedValue = null;
+            let hasVoted = false;
+
+            // ----- 更新百分比 & 进度条 -----
+            function updatePercentages() {
+                const total = votes.A + votes.B + votes.C;
+                if (total === 0) {
+                    percentA.textContent = '0%';
+                    barA.style.width = '0%';
+                    percentB.textContent = '0%';
+                    barB.style.width = '0%';
+                    percentC.textContent = '0%';
+                    barC.style.width = '0%';
+                    return;
+                }
+                const pA = Math.round((votes.A / total) * 100);
+                const pB = Math.round((votes.B / total) * 100);
+                const pC = Math.round((votes.C / total) * 100);
+                percentA.textContent = pA + '%';
+                barA.style.width = pA + '%';
+                percentB.textContent = pB + '%';
+                barB.style.width = pB + '%';
+                percentC.textContent = pC + '%';
+                barC.style.width = pC + '%';
+            }
+
+            // ----- 外部调用：增加票数 (由左侧弹幕流触发) -----
+            window.addVote = function(optionKey) {
+                if (!votes.hasOwnProperty(optionKey)) return;
+                votes[optionKey] = (votes[optionKey] || 0) + 1;
+                updatePercentages();
+                // 如果弹窗打开，给个小反馈
+                if (popup.classList.contains('active')) {
+                    showToast(`📨 收到 ${optionKey} 票`, 600);
+                }
+            };
+
+            // ----- 清除选中高亮 -----
+            function clearSelected() {
+                options.forEach(el => el.classList.remove('selected'));
+                selectedValue = null;
+            }
+
+            // ----- 选择选项 -----
+            function selectOption(value) {
+                if (hasVoted) {
+                    showToast('你已经投过票啦 ✋', 1400);
+                    return;
+                }
+                clearSelected();
+                options.forEach(el => {
+                    if (el.dataset.value === value) {
+                        el.classList.add('selected');
+                        selectedValue = value;
+                    }
+                });
+            }
+
+            // ----- Toast -----
+            function showToast(msg, duration = 1200) {
+                toast.textContent = msg;
+                toast.classList.add('show');
+                clearTimeout(toast._timer);
+                toast._timer = setTimeout(() => {
+                    toast.classList.remove('show');
+                }, duration);
+            }
+
+            // ----- 提交投票 (只做状态，不影响票数) -----
+            function submitVote() {
+                if (hasVoted) {
+                    showToast('每人仅限一票 ✋', 1400);
+                    return;
+                }
+                if (!selectedValue) {
+                    showToast('请先选择一个选项', 1200);
+                    return;
+                }
+                hasVoted = true;
+                showToast(`✅ 已投给 ${selectedValue}`, 1600);
+                options.forEach(el => {
+                    el.style.cursor = 'default';
+                    el.style.opacity = '0.7';
+                });
+            }
+
+            // ----- 重置状态 (不清除票数) -----
+            function resetVoteState() {
+                clearSelected();
+                hasVoted = false;
+                options.forEach(el => {
+                    el.style.cursor = 'pointer';
+                    el.style.opacity = '1';
+                });
+                showToast('已重置，可重新投票', 1000);
+            }
+
+            // ----- 弹窗控制 -----
+            function closePopup() {
+                popup.classList.remove('active');
+            }
+
+            function openPopup() {
+                popup.classList.add('active');
+                updatePercentages();
+                if (hasVoted) {
+                    options.forEach(el => {
+                        el.style.cursor = 'default';
+                        el.style.opacity = '0.7';
+                    });
+                } else {
+                    options.forEach(el => {
+                        el.style.cursor = 'pointer';
+                        el.style.opacity = '1';
+                    });
+                }
+            }
+
+            // ----- 事件绑定 -----
+            options.forEach(opt => {
+                opt.addEventListener('click', function() {
+                    const val = this.dataset.value;
+                    selectOption(val);
+                });
+            });
+
+            submitBtn.addEventListener('click', submitVote);
+            resetBtn.addEventListener('click', resetVoteState);
+            closeBtn.addEventListener('click', closePopup);
+
+            showBtn.addEventListener('click', function() {
+                if (popup.classList.contains('active')) {
+                    closePopup();
+                } else {
+                    openPopup();
+                }
+            });
+
+            document.addEventListener('keydown', function(e) {
+                if (e.key === 'Escape' && popup.classList.contains('active')) {
+                    closePopup();
+                }
+            });
+
+            // ----- 模拟初始票数 (展示效果) -----
+            setTimeout(() => {
+                window.addVote('A');
+                window.addVote('B');
+                window.addVote('A');
+                window.addVote('C');
+                window.addVote('B');
+                window.addVote('A');
+                updatePercentages();
+            }, 300);
+
+            // 自动打开弹窗演示
+            setTimeout(() => {
+                openPopup();
+                showToast('📬 投票已开启', 1500);
+            }, 600);
+
+            // 暴露 updatePercentages 供外部调用
+            window.updateVotePercentages = updatePercentages;
+        })();
+    </script>
+</body>
+</html>

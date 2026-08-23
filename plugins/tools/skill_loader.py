@@ -8,6 +8,7 @@
 from pathlib import Path
 
 from plugins.tools.skills import get_skill_manager
+from src.llm.skills.curator import list_entries
 from src.utils import console
 
 _MAX_SKILL_CHARS = 20000
@@ -63,12 +64,47 @@ def _format_skill_text(
     )
 
 
+def _find_absorbed_target(skill_name: str) -> str | None:
+    """旧技能名 → 其被并入的 umbrella 技能名（5.10 引用迁移兼容层）。
+
+    技能曾被 curator 合并归档后，账本（curator_ledger.jsonl）里留有
+    action=merge 且 absorbed_into 非空的条目；据此把 load_skill("旧名")
+    平滑迁移到 umbrella，避免旧名悬空。账本为空/损坏时返回 None（原样报错）。
+    """
+    for entry in list_entries():
+        if (entry.get("skill") == skill_name
+                and entry.get("absorbed_into")):
+            return entry["absorbed_into"]
+    return None
+
+
 async def _load_skill(skill_name: str) -> str:
     """按名加载技能完整指令（严格参照 Muika _skill.py 的 load_skill 工具）。"""
     manager = get_skill_manager()
     skill = manager.get(skill_name)
 
     if skill is None:
+        # 5.10：旧名已被 curator 并入 umbrella → 提示迁移并加载 umbrella
+        umbrella = _find_absorbed_target(skill_name)
+        if umbrella:
+            skill = manager.get(umbrella)
+            if skill is not None:
+                console.dim(
+                    f"[load_skill] 技能 '{skill_name}' 已并入 umbrella '{umbrella}'，"
+                    f"改加载 umbrella")
+                try:
+                    text = skill.location.read_text(
+                        encoding="utf-8", errors="replace")
+                except Exception as e:
+                    return f"错误：读取迁移目标技能 {umbrella!r} 失败：{e}"
+                manager.record_usage(skill.name)
+                return (
+                    f"技能 '{skill_name}' 已被策展合并进技能 '{umbrella}'（absorbed_into）。"
+                    f"以下为其 umbrella 完整指令：\n\n"
+                    + _format_skill_text(
+                        skill.name, skill.location.parent, text,
+                        "load_skill", str(skill.location))
+                )
         available = ", ".join(s.name for s in manager.skills) or "(none)"
         return f"错误：技能 {skill_name!r} 不存在。可用技能：{available}"
 
@@ -118,6 +154,8 @@ async def _read_skill_resource(skill_name: str, resource_path: str) -> str:
         return f"错误：读取资源文件失败：{e}"
 
     console.dim(f"[read_skill_resource] 已加载 {skill_name}/{resource_path}（{target}）")
+    # 5.2：细节资源读取算一次技能查看信号（视图遥测，供生命周期状态机参考）
+    manager.bump_view(skill.name)
     return _format_skill_text(
         skill.name, skill_dir, text, "read_skill_resource", f"{skill_name}/{resource_path}"
     )

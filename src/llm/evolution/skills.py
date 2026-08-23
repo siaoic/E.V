@@ -8,11 +8,16 @@
 
 from __future__ import annotations
 
+import json
 import re
 import time
 from pathlib import Path
 
 from src.llm.evolution.skill_eval import get_evaluator
+from src.llm.skills.curator import (
+    _dir_sha256, append_curator_ledger, capture_before, curator_enabled,
+    snapshot_skills,
+)
 from src.utils import config, console
 
 from ._utils import _file_mtime, _strip_ws, archive_skill, call_llm_json, split_frontmatter
@@ -23,6 +28,129 @@ from .metrics import (
 from .prompts import (
     CFG, _HERMES_CURATOR_REVIEW_PROMPT, _PRUNE_OUTPUT_PROTOCOL,
 )
+
+# 5.4 包完整性：以下子目录存在文件即视为"整包技能"（含 references/ 等捆绑
+# 资源的技能扁平化为小节会留下悬空链接，合并时必须整体保留/整包归档）
+_RESOURCE_SUBDIRS = ("references", "examples", "templates", "scripts")
+
+
+def _has_bundled_package(skill_dir: Path) -> bool:
+    """技能是否"整包"——含捆绑子文件或 SKILL.md 相对链接（5.4 包完整性）。
+
+    含子文件/相对链接的技能扁平化为小节会留下悬空链接，禁止并入 umbrella；
+    只能三选一：整体保留 / 全量搬移子文件并改写路径 / 整包归档（archive_skill
+    整目录移动天然支持）。此检查用于保守拒绝扁平化合并。
+    """
+    for sub in _RESOURCE_SUBDIRS:
+        base = skill_dir / sub
+        if base.is_dir():
+            try:
+                if any(p.is_file() for p in base.rglob("*")):
+                    return True
+            except OSError:
+                pass
+    try:
+        text = (skill_dir / "SKILL.md").read_text(
+            encoding="utf-8", errors="replace")
+    except OSError:
+        return False
+    # 相对链接：Markdown 链接/图片引用非 http(s) 目标（含 ./ ../ 与裸文件名）
+    for m in re.finditer(r"!?\[[^\]]*\]\(([^)]+)\)", text):
+        target = m.group(1).strip().lstrip("/")
+        if target and not target.lower().startswith(("http://", "https://")):
+            return True
+    return False
+
+
+# ---------- 5.10 引用迁移（absorbed_into） ----------
+
+def _scheduler_path() -> Path:
+    """定时任务清单路径（可写数据根，与 src/agent/scheduler.py 口径一致）。"""
+    return Path(config.cfg.DATA_ROOT) / "agent_schedule.json"
+
+
+def _scheduler_task_texts() -> list[str]:
+    """读取全部定时任务文本；清单缺失/损坏返回空列表。"""
+    try:
+        with _scheduler_path().open("r", encoding="utf-8") as f:
+            data = json.load(f)
+        if not isinstance(data, list):
+            return []
+        return [str(i.get("task") or "") for i in data if isinstance(i, dict)]
+    except (OSError, ValueError):
+        return []
+
+
+def _scheduler_referenced_skills(skill_names: list[str]) -> set[str]:
+    """被定时任务文本引用的技能名集合（整词匹配，5.4 cron 引用保护）。
+
+    被调度任务引用的技能不进入合并/归档候选，防止后台策展剪掉在跑的引用。
+    """
+    texts = _scheduler_task_texts()
+    if not texts:
+        return set()
+    joined = "\n".join(texts)
+    referenced = set()
+    for name in skill_names:
+        if re.search(rf"(?<![a-z0-9_]){re.escape(name)}(?![a-z0-9_])", joined):
+            referenced.add(name)
+    return referenced
+
+
+def _migrate_scheduler_references(mapping: dict[str, str]) -> int:
+    """把定时任务文本中的旧技能名改写为 umbrella 名，返回改写条目数（5.10）。
+
+    仅命中"任务文本包含旧技能名整词"的条目才改写（保守匹配，未命中不改写）；
+    清单缺失/损坏或改写失败时静默返回 0，不改动任何内容。
+    """
+    if not mapping:
+        return 0
+    path = _scheduler_path()
+    try:
+        with path.open("r", encoding="utf-8") as f:
+            data = json.load(f)
+        if not isinstance(data, list):
+            return 0
+    except (OSError, ValueError):
+        return 0
+    changed = 0
+    for item in data:
+        if not isinstance(item, dict):
+            continue
+        task = item.get("task")
+        if not isinstance(task, str):
+            continue
+        new_task = task
+        for old, new in mapping.items():
+            new_task = re.sub(
+                rf"(?<![a-z0-9_]){re.escape(old)}(?![a-z0-9_])", new, new_task)
+        if new_task != task:
+            item["task"] = new_task
+            changed += 1
+    if changed:
+        try:
+            path.parent.mkdir(parents=True, exist_ok=True)
+            with path.open("w", encoding="utf-8") as f:
+                json.dump(data, f, ensure_ascii=False, indent=2)
+        except OSError as e:
+            console.warn(f"[进化] 调度任务引用改写失败：{e}")
+            return 0
+    return changed
+
+
+def _write_absorbed_marker(skill, umbrella: str) -> None:
+    """归档技能目录写 `.absorbed_into` 标记（内容 = umbrella 名；空 = 真修剪）。
+
+    对标 hermes 的 .curator_suppressed：归档技能不复活、不被再次建议/合并。
+    目标目录位于 _archived 下；写入失败仅告警，不影响归档结果。
+    """
+    dest = skill.location.parent.parent / CFG.archive_dir_name / skill.name
+    if not dest.is_dir():
+        return
+    try:
+        (dest / ".absorbed_into").write_text(umbrella + "\n", encoding="utf-8")
+    except OSError as e:
+        console.warn(f"[进化] 归档标记写入失败（{skill.name!r}）：{e}")
 
 
 class SkillEvolution:
@@ -69,6 +197,15 @@ class SkillEvolution:
                     "建议人工复核后修正或移除")
         except Exception as e:
             console.dim(f"[进化] 技能 {safe_name!r} 评估跳过：{e}")
+        # 5.5 provenance：按写入来源标记 created_by——后台复盘/Agent 沉淀 →
+        # agent（进入 curator 管理范围）；用户/主播前台写入 → user（永不自动策展）
+        try:
+            from plugins.tools.skills import get_skill_manager
+            from .provenance import is_background_review
+            who = "agent" if is_background_review() else "user"
+            get_skill_manager().mark_created_by(safe_name, who)
+        except Exception:
+            pass
         console.ok(f"[进化] 技能沉淀：{safe_name}（已热加载）")
         METRICS.incr(EVENT_SKILL_SAVED)
 
@@ -152,6 +289,11 @@ class SkillEvolution:
         except OSError as e:
             console.warn(f"[进化] 技能修补写入失败：{e}")
             return
+        # 5.2：修补成功记一次 patches 遥测（生命周期状态机/复盘参考）
+        try:
+            get_skill_manager().bump_patch(name)
+        except Exception:
+            pass
         console.ok(f"[进化] 技能修补：{name}（已热加载）")
         METRICS.incr(EVENT_SKILL_PATCHED)
 
@@ -167,25 +309,64 @@ class SkillEvolution:
         """
         from plugins.tools.skills import get_skill_manager
         manager = get_skill_manager()
+        # 5.2：审阅前先跑纯确定性生命周期状态机（active→stale→archived 标记，
+        # pinned 跳过），让下方候选统计与注入素材反映最新状态
+        try:
+            transitions = manager.apply_automatic_transitions()
+            if transitions.get("active_to_stale") or transitions.get("stale_to_archived"):
+                console.dim(
+                    f"[进化] 生命周期状态迁移：stale={len(transitions['active_to_stale'])}, "
+                    f"archived={len(transitions['stale_to_archived'])}")
+        except Exception:
+            pass
         now = time.time()
         candidates = [
             s for s in manager.skills
             if now - _file_mtime(s.location) >= CFG.prune_min_age
         ]
+        # 5.4 cron 引用保护：被定时任务文本引用的技能不进入候选（防止剪掉在跑引用）
+        referenced = _scheduler_referenced_skills([s.name for s in candidates])
+        if referenced:
+            candidates = [s for s in candidates if s.name not in referenced]
+            console.dim(
+                f"[进化] {len(referenced)} 个技能被定时任务引用，本次审阅跳过："
+                f"{', '.join(sorted(referenced))}")
+        # 5.5 用户资产边界：pinned 或用户前台写入（created_by=user）的技能
+        # 绝不自动合并/归档（后台 curator 只管理自己沉淀的技能）
+        protected = {s.name for s in candidates if s.pinned}
+        for s in candidates:
+            if s.name in protected:
+                continue
+            usage = manager.usage_of(s.name)
+            if usage and usage.get("created_by") == "user":
+                protected.add(s.name)
+        if protected:
+            candidates = [s for s in candidates if s.name not in protected]
+            console.dim(
+                f"[进化] {len(protected)} 个技能受保护（pinned/用户写入），"
+                f"本次审阅跳过：{', '.join(sorted(protected))}")
         if len(candidates) < 3:
             return  # 技能太少，不值得清理
         if client is None:
             return
-        # 候选列表附带真实使用统计（load 次数/最近使用）与 pin 状态，
+        # 候选列表附带真实使用统计（load/views/patches、生命周期状态）与 pin 状态，
         # 供 LLM 审阅参考（hermes 明确 use=0 不是归档依据，只注入数据不改判定标准）
         catalog = []
         for s in candidates:
             usage = manager.usage_of(s.name)
-            stat = (f" (loads={usage['loads']}, "
-                    f"last_used={time.strftime('%m-%d', time.localtime(usage['last_used']))})"
-                    if usage else " (从未被加载)")
+            if usage:
+                stat = (f" (state={usage.get('state', 'active')}, "
+                        f"loads={usage['loads']}, "
+                        f"views={usage.get('views', 0)}, "
+                        f"patches={usage.get('patches', 0)}, "
+                        f"last_used={time.strftime('%m-%d', time.localtime(usage['last_used']))})")
+            else:
+                stat = " (从未被加载)"
             pinned = " (pinned)" if s.pinned else ""
-            catalog.append(f"- {s.name}: {s.description}{stat}{pinned}")
+            # 5.4：整包技能标记（含捆绑子文件/相对链接，禁止扁平化合并）
+            package = " (整包技能,只可整包归档)" if _has_bundled_package(s.location.parent) else ""
+            catalog.append(
+                f"- {s.name}: {s.description}{stat}{pinned}{package}")
         catalog = "\n".join(catalog)
         # hermes 维护原文入 user 消息，输出协议入 system 消息（保证 JSON 解析兼容）
         user_content = (_HERMES_CURATOR_REVIEW_PROMPT
@@ -200,9 +381,15 @@ class SkillEvolution:
             label="技能库审阅",
             temperature=0.2,
             max_tokens=1024,
+            task="skill.prune",
         )
         if data is None:
             return
+        # Curator 增强（3.6，ENABLE_CURATOR 门控）：执行变更前打快照，
+        # 归档/合并动作写审计日志，支持按快照整批回滚；关闭时保持原流程
+        snapshot_id = None
+        if data.get("merge") or data.get("archive"):
+            snapshot_id = snapshot_skills(manager)
         merged = self.apply_merges(data.get("merge"), manager)
         to_archive = data.get("archive")
         if not isinstance(to_archive, list):
@@ -220,9 +407,21 @@ class SkillEvolution:
             if skill.pinned:
                 console.warn(f"[进化] 技能 {name!r} 已被 pin 保护，跳过归档")
                 continue
+            # 归档前捕获内容 blob（单条目回滚的前提）；关闭时返回 None 不改变原流程
+            entry_id = capture_before(name)
+            before_hash = _dir_sha256(skill.location.parent) or ""
             if archive_skill(skill, archive_dir_name=CFG.archive_dir_name):
                 archived += 1
                 METRICS.incr(EVENT_SKILL_ARCHIVED)
+                # 5.10：真修剪无转发目标 → 空 absorbed_into 标记（归档不复活）
+                _write_absorbed_marker(skill, "")
+                append_curator_ledger(
+                    "archive", name,
+                    reason=(item.get("reason") or "").strip(),
+                    detail=f"snapshot={snapshot_id or '-'}",
+                    entry_id=entry_id or "",
+                    before=before_hash,
+                    after=_dir_sha256(skill.location.parent) or "")
         if merged or archived:
             console.ok(f"[进化] 技能库维护：合并 {merged} 个窄技能，归档 {archived} 个技能")
 
@@ -233,11 +432,15 @@ class SkillEvolution:
         - target 必须存在且未被 pin（umbrella 保持可被继续补丁）
         - absorb 中的技能必须存在且未被 pin，正文以「## 技能名」小节追加进
           umbrella 的 SKILL.md 正文（保留 frontmatter），随后归档原技能目录
+        - 5.4 包完整性：含捆绑子文件/相对链接的整包技能禁止扁平化（整体保留）
+        - 5.10 引用迁移：归档时 ledger 记 absorbed_into + 归档目录写标记文件，
+          并把定时任务文本中的旧技能名改写为 umbrella 名
         返回实际合并的技能数；任何异常跳过该条合并，不影响其余处理。
         """
         if not isinstance(merges, list):
             return 0
         merged = 0
+        absorbed_mapping: dict[str, str] = {}
         for item in merges:
             if not isinstance(item, dict):
                 continue
@@ -271,6 +474,12 @@ class SkillEvolution:
                     continue
                 if skill.name == umbrella.name:
                     continue
+                # 5.4 包完整性：整包技能扁平化会留下悬空链接，只可整体保留/整包归档
+                if _has_bundled_package(skill.location.parent):
+                    console.warn(
+                        f"[进化] 技能合并跳过：{name!r} 为整包技能（含捆绑子文件/"
+                        f"相对链接），禁止扁平化为小节，已整体保留")
+                    continue
                 try:
                     body = skill.location.read_text(encoding="utf-8")
                 except OSError as e:
@@ -290,19 +499,48 @@ class SkillEvolution:
             chunks += [f"## {name}\n\n{body.rstrip()}" for name, body in sections]
             new_text = (fm.rstrip() + "\n\n" + "\n\n".join(chunks) + "\n"
                         if fm else "\n\n".join(chunks) + "\n")
+            # umbrella 改写前捕获 blob，支撑单条目回滚
+            umbrella_entry = capture_before(target_name)
+            umbrella_before = _dir_sha256(umbrella.location.parent) or ""
             try:
                 umbrella.location.write_text(new_text, encoding="utf-8")
             except OSError as e:
                 console.warn(f"[进化] 技能合并写入 {target_name!r} 失败：{e}")
                 continue
+            append_curator_ledger(
+                "merge_patch", target_name,
+                reason="umbrella 吸收窄技能小节",
+                detail=f"absorbed={','.join(n for n, _ in sections)}",
+                entry_id=umbrella_entry or "",
+                before=umbrella_before,
+                after=_dir_sha256(umbrella.location.parent) or "")
             # 合并成功 → 归档被吸收的窄技能目录
             for name, _ in sections:
                 skill = manager.get(name)
                 if skill is None:
                     continue
+                entry_id = capture_before(name)
+                before_hash = _dir_sha256(skill.location.parent) or ""
                 if archive_skill(skill, archive_dir_name=CFG.archive_dir_name):
                     merged += 1
                     METRICS.incr(EVENT_SKILL_MERGED)
+                    # 5.10：归档目录写标记文件 + ledger 记前进目标（引用迁移依据）
+                    _write_absorbed_marker(skill, target_name)
+                    absorbed_mapping[name] = target_name
+                    append_curator_ledger(
+                        "merge", name, reason="merged into umbrella",
+                        detail=f"target={target_name}",
+                        entry_id=entry_id or "",
+                        before=before_hash,
+                        after=_dir_sha256(skill.location.parent) or "",
+                        absorbed_into=target_name)
             console.ok(f"[进化] 技能合并：{target_name} 吸收 "
                        f"{', '.join(n for n, _ in sections)}（已热加载）")
+        # 5.10：合并产生的旧名→umbrella 映射改写定时任务文本（失败静默）
+        if absorbed_mapping and curator_enabled():
+            migrated = _migrate_scheduler_references(absorbed_mapping)
+            if migrated:
+                console.dim(
+                    f"[进化] 定时任务引用迁移：{migrated} 条任务文本中的旧技能名"
+                    f"已改写为新 umbrella 名")
         return merged

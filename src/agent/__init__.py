@@ -51,6 +51,7 @@ def create_agent(cfg: Any = None, *, workspace: Optional[str] = None) -> ReActAg
         sandbox=sandbox,
         budget=TokenBudget(max_tokens=int(cfg.AGENT_MAX_TOKENS), model_name=model),
         max_steps=int(cfg.AGENT_MAX_STEPS),
+        max_iterations=int(cfg.AGENT_MAX_ITERATIONS),  # 0 = 跟随 max_steps
     )
 
 

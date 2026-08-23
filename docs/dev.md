@@ -53,7 +53,8 @@
 
 1. 在对应 `src/<domain>/` 下新建模块文件，只暴露本模块能力，不反向引用主循环；
 2. 模块配置项加入 `src/utils/config.py` 的 `Config`（从 `.env` 读取 + 默认值），并在 `docs/config.md` 登记；
-3. 在 `src/core/application.py` 的 `run()` 中初始化、`finally` 中清理；需要热更新的加入 `!config` / `!tools` 派发；
+3. 在 `src/core/application.py` 的 `run()` 中初始化、`finally` 中清理；需要热更新的
+   在 `src/core/runtime.py` 注册到 `reload_all()` / 细粒度重载器；
 4. 外部服务失败抛 `EVBaseException`；日志用 `console`；
 5. 公共接口在 `docs/api.md` 登记（入参 / 返回 / 调用时机）。
 
@@ -126,7 +127,7 @@ class MyLLMAdapter(BaseLLMAdapter):
   导入目标模块 → 调用新函数/类（空参数或最小参数）→ 确认无语法/导入错误、行为符合预期；
 - 涉及外部服务（LLM / TTS / VTS / 弹幕）的改动，验证「服务不可用时的降级路径」不被破坏
   （如 TTS 未启动时 `start()` 返回 False、纯字幕模式正常）；
-- 并发相关改动重点回归：三方播报互斥、播报期间输入丢弃、`/quit` 与 `!` 命令穿透。
+- 并发相关改动重点回归：三方播报互斥、播报期间输入丢弃（Ctrl+C 退出）。
 
 ## 7. 验证命令参考
 

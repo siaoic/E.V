@@ -12,6 +12,7 @@ from __future__ import annotations
 import asyncio
 import json
 import shutil
+import time
 from pathlib import Path
 from typing import Any
 
@@ -105,6 +106,7 @@ async def call_llm_json(
     max_tokens: int = 2048,
     timeout: float = 60.0,
     prefer_disabled_thinking: bool = True,
+    task: str = "",
 ) -> dict | None:
     """统一的「LLM 调用 → JSON 解析」助手。
 
@@ -112,9 +114,12 @@ async def call_llm_json(
     - prefer_disabled_thinking: 先带 thinking disabled 请求，不支持则降级普通模式
       （DeepSeek 等默认开启思考时 content 为空、内容全在 reasoning_content）
     - content 为空时兜底读 reasoning_content；解析失败返回 None 并打日志
+    - task: 5.16 记账任务名（如 "review"）；为空不记账，签名向后兼容
     - 失败一律 fail-open（打日志返回 None），不抛异常影响主流程
     """
+    start = time.time()
     resp = None
+    used_model = ""
     for client, model, c_label in candidates:
         try:
             kwargs = dict(model=model, messages=messages,
@@ -133,11 +138,25 @@ async def call_llm_json(
             else:
                 resp = await asyncio.wait_for(
                     client.chat.completions.create(**kwargs), timeout=timeout)
+            used_model = model
             break
         except Exception as e:
             console.warn(f"[进化] {label}模型调用失败（{c_label}）：{e}")
     if resp is None:
         return None
+    # 5.16 记账（旁路）：记录成功调用的 token 与耗时，失败不影响结果
+    if task:
+        try:
+            usage = getattr(resp, "usage", None)
+            from .usage import record_usage
+            record_usage(
+                task, used_model,
+                getattr(usage, "prompt_tokens", 0),
+                getattr(usage, "completion_tokens", 0),
+                time.time() - start,
+            )
+        except Exception:
+            pass
     msg = resp.choices[0].message
     content = (msg.content or "").strip()
     if not content:

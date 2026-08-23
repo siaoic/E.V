@@ -1,6 +1,7 @@
 ---
 name: daily-diary
-description: 日记写作技能。当主播想记录直播日常、回顾当天趣事，或生成 Neuro-sama 博客风格周记/日记时使用。
+description: 日记/周记写作。记录直播日常、回顾趣事、生成博客风格周记时使用。
+version: 1.0.0
 ---
 
 # 日记写作技能

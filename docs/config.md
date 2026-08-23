@@ -2,7 +2,6 @@
 
 > 配置来源：**环境变量（.env）> configs/config.yaml > 默认值**，详见文末「配置分层（yaml 覆盖层）」。
 > 布尔值识别：`1 / true / yes / y / on` 为真。
-> `!config` / `!tools` 命令可热更新（见文末）。
 > 多行内容（人设）不写进 `.env`，存放在 `ui/data/system_prompt.txt` 或技能文件。
 
 ## 1. LLM（OpenAI 兼容接口）
@@ -79,7 +78,7 @@
 |---|---|---|
 | `OPENWEATHERMAP_API_KEY` | 空 | 天气工具 key |
 | `TOOLS_ENABLED` | `true` | 工具总开关（关闭 = 纯对话模式） |
-| `TOOL_GET_CURRENT_TIME_ENABLED` / `TOOL_GET_WEATHER_ENABLED` / `TOOL_LOAD_SKILL_ENABLED` / `TOOL_LOOK_SCREEN_ENABLED` / `TOOL_PLAY_SFX_ENABLED` | `true` | 各工具开关（控制中心「工具屋」勾选，`!tools` 热生效） |
+| `TOOL_GET_CURRENT_TIME_ENABLED` / `TOOL_GET_WEATHER_ENABLED` / `TOOL_LOAD_SKILL_ENABLED` / `TOOL_LOOK_SCREEN_ENABLED` / `TOOL_PLAY_SFX_ENABLED` | `true` | 各工具开关（控制中心「工具屋」勾选） |
 
 ## 10. 自我进化（对话后后台复盘）
 
@@ -210,7 +209,8 @@
 - **优先级**：环境变量 > config.yaml > 默认值。环境变量已设置的字段，yaml **不会**覆盖；
 - **纯增量**：`configs/config.yaml` 不存在时行为与原来完全一致（模板见 `configs/config.example.yaml`）；
 - yaml 键名与 .env 变量名一致；布尔/int/float/list 自动按字段类型转换，未知键忽略；
-- `!config` / `!tools` 热更新时会重新应用 yaml 覆盖层（环境变量未设置的字段回落 yaml）。
+- 热更新（`config.reload_config()` / `reload_tool_runtime()`）时会重新应用 yaml 覆盖层
+  （环境变量未设置的字段回落 yaml）。
 
 ```yaml
 # configs/config.yaml 示例（完整模板见 configs/config.example.yaml）
@@ -221,20 +221,3 @@ BILI_ROOM_IDS: [123, 456]
 
 > 密钥（`LLM_API_KEY` 等）建议留在 .env；yaml 适合「非密钥、按环境差异化」的配置
 > （直播间 / 运行参数 / 模型选择），避免改配置时反复动 .env。
-
-## 热更新命令（主程序 stdin）
-
-| 命令 | 作用 | 调用 |
-|---|---|---|
-| `!config` | 统一热更新：LLM / 人设 / 主动对话 / 内容过滤 / 记忆 / 弹幕 / 桌宠 / 情绪 | `config.reload_config()` |
-| `!tools` | 工具 / MCP 配置热更新 | `config.reload_tool_runtime()` |
-| `!stt` | 语音识别热启停 | `config.reload_tool_runtime()` |
-| `!tts_audio <path>` | TTS 主参考音频热更新（空串清空） | `tts.apply_ref()` |
-| `!tts_text <text>` | TTS 主参考文本热更新 | `tts.apply_ref()` |
-| `!tts_audios <path>` | TTS 辅助参考音频热更新（`\|` 分隔） | `tts.apply_ref_extras()` |
-| `!model <path>` | 桌宠模式热切换模型 | `pet_widget.switch_model()` |
-| `!plugins` | 插件管理：list / sync / reload / enable / disable | `PluginManager` |
-| `!clean` | 清理运行时内存 + 临时文件 | `cleaner` |
-| `/memory` | 记忆管理：list / del / clear / decay | `MemoryManager` |
-
-> 路径类参数仅允许项目根目录内（防目录穿越）。`/quit`、`/exit`、`/q` 退出；播报期间 `!` 命令照常执行，普通输入被丢弃。

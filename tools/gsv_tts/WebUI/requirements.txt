@@ -1,0 +1,7 @@
+gsv-tts-lite
+
+pedalboard
+pyloudnorm
+gradio
+qwen-asr
+psutil

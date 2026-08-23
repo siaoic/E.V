@@ -23,12 +23,14 @@ from typing import Any, Callable, Optional
 
 from src.agent.budget import TokenBudget
 from src.agent.executor import ToolExecutor
+from src.agent.iteration_budget import IterationBudget
 from src.agent.sandbox import Sandbox
 from src.core.output_lock import (
     STATE_IDLE, get_output_lock, set_agent_owner, set_output_owner,
     set_global_state,
 )
 from src.utils import config, console
+from src.utils.deadline import DeadlineExpired, run_bounded_async
 
 
 @dataclass
@@ -82,6 +84,11 @@ _DELEGATE_TOOL_SCHEMA = {
                     "items": {"type": "string"},
                     "description": "相互独立的子任务列表（每个都是完整自足的指令）",
                 },
+                "backend": {
+                    "type": "boolean",
+                    "description": "为 true 时任务入后台持久化队列离线执行（适合长任务，"
+                                   "不阻塞当前对话）；缺省 false 同步并行执行并返回汇总",
+                },
             },
             "required": ["tasks"],
         },
@@ -91,6 +98,11 @@ _DELEGATE_TOOL_SCHEMA = {
 # 子 Agent 最大步数：委派子任务的执行步数上限（低于主 Agent 上限，
 # 保证子任务收敛，避免子任务失控拖垮整体）
 _SUB_MAX_STEPS = 6
+
+# 子代理阻塞工具清单（3.8，对标 Hermes DELEGATE_BLOCKED_TOOLS）：
+# 子代理不得再委派（防无限递归）、不得播放音效（输出类工具并行会干扰
+# 主链路的 _OUTPUT_LOCK 互斥播报）。未来接入记忆写/发消息类工具时在此追加。
+_DELEGATE_BLOCKED_TOOLS = ("delegate", "play_sound_effect")
 
 # 技能沉淀条件：成功完成任务至少需要这么多步才值得沉淀为可复用技能
 _SKILL_MIN_STEPS = 2
@@ -106,6 +118,7 @@ class ReActAgent:
         sandbox: Sandbox,
         budget: TokenBudget,
         max_steps: int = 8,
+        max_iterations: Optional[int] = None,
         allow_delegate: bool = True,
     ) -> None:
         self._llm = llm_client
@@ -114,6 +127,12 @@ class ReActAgent:
         self._sandbox = sandbox
         self._budget = budget
         self._max_steps = max_steps
+        # 迭代次数预算（3.1，与 TokenBudget 正交的"轮数"维度）：
+        # 未显式指定时默认沿用 max_steps，不改变默认行为
+        self._iter_budget = IterationBudget(
+            max_iterations if max_iterations and max_iterations > 0 else max_steps)
+        # 宽限调用：预算恰好耗尽那轮允许再走一步收尾（去掉工具定义的总结调用）
+        self._budget_grace_call = True
         self._history: list[AgentStep] = []
         self._progress_callback: Optional[ProgressCallback] = None
         # 委派工具：注册到执行器。子 Agent 构造时传 allow_delegate=False 且
@@ -139,6 +158,8 @@ class ReActAgent:
         """
         self._history.clear()
         self._budget.reset()
+        self._iter_budget.reset()
+        self._budget_grace_call = True
         async with get_output_lock():
             set_agent_owner()
             try:
@@ -205,11 +226,13 @@ class ReActAgent:
         if get_skill_manager().get(name) is not None:
             console.dim(f"[Agent] 技能 {name!r} 已存在，跳过沉淀")
             return
+        from src.llm.evolution.provenance import background_review_context
         from src.llm.evolution.skills import SkillEvolution
-        await SkillEvolution().save_skill({
-            "name": name, "description": desc or "Agent 任务沉淀技能",
-            "content": content,
-        })
+        with background_review_context():  # Agent 沉淀属于后台路径 → created_by=agent
+            await SkillEvolution().save_skill({
+                "name": name, "description": desc or "Agent 任务沉淀技能",
+                "content": content,
+            })
 
     async def _maybe_sink_memory(self, task: str, result: str) -> None:
         """把任务结论/关键事实写入记忆库，供后续对话检索召回（失败静默）。"""
@@ -229,22 +252,39 @@ class ReActAgent:
 
     # ---------- 子 Agent 委派（对标 hermes "Delegates and parallelizes"） ----------
 
-    async def _delegate(self, tasks: list) -> str:
-        """把相互独立的子任务分派给并行子 Agent 执行并汇总结果。
+    async def _delegate(self, tasks: list, backend: bool = False) -> str:
+        """把相互独立的子任务分派给子 Agent 执行并汇总结果。
 
         子 Agent 共享主 Agent 的 LLM 客户端与沙箱、独立 TokenBudget，
         且 executor 不含 delegate 工具（天然防无限递归）；子任务不参与沉淀。
+        backend=True 时（3.8 后台委派）：任务入 SQLite 持久化队列由常驻后台
+        worker 离线执行，不阻塞当前对话；开关关闭时回退同步并行（行为不变）。
         """
         if not isinstance(tasks, list) or not tasks or not all(
                 isinstance(t, str) and t.strip() for t in tasks):
             return "参数错误：tasks 必须是包含 1 条及以上子任务的数组"
+        # 后台委派（3.8）：backend=True 且 AGENT_DELEGATE_BACKEND 开启
+        if backend:
+            from src.agent.async_delegation import get_delegation_queue
+            job_ids = []
+            for t in tasks:
+                job_id = get_delegation_queue().enqueue(t)
+                if job_id is not None:
+                    job_ids.append(job_id)
+            if job_ids:
+                console.ok(
+                    f"[Agent] 已后台入队 {len(job_ids)} 个子任务：{job_ids}")
+                return (f"已后台入队 {len(job_ids)} 个子任务（ID: {job_ids}），"
+                        "由后台 worker 离线执行，完成结果落 delegation.db。")
+            # 开关关闭：回退同步并行委派（现状行为）
+            console.dim("[Agent] 后台委派未启用，回退同步并行执行")
         console.dim(f"[Agent] 委派 {len(tasks)} 个子任务并行执行...")
 
         async def _run_one(subtask: str) -> str:
             sub = ReActAgent(
                 llm_client=self._llm,
                 llm_model=self._model,
-                executor=self._executor.without("delegate"),
+                executor=self._executor.without(*_DELEGATE_BLOCKED_TOOLS),
                 sandbox=self._sandbox,
                 budget=TokenBudget(max_tokens=self._budget.max_tokens,
                                    model_name=self._model),
@@ -267,6 +307,16 @@ class ReActAgent:
         """ReAct 主循环（已在输出锁内执行，不含锁管理）。"""
         self._task = task
         for step in range(self._max_steps):
+            # 迭代预算（3.1）：常规轮消耗一次额度
+            if not self._iter_budget.consume():
+                if self._budget_grace_call:
+                    # 宽限收尾：预算耗尽但宽限未用 → 去掉工具定义做一次总结调用，
+                    # 让模型产出最终结果而不是硬断
+                    self._budget_grace_call = False
+                    plan = await self._plan(summarize=True)
+                    # 总结调用无工具定义：模型纯文本输出被 _plan 归一为 finish dict
+                    return plan.get("result") or plan.get("reasoning") or "（无输出）"
+                break
             plan = await self._plan()
             if plan["action"] == "finish":
                 return plan["result"]
@@ -276,10 +326,13 @@ class ReActAgent:
                 return f"模型未给出有效动作，任务未完成。最后输出：{plan.get('reasoning', '')}"
             name, args = tool_call["name"], tool_call.get("arguments", {})
             try:
-                # 单步硬超时：挂起的工具调用中断并记录 [TIMEOUT] 观察，供 LLM 调整策略
-                observation = await asyncio.wait_for(
-                    self._executor.execute(name, args), timeout=_STEP_TIMEOUT)
-            except asyncio.TimeoutError:
+                # 单步硬超时（3.17）：deadline 原语由 daemon Timer 驱动，
+                # 事件循环被同步 IO 阻塞时超时仍有效
+                bounded = await run_bounded_async(
+                    self._executor.execute(name, args),
+                    _STEP_TIMEOUT, label=f"agent:{name}")
+                observation = bounded.raise_if_timed_out()
+            except DeadlineExpired:
                 observation = f"[TIMEOUT] 步骤超时（>{int(_STEP_TIMEOUT)}s）"
             self._history.append(AgentStep(
                 plan=plan["reasoning"], action=plan["tool_call"], observation=observation,
@@ -329,15 +382,20 @@ class ReActAgent:
                              "content": step.observation})
         return messages
 
-    async def _plan(self) -> dict:
-        """调 LLM 决定下一步动作：{"action": "tool"|"finish", ...}。"""
+    async def _plan(self, summarize: bool = False) -> dict:
+        """调 LLM 决定下一步动作：{"action": "tool"|"finish", ...}。
+
+        summarize=True（预算耗尽宽限收尾）：不带任何工具定义，
+        仅请求模型基于已有上下文给出最终总结结果。
+        """
         try:
             resp = await self._llm.chat.completions.create(
                 model=self._model,
                 messages=self._build_messages(),
-                tools=([{"type": "function", "function": t}
+                tools=(None if summarize else
+                       ([{"type": "function", "function": t}
                         for t in self._executor.schemas]
-                       + [_FINISH_TOOL_SCHEMA]),
+                        + [_FINISH_TOOL_SCHEMA])),
                 tool_choice="auto",
                 temperature=0.3,
             )

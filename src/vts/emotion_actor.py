@@ -10,10 +10,6 @@
 - 表情播放：ExpressionActivationRequest（先停用上一个表情再淡入目标，替换语义）
 - 动作播放：热键触发（HotkeyTriggerRequest）；未注册热键的文件夹动作
   由 FaceDriver 注入参数路径播放（P2 覆盖 VTS 待机，循环点 smoothstep 混合）
-- 命令行指令（控制台/控制中心试播）与桌宠一致：
-    /face list           列出模型的表情与动作
-    /expr <表情名>        播放指定表情
-    /motion <组> [序号]   播放指定动作（默认序号 0）
 """
 
 import json

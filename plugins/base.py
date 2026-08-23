@@ -5,6 +5,14 @@
 事件对象直接可读写（无需子进程 JSON-RPC 的 action 列表）。
 """
 
+# 钩子名白名单（3.11）：PluginContext.register_hook 只接受名单内的钩子名，
+# 防止插件注册任意回调名导致的事件分发混乱
+VALID_HOOKS = frozenset({
+    "on_init", "on_start", "on_stop", "on_destroy",
+    "on_user_input", "on_llm_request", "on_llm_response",
+    "on_tts_text", "on_tts_start", "on_tts_end",
+})
+
 
 class Plugin:
     """插件基类：生命周期 / 消息钩子 / 工具钩子，全部可选。"""

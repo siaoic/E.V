@@ -59,6 +59,9 @@ E.V.spec
 # ================= 编译产物（根目录 exe） =================
 /ControlCenter.exe
 /E.V.exe
+/ev-control-center.exe
+# 根目录任何 exe 产物（打包后输出）
+/*.exe
 
 # ================= npm 依赖与捆绑运行时（mindcraft 插件，大体积不入库） =================
 node_modules/
@@ -88,6 +91,14 @@ assets/preview.html
 assets/IMG_*.png
 # 第三方参考源码与资料（Muice-Chatbot-main、neurosama-perspective 等）
 docs/references/
+# tools/ 下的一次性调试脚本（可从其他文件推导/复现）
+tools/_repro_dirty.py
+tools/_score_probe.py
+tools/_test_penacony_knowledge.py
+
+# ================= pnpm 本地缓存（npm/pnpm 的 store/cache，大量文件+可重生成） =================
+tools/pnpm-store/
+tools/pnpm/
 
 # ================= 大体积 Live2D 模型（保留本地不入库，需要时 git add -f 强制提交） =================
 live2d/【免费版】悠小喵/

@@ -27,6 +27,7 @@ import numpy as np
 
 from src.utils import console
 from src.adapter.input import BaseInputAdapter
+from src.tts.echo import is_echo_of_recent  # 3.14：回声防护（识别结果与播报文本比对）
 
 # 录音参数（与 STT_SILENCE_SECONDS 等 .env 配置区分：这些是硬件级常量）
 SAMPLE_RATE = 16000          # SiliconFlow/SenseVoice 标准采样率
@@ -284,6 +285,12 @@ class STTEngine(BaseInputAdapter):
         """主循环线程内：把识别文本+说话时长交付给等待中的 future（FIFO）。"""
         text = (text or "").strip()
         if not text:
+            return
+        # 3.14 回声防护：识别结果与最近播报文本高度相似 → 判为扬声器漏音
+        # （打断瞬间被自己声音触发 STT 的回环），直接丢弃不投递
+        if getattr(self.cfg, "AGENT_TTS_ECHO_GUARD", False) and is_echo_of_recent(
+                text):
+            console.dim(f"[STT] 丢弃疑似 TTS 回声：{text}")
             return
         # 跳过已取消的残留 future（被打断 / 对话结束取消的），把文本交给
         # 下一个等待者；没有可用等待者时进缓冲，下次等输入时立刻拿到

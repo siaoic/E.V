@@ -19,6 +19,7 @@ from __future__ import annotations
 import asyncio
 import json
 import os
+import time
 from datetime import datetime
 
 from openai import AsyncOpenAI
@@ -87,13 +88,18 @@ class SkillEvaluator:
                 api_key=api_key, base_url=base_url, timeout=60.0)
         return self._client
 
-    async def _complete(self, system: str, user_text: str, max_tokens: int):
-        """调用主模型（关闭思考，保证输出干净文本/JSON）。"""
+    async def _complete(self, system: str, user_text: str, max_tokens: int,
+                        task: str = ""):
+        """调用主模型（关闭思考，保证输出干净文本/JSON）。
+
+        task: 5.16 记账任务名（如 "skill_eval.patch"）；为空不记账。
+        """
         client = self._ensure_client()
         if client is None:
             return None
+        start = time.time()
         try:
-            return await asyncio.wait_for(
+            resp = await asyncio.wait_for(
                 client.chat.completions.create(
                     model=self._model,
                     messages=[
@@ -109,6 +115,19 @@ class SkillEvaluator:
         except Exception as e:
             console.warn(f"[技能评估] 模型调用失败：{e}")
             return None
+        if task:
+            try:
+                usage = getattr(resp, "usage", None)
+                from .usage import record_usage
+                record_usage(
+                    task, self._model,
+                    getattr(usage, "prompt_tokens", 0),
+                    getattr(usage, "completion_tokens", 0),
+                    time.time() - start,
+                )
+            except Exception:
+                pass
+        return resp
 
     async def generate_eval_cases(self, skill_text: str) -> list[dict] | None:
         """依据技能内容生成测试用例（task + expected_keywords）。
@@ -126,7 +145,20 @@ class SkillEvaluator:
             sep = body.find("\n---", 3)
             if sep > 0:
                 body = body[sep + 4 :].lstrip("\n")
-        resp = await self._complete(system, body, max_tokens=1024)
+        # 5.6.3 技能效果回路：注入最近真实负反馈作为用例素材（替代纯 LLM 合成），
+        # 使 fitness 反映真实场景；无反馈或关闭时维持原行为（纯技能正文）
+        user_text = body
+        try:
+            from .feedback import feedback_section
+            fb = feedback_section(max_events=5)
+            if fb:
+                user_text = (body
+                             + "\n\n请优先参考以下真实负反馈设计能检验该技能的"
+                               "用例（如针对被吐槽的场景）：" + fb)
+        except Exception:
+            pass
+        resp = await self._complete(system, user_text, max_tokens=1024,
+                                    task="skill_eval.gen_cases")
         if resp is None:
             return None
         content = _message_text(resp.choices[0].message)
@@ -150,7 +182,8 @@ class SkillEvaluator:
     async def _run_case(self, skill_text: str, case: dict) -> str:
         """用技能作为指令执行单个测试任务，返回执行结果文本。"""
         resp = await self._complete(
-            _EXECUTE_SYSTEM, case["task"], max_tokens=512)
+            _EXECUTE_SYSTEM, case["task"], max_tokens=512,
+            task="skill_eval.run_case")
         if resp is None:
             return ""
         return _message_text(resp.choices[0].message).strip()

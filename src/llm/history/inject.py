@@ -75,6 +75,32 @@ class _InjectionMixin:
         return ("### 生效中的话术建议（直播时尽量遵循，若已被验证无效可忽略）\n"
                 + "\n".join(f"- {t}" for t in self._advice_cache))
 
+    # ---------- L2 内建长期记忆（MEMORY.md / USER.md 冻结快照） ----------
+
+    def _curated_memory_section(self) -> str:
+        """返回 L2 内建长期记忆（MEMORY.md/USER.md）的冻结快照段。
+
+        快照在会话开始时生成、整个会话保持不变（保 Prefix Cache 命中率），
+        会话中的写入即时落盘但不改动快照，下一次会话生效。空快照或
+        MEMORY_CURATED_ENABLED 关闭时返回空串（不注入，行为与历史一致）。
+        """
+        if not getattr(self.cfg, "MEMORY_CURATED_ENABLED", True):
+            return ""
+        from src.llm.memory.curated import get_curated_store
+
+        store = get_curated_store()
+        blocks = []
+        for target in ("memory", "user"):
+            block = store.format_for_system_prompt(target)
+            if block:
+                blocks.append(block)
+        if not blocks:
+            return ""
+        return ("### 长期记忆（跨会话持久，当前会话内冻结不更新）\n"
+                "以下是从 MEMORY.md / USER.md 读取的稳定事实，"
+                "回答时自然融入，不要机械复述：\n"
+                + "\n\n".join(blocks))
+
     # ---------- 观众画像注入（进化引擎复盘的长期事实，关键词召回） ----------
 
     def _profile_section(self, user_text: str) -> str:
@@ -123,6 +149,8 @@ class _InjectionMixin:
         """读取 GEPA 择优落盘的行为策略段，拼装成注入系统提示的段落。
 
         30s TTL 缓存避免每轮对话都读文件；无策略或未启用进化时返回空字符串。
+        5.16 A/B：EVOLUTION_POLICY_AB=1 时按缓存刷新奇偶各 50% 轮换注入
+        上一版策略（previous），盲测线上效果；默认关闭，行为与现状一致。
         """
         if not getattr(self.cfg, "EVOLUTION_PROMPT_EVO_ENABLED", True):
             return ""
@@ -135,9 +163,21 @@ class _InjectionMixin:
                 self._policy_cache = (
                     (data.get("text") or "").strip() if isinstance(data, dict) else ""
                 )
+                self._policy_previous = (
+                    (data.get("previous") or "").strip()
+                    if isinstance(data, dict) else ""
+                )
             except (OSError, ValueError):
                 self._policy_cache = ""
+                self._policy_previous = ""
         if not self._policy_cache:
             return ""
+        # A/B 盲测：命中奇数缓存周期注入上一版（50%），偶数或无非对照版走当前
+        if (getattr(self.cfg, "EVOLUTION_POLICY_AB", False)
+                and self._policy_previous
+                and int(self._policy_cache_ts) % 2 == 1):
+            block = self._policy_previous
+        else:
+            block = self._policy_cache
         return ("### 进化行为策略（GEPA 迭代沉淀，直播中相关情境优先遵循，"
-                "与生效中的话术建议冲突时以本策略为准）\n" + self._policy_cache)
+                "与生效中的话术建议冲突时以本策略为准）\n" + block)

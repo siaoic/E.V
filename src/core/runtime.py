@@ -8,8 +8,9 @@
 import asyncio
 import json
 import os
+import time
 from datetime import datetime
-from typing import Optional
+from typing import Any, Optional
 
 from src.utils import config, console
 from src.utils.constants import (
@@ -29,7 +30,6 @@ from src.vts.controller import VTSController
 from src.mindcraft.bridge import MindcraftBridge
 from src.utils.perf_tracker import PerfTracker
 from src.utils.subtitle_server import SubtitleServer
-from src.core.commands import CommandRegistry
 from src.core.output_lock import (
     STATE_AI_SPEAKING, STATE_IDLE, get_output_lock, get_output_owner,
     set_danmaku_pending, set_output_owner, set_global_state,
@@ -80,9 +80,7 @@ class RuntimeContext:
         self._input_source: str = "text"
         self._pending_stdin_fut: Optional[asyncio.Future] = None
         self._loop: Optional[asyncio.AbstractEventLoop] = None
-        # 命令注册表：由编排层（Application）在 setup 后构建并注入
-        self._cmd_registry: Optional[CommandRegistry] = None
-        # 细粒度配置热重载器注册表（懒构建，供 !config <组件> 与全量共用）
+        # 细粒度配置热重载器注册表（懒构建，供 reload_config 与全量共用）
         self._reloaders_map: Optional[dict] = None
 
     # ---------- 生命周期：setup / teardown ----------
@@ -107,17 +105,16 @@ class RuntimeContext:
 
             console.kv("模型", f"{cfg.LLM_MODEL}（深度思考 {'开' if cfg.LLM_THINKING else '关'}）")
             console.kv("桌宠", os.path.basename(cfg.PET_MODEL_PATH))
-            console.dim("拖动模型移动位置 | 点击模型播放动作 | 输入 /quit 退出")
+            console.dim("拖动模型移动位置 | 点击模型播放动作")
             if cfg.EMOTION_ACTOR_ENABLED:
-                console.dim("表情/动作：Embedding 情绪自动控制已启用（用户消息分类情绪播放；"
-                            "也可用 /expr /motion /face list 手动控制）")
+                console.dim("表情/动作：Embedding 情绪自动控制已启用（用户消息分类情绪播放）")
             else:
-                console.dim("表情/动作：自动情绪控制未启用（/expr /motion /face list 手动控制仍可用）")
+                console.dim("表情/动作：自动情绪控制未启用")
 
             self.pet_widget = PetWidget(cfg)
             self.pet_widget.show()
-            # 表情/动作 actor 总是创建：手动命令与控制中心试播不依赖自动控制开关，
-            # 自动分类播放由调用点按 EMOTION_ACTOR_ENABLED 开关控制
+            # 表情/动作 actor 总是创建：自动分类播放由调用点按
+            # EMOTION_ACTOR_ENABLED 开关控制
             from src.pet.emotion_actor import PetEmotionActor
             self.emotion_actor = PetEmotionActor(self.pet_widget, cfg)
             self.emotion_actor.scan()
@@ -162,7 +159,7 @@ class RuntimeContext:
             console.kv("模型", f"{cfg.LLM_MODEL}（深度思考 {'开' if cfg.LLM_THINKING else '关'}）")
             console.kv("VTS", f"端口 {cfg.VTS_PORT}")
             console.dim("AI 全权接管：自动眨眼 / 呼吸 / 身体摇摆 | 基线动画由 .motion3.json 驱动")
-            console.dim("输入 /quit 退出")
+            console.dim("键盘输入即与 E.V 对话（Ctrl+C 退出）")
 
             self.vts = VTSController()
             vts_ok = await self.vts.connect()
@@ -230,10 +227,9 @@ class RuntimeContext:
             await self.emotion_actor.scan()
             self.emotion_actor.load_map()
             if cfg.EMOTION_ACTOR_ENABLED:
-                console.dim("表情/动作：Embedding 情绪自动控制已启用（用户消息分类情绪播放；"
-                            "也可用 /expr /motion /face list 手动控制）")
+                console.dim("表情/动作：Embedding 情绪自动控制已启用（用户消息分类情绪播放）")
             else:
-                console.dim("表情/动作：自动情绪控制未启用（/expr /motion /face list 手动控制仍可用）")
+                console.dim("表情/动作：自动情绪控制未启用")
 
         # Embedding 预热：情绪分类器是惰性初始化（第一条用户消息才构建 provider
         # 并对语料批量向量化），启动后台提前构建，避免首轮消息的冷启动延迟。
@@ -360,6 +356,17 @@ class RuntimeContext:
         self.agent_scheduler.load()
         if cfg.AGENT_ENABLED:
             asyncio.create_task(self._agent_schedule_loop())
+
+        # 后台委派 worker（3.8）：AGENT_DELEGATE_BACKEND 开启时启动常驻线程，
+        # 消费 delegation.db 队列中的长任务（复用 run_task 执行）
+        if cfg.AGENT_DELEGATE_BACKEND:
+            from src.agent.async_delegation import ensure_worker
+            from src.agent import run_task
+
+            def _delegate_executor(job: dict) -> Any:
+                return run_task(str(job.get("task") or ""))
+
+            ensure_worker(_delegate_executor)
 
         # 语音识别
         if cfg.STT_ENABLED:
@@ -600,6 +607,14 @@ class RuntimeContext:
         # 通过跳过检查、真正开始回复：左栏「对话」显示本条弹幕（被跳过的
         # 弹幕不显示），同时推 SSE 让前端卡片展示
         # （被跳过/未真正回复的弹幕不上卡片，只留在左侧实时流）
+        # 5.6 负反馈信号：仅对真正要回复的弹幕采集（与 Embedding 口径一致），
+        # 命中负向关键词（吐槽/否定）则记录，供复盘素材注入与话术负反馈标记
+        try:
+            from src.llm.evolution.feedback import is_negative_text, record_feedback
+            if is_negative_text(text):
+                record_feedback("barrage", "negative", text)
+        except Exception:
+            pass
         if extra:
             shown = f"{text}（等{extra}条弹幕）"
         else:
@@ -719,17 +734,24 @@ class RuntimeContext:
                         self.tts.clear_interrupt()
                     except Exception:
                         pass
-                await stream.converse(
-                    self.brain, wrapped, tts=self.tts, face=self.face, sub=self.sub,
-                    profanity_filter=self.pf,
-                    profanity_filter_rate=cfg.PROFANITY_FILTER_RATE,
-                    on_llm_done=_on_llm_done if cfg.MEMORY_ENABLED else None,
-                    emotion_actor=(
-                        self.emotion_actor
-                        if (getattr(self, "emotion_actor", None) is not None
-                            and cfg.EMOTION_ACTOR_ENABLED)
-                        else None),
-                )
+                # 会话租约（3.10）：同观众连发弹幕按 session 串行进入 brain，
+                # 排队超时丢弃新请求（默认关闭时 gate 直接放行，行为不变）
+                from src.core.turn_lease import session_turn_gate
+                async with session_turn_gate(str(uid) or username) as gate_ok:
+                    if not gate_ok:
+                        console.dim(f"[弹幕] 会话租约排队超时，丢弃（{username}）")
+                        return
+                    await stream.converse(
+                        self.brain, wrapped, tts=self.tts, face=self.face, sub=self.sub,
+                        profanity_filter=self.pf,
+                        profanity_filter_rate=cfg.PROFANITY_FILTER_RATE,
+                        on_llm_done=_on_llm_done if cfg.MEMORY_ENABLED else None,
+                        emotion_actor=(
+                            self.emotion_actor
+                            if (getattr(self, "emotion_actor", None) is not None
+                                and cfg.EMOTION_ACTOR_ENABLED)
+                            else None),
+                    )
                 # 左栏对话换行：回复句子是连续流（无换行），收尾补一个，
                 # 避免与下一条弹幕/发言粘连成一行
                 console.chat()
@@ -815,30 +837,122 @@ class RuntimeContext:
     async def _agent_schedule_loop(self) -> None:
         """后台循环：每 30s 检查一次 Agent 定时任务清单，到点后台触发执行。
 
-        到期任务经 AgentScheduler.due_items() 取走并推进下次时间；
-        触发本身用 create_task 后台执行（run_task 占用输出互斥锁），
-        不阻塞本循环与主输入。
+        硬化模式（AGENT_CRON_HARDEN=1，3.9）：tick 前先取跨进程文件锁（拿不到
+        跳过本轮，防 live/pet/控制中心多进程双触发）；触发前账本查重（同一
+        due 只执行一次）；执行包 run_bounded_async 硬中断（3 分钟强制取消）。
+        非硬化模式：与历史行为完全一致。
         """
+        from src.agent.cron_harden import (
+            ExecutionLedger, cron_harden_enabled, cross_process_tick_lock,
+        )
+        ledger = ExecutionLedger() if cron_harden_enabled() else None
         while True:
             await asyncio.sleep(30)
             try:
-                due = self.agent_scheduler.due_items()
+                if cron_harden_enabled():
+                    with cross_process_tick_lock() as acquired:
+                        if not acquired:
+                            continue  # 其他进程正在 tick，本轮跳过
+                        due = self.agent_scheduler.due_items()
+                        for item in due:
+                            due_ts = float(item.get("last_run") or 0)
+                            if ledger.already_executed(
+                                    item.get("id"), due_ts):
+                                continue  # 同一 due 已被执行，账本去重
+                            console.ok(
+                                f"[Agent调度] 触发任务 #{item.get('id')}："
+                                f"{item.get('task')}")
+                            asyncio.create_task(
+                                self._run_scheduled_task(item, ledger=ledger,
+                                                         due_ts=due_ts))
+                else:
+                    due = self.agent_scheduler.due_items()
+                    for item in due:
+                        console.ok(
+                            f"[Agent调度] 触发任务 #{item.get('id')}："
+                            f"{item.get('task')}")
+                        asyncio.create_task(self._run_scheduled_task(item))
             except Exception as e:
                 console.dim(f"[Agent调度] 检查清单出错（不影响运行）：{e}")
-                continue
-            for item in due:
-                console.ok(f"[Agent调度] 触发任务 #{item.get('id')}：{item.get('task')}")
-                asyncio.create_task(self._run_scheduled_task(item))
 
-    async def _run_scheduled_task(self, item: dict) -> None:
-        """执行一条到期定时任务（后台）：run_task 失败只告警不影响运行。"""
+    async def _run_scheduled_task(self, item: dict,
+                                  ledger: Optional[Any] = None,
+                                  due_ts: float = 0.0) -> None:
+        """执行一条到期定时任务（后台）：run_task 失败只告警不影响运行。
+
+        硬化模式：执行前注入扫描（命中即跳过，防任务 prompt 混入外部注入）；
+        run_task 包 run_bounded_async 硬中断（3 分钟超时强制取消，复用 3.17）；
+        完成后写执行账本（去重审计）。非硬化模式：与历史行为完全一致。
+        """
         from src.agent import run_task
+        task_text = item.get("task") or ""
+        if ledger is not None:
+            from src.agent.cron_harden import scan_injection
+            if scan_injection(task_text, strict=True):
+                console.error(
+                    f"[Agent调度] 任务 #{item.get('id')} 触发注入扫描拦截，已跳过")
+                ledger.record(item.get("id"), due_ts, False, detail="注入扫描拦截")
+                return
+        t0 = time.time()
         try:
-            result = await run_task(item.get("task") or "")
-            console.ok(f"[Agent调度] 任务 #{item.get('id')} 完成：{str(result)[:200]}")
+            if ledger is not None:
+                from src.utils.deadline import run_bounded_async
+                bounded = await run_bounded_async(
+                    run_task(task_text), 180.0, label=f"cron:{item.get('id')}")
+                ok = not bounded.timed_out
+                result = bounded.value if ok else "（3 分钟硬中断）"
+            else:
+                result = await run_task(task_text)
+                ok = True
+            console.ok(
+                f"[Agent调度] 任务 #{item.get('id')} 完成：{str(result)[:200]}")
+            if ledger is not None:
+                ledger.record(item.get("id"), due_ts, ok,
+                              detail=str(result)[:200],
+                              duration=time.time() - t0)
         except Exception as e:
-            console.error(f"[Agent调度] 任务 #{item.get('id')} 失败："
-                          f"{type(e).__name__}: {e}")
+            console.error(
+                f"[Agent调度] 任务 #{item.get('id')} 失败："
+                f"{type(e).__name__}: {e}")
+            if ledger is not None:
+                ledger.record(item.get("id"), due_ts, False,
+                              detail=f"{type(e).__name__}: {e}",
+                              duration=time.time() - t0)
+
+    async def _run_learn_task(self, topic: str) -> None:
+        """!learn 后台创作：run_task 执行三段引导任务（5.15）。
+
+        产物技能标记 created_by=user（前台创建，curator 不自动策展，
+        对标 hermes 红线「用户创建的技能永远不自动整合」）；任务前后用
+        技能注册表快照差集定位新增技能（save_skill 不登记 usage 统计）。
+        """
+        from src.agent.learn_prompt import build_learn_task
+        from src.agent import run_task
+        from plugins.tools.skills import get_skill_manager
+        task = build_learn_task(topic)
+        if not task:
+            return
+        manager = get_skill_manager()
+        try:
+            manager.reload()
+            before = {s.name for s in manager.skills}
+        except Exception:
+            before = set()
+        try:
+            result = await run_task(task)
+            console.ok(f"[learn] 创作完成：{str(result)[:200]}")
+        except Exception as e:
+            console.error(f"[learn] 创作失败：{type(e).__name__}: {e}")
+            return
+        # provenance：前台创建 → created_by=user（force reload 兜底 watchdog 延迟）
+        try:
+            manager.reload()
+            after = {s.name for s in manager.skills}
+            for name in after - before:
+                manager.mark_created_by(name, "user")
+                console.dim(f"[learn] 技能 {name} 已标记为用户创建（curator 不自动管理）")
+        except Exception:
+            pass
 
     # ---------- 会话归档 ----------
 
@@ -1019,29 +1133,9 @@ class RuntimeContext:
             pass
         return None
 
-    def build_command_registry(self) -> CommandRegistry:
-        """构建本应用的命令注册表（延迟 import 避免与命令实现循环依赖）。"""
-        from src.core.commands_impl import build_app_commands
-        return build_app_commands(self)
-
-    async def dispatch(self, cmd: str) -> bool:
-        """命令分发（/memory / !config / !tools / !stt / !tts_* / !model 等）。
-
-        走 CommandRegistry 按 prefix 顺序匹配；未匹配时 emotion_actor
-        的 / 开兜底。返回 True 表示已消费（不进入 LLM）。
-        """
-        result = await self._cmd_registry.dispatch(cmd)
-        if result is not None:
-            return result
-        # emotion_actor 命令保留在原位置（依赖具体实例）
-        if self.emotion_actor is not None and cmd.startswith("/"):
-            await self.emotion_actor.handle(cmd)
-            return True
-        return False
-
     # ---------- 配置热重载（细粒度） ----------
 
-    # !config 支持的细粒度热更新组件（对应原 cmd_reload_config 各重建块）
+    # reload_config 支持的细粒度热更新组件（原 !config 各重建块）
     HOT_COMPONENTS = ("llm", "proactive", "pf", "memory", "bili", "pet", "emotion")
 
     async def reload_all(self) -> None:
@@ -1132,6 +1226,15 @@ class RuntimeContext:
         elif not cfg.MEMORY_ENABLED:
             self.butler = None
             console.ok("记忆系统已热关闭")
+        # L2 纯文本长期记忆：清空单例，下次对话按新配置重新生成冻结快照
+        from src.llm.memory.curated import reset_curated_store
+        reset_curated_store()
+        # L3 会话历史：重建连接（下次写入按新路径生效）
+        from src.llm.memory.session import reset_session_store
+        reset_session_store()
+        # L4 Provider 编排：重建单例（按新 MEMORY_ENABLED 决定 memU 是否激活）
+        from src.llm.memory.manager import reset_memory_manager
+        reset_memory_manager()
 
     async def _reload_bili(self) -> None:
         """B 站弹幕服务热启停（先停旧服务，再按需启动新服务）。"""

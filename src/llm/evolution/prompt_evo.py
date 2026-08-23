@@ -42,6 +42,10 @@ _POLICY_HISTORY_PATH = os.path.join(
 # 候选策略段最大字符数：超限截断，防止策略膨胀失控稀释系统提示
 _POLICY_MAX_CHARS = 400
 
+# 评审评估存档（evolution_evals.jsonl，与技能评估共用同文件追加写）：
+# 记录每次 GEPA 评审的 {candidate, 双评分, context}，A/B 可回溯（5.16）
+_EVALS_PATH = os.path.join(config.cfg.DATA_ROOT, "evolution_evals.jsonl")
+
 # 变异提示：把最近对话 + 当前策略交给 LLM，输出失败点与候选策略段
 _EVOLVE_SYSTEM = (
     "你是虚拟主播的行为策略进化师。用户消息包含「最近对话记录」与「当前生效的"
@@ -73,6 +77,24 @@ def _format_turns(turns: list[dict]) -> str:
     return memory.format_turns_text(turns)
 
 
+def _with_feedback(prompt: str) -> str:
+    """把观众负反馈素材追加进 GEPA 评审/变异输入（5.6.4）。
+
+    候选策略只在「含负反馈的轮次」同批评审时获得真实失败点参照，使评分
+    更看重对负反馈的改善；无负反馈或开关关闭时原样返回（行为不变）。
+    """
+    try:
+        from .feedback import feedback_section
+        fb = feedback_section(max_events=5)
+    except Exception:
+        return prompt
+    if not fb:
+        return prompt
+    return (prompt + fb
+            + "\n（本轮含观众负反馈：候选策略应优先针对这些失败点改进，"
+              "评审计分应更看重对负反馈的改善）")
+
+
 def _load_policy() -> str:
     """读取当前生效策略段（文件缺失/损坏时返回空字符串）。"""
     try:
@@ -83,13 +105,17 @@ def _load_policy() -> str:
         return ""
 
 
-def _save_policy(text: str, version: int) -> None:
-    """覆写生效策略段文件（含版本号，供用户审阅与回滚）。"""
+def _save_policy(text: str, version: int, previous: str = "") -> None:
+    """覆写生效策略段文件（含版本号与上一版策略，供用户审阅与 A/B 盲测）。"""
     try:
         os.makedirs(os.path.dirname(_POLICY_PATH), exist_ok=True)
         with open(_POLICY_PATH, "w", encoding="utf-8") as f:
-            json.dump({"text": text, "version": version, "updated": time.time()},
-                      f, ensure_ascii=False, indent=2)
+            json.dump({
+                "text": text,
+                "version": version,
+                "previous": previous,
+                "updated": time.time(),
+            }, f, ensure_ascii=False, indent=2)
     except OSError as e:
         console.warn(f"[GEPA] 写入策略段失败：{e}")
 
@@ -102,6 +128,31 @@ def _append_history(version: int, text: str) -> None:
         with open(_POLICY_HISTORY_PATH, "a", encoding="utf-8") as f:
             f.write(f"\n## v{version}（{stamp}）\n{text}\n")
     except OSError:
+        pass
+
+
+def _append_eval(record: dict) -> None:
+    """把一次 GEPA 评审结果追加到评估存档（5.16，失败静默）。"""
+    try:
+        os.makedirs(os.path.dirname(_EVALS_PATH), exist_ok=True)
+        with open(_EVALS_PATH, "a", encoding="utf-8") as f:
+            f.write(json.dumps(record, ensure_ascii=False) + "\n")
+    except OSError:
+        pass
+
+
+def _record_call(task: str, resp, latency: float) -> None:
+    """记账一次 GEPA LLM 调用（5.16 旁路，失败不影响结果）。"""
+    try:
+        usage = getattr(resp, "usage", None)
+        from .usage import record_usage
+        record_usage(
+            task, resp.model if hasattr(resp, "model") else "",
+            getattr(usage, "prompt_tokens", 0),
+            getattr(usage, "completion_tokens", 0),
+            latency,
+        )
+    except Exception:
         pass
 
 
@@ -156,9 +207,11 @@ class PolicyEvolver:
         if client is None:
             return
         console.dim("[GEPA] 开始分析对话失败点，变异候选策略...")
-        # 1) 变异：输出失败点与候选策略段
-        evolve_user = (f"[最近对话记录]\n{text}\n\n"
-                       f"[当前生效的行为策略段]\n{current or '（无，首次进化）'}")
+        # 1) 变异：输出失败点与候选策略段（5.6.4 含负反馈素材时优先针对失败点）
+        evolve_user = _with_feedback(
+            f"[最近对话记录]\n{text}\n\n"
+            f"[当前生效的行为策略段]\n{current or '（无，首次进化）'}")
+        start = time.time()
         try:
             resp = await asyncio.wait_for(
                 client.chat.completions.create(
@@ -176,6 +229,8 @@ class PolicyEvolver:
         except Exception as e:
             console.warn(f"[GEPA] 变异调用失败：{e}")
             return
+        # 5.16 记账（旁路）：记录变异调用的 token 与耗时
+        _record_call("gepa.evolve", resp, time.time() - start)
         content = (resp.choices[0].message.content or "").strip()
         data = parse_json_object(content)
         candidate = (data.get("candidate") or "").strip()
@@ -189,8 +244,10 @@ class PolicyEvolver:
             # 无当前策略 → 直接采用候选（首次进化，无对照）
             self._commit(candidate, current)
             return
-        judge_user = (f"[最近对话记录]\n{text}\n\n"
-                      f"[当前策略]\n{current}\n\n[候选策略]\n{candidate}")
+        judge_user = _with_feedback(
+            f"[最近对话记录]\n{text}\n\n"
+            f"[当前策略]\n{current}\n\n[候选策略]\n{candidate}")
+        start = time.time()
         try:
             resp = await asyncio.wait_for(
                 client.chat.completions.create(
@@ -207,12 +264,28 @@ class PolicyEvolver:
         except Exception as e:
             console.warn(f"[GEPA] 评审调用失败：{e}")
             return
+        # 5.16 记账（旁路）：记录评审调用的 token 与耗时
+        _record_call("gepa.judge", resp, time.time() - start)
         judge = parse_json_object(resp.choices[0].message.content or "")
         try:
             score_current = float(judge.get("score_current") or 0)
             score_candidate = float(judge.get("score_candidate") or 0)
         except (TypeError, ValueError):
             score_current = score_candidate = 0.0
+        # 5.16 A/B 可回溯：评审上下文（负反馈素材）+ 双评分 + 候选落档
+        try:
+            from .feedback import feedback_section
+            context = feedback_section(max_events=5) or ""
+        except Exception:
+            context = ""
+        _append_eval({
+            "ts": time.time(),
+            "candidate": candidate,
+            "score_current": round(score_current, 3),
+            "score_candidate": round(score_candidate, 3),
+            "reason": judge.get("reason") or "",
+            "context": context,
+        })
         if score_candidate > score_current:
             self._commit(candidate, current)
             console.ok(
@@ -224,7 +297,11 @@ class PolicyEvolver:
                 "保留当前策略")
 
     def _commit(self, candidate: str, current: str) -> None:
-        """择优落盘：从历史版本号 +1 写入新策略，并追加存档。"""
+        """择优落盘：从历史版本号 +1 写入新策略，并追加存档。
+
+        previous 记录被替换的旧策略文本（5.16），供 inject 侧按
+        EVOLUTION_POLICY_AB 开关做 50% 盲测轮换（线上 A/B）。
+        """
         version = 1
         try:
             with open(_POLICY_PATH, "r", encoding="utf-8") as f:
@@ -232,7 +309,7 @@ class PolicyEvolver:
             version = int(data.get("version") or 0) + 1
         except (OSError, ValueError):
             pass
-        _save_policy(candidate, version)
+        _save_policy(candidate, version, previous=current)
         _append_history(version, candidate)
         if current:
             console.dim(f"[GEPA] 旧策略已存档于 evolution_policy_history.md")

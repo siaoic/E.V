@@ -7,7 +7,7 @@ from PySide6.QtCore import QProcess
 
 from src.utils import config
 from plugins.manager import (
-    load_enabled_plugins, save_enabled_plugins, scan_plugin_dirs,
+    load_plugin_sets, save_plugin_sets, scan_plugin_dirs,
 )
 from ui.utils import env_helpers
 
@@ -284,9 +284,10 @@ class PluginHandler:
         """扫描 plugins/ 下带 metadata.json 的插件目录。
 
         返回 [{rel, display, desc, enabled}]，供插件页卡片展示。
+        显式禁用的（disabled 清单）即使已在启用清单也视为关闭。
         """
         rows = []
-        enabled = load_enabled_plugins(self._plugins_root())
+        enabled_set, disabled_set = load_plugin_sets(self._plugins_root())
         for rel in sorted(scan_plugin_dirs(self._plugins_root())):
             meta_path = os.path.join(self._plugins_root(), rel, "metadata.json")
             try:
@@ -298,23 +299,28 @@ class PluginHandler:
                 "rel": rel,
                 "display": meta.get("displayName") or meta.get("name") or rel,
                 "desc": meta.get("description") or "",
-                "enabled": rel in enabled,
+                "enabled": rel in enabled_set and rel not in disabled_set,
             })
         return rows
 
     def _toggle_plugin_enabled(self, rel: str, enabled: bool) -> bool:
-        """在 enabled_plugins.json 中启用/禁用插件（幂等），返回是否写入成功。"""
-        plugins = load_enabled_plugins(self._plugins_root())
+        """在 enabled_plugins.json 中启用/禁用插件（幂等），返回是否写入成功。
+
+        禁用移入 disabled 清单（持久生效，不会因自动登记重新启用）。
+        """
+        enabled_set, disabled_set = load_plugin_sets(self._plugins_root())
         if enabled:
-            if rel in plugins:
+            if rel in enabled_set and rel not in disabled_set:
                 return True
-            plugins.add(rel)
+            enabled_set.add(rel)
+            disabled_set.discard(rel)
         else:
-            if rel not in plugins:
+            if rel not in enabled_set and rel in disabled_set:
                 return True
-            plugins.remove(rel)
+            disabled_set.add(rel)
+            enabled_set.discard(rel)
         try:
-            save_enabled_plugins(self._plugins_root(), plugins)
+            save_plugin_sets(self._plugins_root(), enabled_set, disabled_set)
         except OSError:
             return False
         return True

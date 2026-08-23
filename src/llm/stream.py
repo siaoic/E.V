@@ -22,6 +22,7 @@ from src.core.events.models import LLMResponse, SpeakingEvent
 from src.core.output_lock import get_output_owner
 from plugins.tools.sfx import split_sfx_markers
 from src.llm.cleaners.sentence import _split_sentences
+from src.utils.repetition_guard import is_repetition_dominated
 
 
 async def _run_tts_hooks(pm, text: str) -> str:
@@ -139,6 +140,8 @@ async def converse(brain: LLMBrain,
     sender = get_output_owner() or "user"
     try:
         full_reply_parts = []
+        # 3.13 复读防护：累积已产出文本，复读主导（≥400 字）时中断本轮
+        accumulated = ""
         # 主动对话：回复流首个句子前加「主动对话：」前缀（只加一次，
         # 句子是连续流，后续句子不再重复前缀）
         turn_prefixed = False
@@ -148,6 +151,12 @@ async def converse(brain: LLMBrain,
         if tts is not None:
             tts.preheat()
         async for sentence in brain.chat_stream(text, proactive=proactive, history=history):
+            # 复读防护（宁缺毋怪）：句子拼入累积文本后检测，命中即中止本轮，
+            # 丢弃后续全部输出，避免把退化复读流播给观众
+            accumulated += sentence
+            if is_repetition_dominated(accumulated):
+                console.warn("[复读防护] 检测到复读主导片段，中断本轮输出")
+                break
             # AI 回复脏话过滤：仅过滤要播给用户听 / 字幕展示的句子，
             # 不过滤 LLM 原文存记忆（记忆存原文，on_llm_done 存的是 LLM 历史）。
             spoken = sentence

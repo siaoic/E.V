@@ -1,12 +1,38 @@
 """插件页（mixin）：卡片列表构建 / 配置页字段渲染 / 刷新。"""
 
 from PySide6.QtCore import Qt
-from PySide6.QtWidgets import QHBoxLayout, QLabel, QLineEdit, QPlainTextEdit, QWidget
+from PySide6.QtWidgets import (
+    QHBoxLayout, QLabel, QLineEdit, QPlainTextEdit, QWidget)
 
 from src.utils import config
 from ui.utils import env_helpers
 from ui.utils.constants import PLUGIN_CONFIG_FIELDS
 from ui.widgets.plugin_card import _PluginCard
+
+# 插件列表每行列数（对齐预览页 .plugin-grid: repeat(3, 1fr)）
+_PLUGIN_GRID_COLS = 3
+# 插件列表卡片间距（对齐预览页 .plugin-grid: gap 14px）
+_PLUGIN_GRID_SPACING = 14
+
+
+def _clear_layout(layout) -> None:
+    """递归清空 layout 所有子项（widget + 子 layout）。
+
+    子 layout 内的 widget 先 deleteLater，子 layout 再 deleteLater，
+    避免仅清顶层 widget 导致子 layout 残留（内存泄漏）。
+    """
+    while layout.count():
+        item = layout.takeAt(0)
+        if item is None:
+            continue
+        w = item.widget()
+        if w is not None:
+            w.deleteLater()
+            continue
+        sub = item.layout()
+        if sub is not None:
+            _clear_layout(sub)
+            sub.deleteLater()
 
 
 class PluginsPage:
@@ -26,7 +52,9 @@ class PluginsPage:
         self._config_mcp_editor = None     # MCP 配置页的 JSON 编辑器
         # 外部服务进程（插件页进程托管：mindcraft）：service_id → QProcess
         self._svc_procs: dict = {}
-        # 卡片列表容器（滚动区内竖向排布，顶部对齐）
+        # 卡片列表容器（.ui 里的 QVBoxLayout 不动，避免 setLayout 冲突；
+        # 每行 3 张卡片用 QHBoxLayout 包装 addLayout 进来，对齐预览页
+        # .plugin-grid 3 列网格视觉）
         self._plugin_list_layout = self.vlayout_plugin_cards
         self._plugin_list_layout.setAlignment(Qt.AlignTop)
         # 配置页：顶部返回 = 切回列表；保存 = 写 .env / mcp_config.json 后返回
@@ -37,26 +65,36 @@ class PluginsPage:
     def _fill_plugin_cards(self) -> None:
         """重建插件卡片列表（重读 .env / mcp_config.json）。
 
-        重建时保留列表滚动位置；每张卡片 = 插件信息 + 启用切换按钮 +
-        配置按钮（需要配置的插件才有），点击卡片本体同样切换启用/关闭。
+        列表对齐预览页 .plugin-grid 3 列网格：每 3 张卡片包成一行
+        QHBoxLayout 加进 QVBoxLayout，不足 3 张时尾部 addStretch 防止
+        最后一张被横向撑满。重建时保留列表滚动位置；信号连接不变。
         """
         vbar = self.scroll_plugin_cards.verticalScrollBar()
         scroll_pos = vbar.value() if vbar is not None else 0
         rows = self._tool_rows()
         self._plugin_rows = rows
         layout = self._plugin_list_layout
-        while layout.count():
-            item = layout.takeAt(0)
-            w = item.widget()
-            if w is not None:
-                w.deleteLater()
-        for idx, row in enumerate(rows):
-            card = _PluginCard(row)
-            card.toggle_requested.connect(
-                lambda checked, i=idx: self._on_plugin_toggle(i, checked))
-            card.config_requested.connect(
-                lambda i=idx: self._open_plugin_config(i))
-            layout.addWidget(card)
+        _clear_layout(layout)
+        for start in range(0, len(rows), _PLUGIN_GRID_COLS):
+            chunk = rows[start:start + _PLUGIN_GRID_COLS]
+            if not chunk:
+                break
+            row_lay = QHBoxLayout()
+            row_lay.setSpacing(_PLUGIN_GRID_SPACING)
+            for offset, row in enumerate(chunk):
+                idx = start + offset
+                card = _PluginCard(row)
+                card.toggle_requested.connect(
+                    lambda checked, i=idx: self._on_plugin_toggle(i, checked))
+                card.config_requested.connect(
+                    lambda i=idx: self._open_plugin_config(i))
+                # stretch=1 让每张卡片等宽（不带 stretch 时 QHBoxLayout 按
+                # 各自 sizeHint 分配，3 张卡片宽度会不一致）
+                row_lay.addWidget(card, 1)
+            # 不足 3 张时尾部补 stretch，避免最后一张被横向撑满
+            if len(chunk) < _PLUGIN_GRID_COLS:
+                row_lay.addStretch(1)
+            layout.addLayout(row_lay)
         layout.addStretch(1)  # 卡片不足一屏时顶部对齐，不撑满
         if vbar is not None:
             vbar.setValue(scroll_pos)

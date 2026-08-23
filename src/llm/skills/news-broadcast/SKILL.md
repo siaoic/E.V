@@ -1,6 +1,7 @@
 ---
 name: news-broadcast
-description: 资讯播报技能。当观众询问近期新闻、热点事件，或需要播报最新消息时使用。配合 bing_search 工具完成从搜索到播报的完整流程。
+description: 资讯播报。观众问新闻/热点或需播报最新消息时，配合 bing_search 使用。
+version: 1.0.0
 ---
 
 # 资讯播报技能

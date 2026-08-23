@@ -198,10 +198,11 @@ class MemoryDetailDialog(QDialog):
                 int(screen.availableGeometry().height() * 0.6))
 
         # 阴影（画在卡片上；四周 margins 已为阴影留空间）
+        # 对齐预览页 .mem-modal-card box-shadow: 0 12px 32px rgba(0,0,0,0.22)
         shadow = QGraphicsDropShadowEffect(card)
-        shadow.setBlurRadius(24)
-        shadow.setOffset(0, 6)
-        shadow.setColor(QColor(0, 0, 0, 60))
+        shadow.setBlurRadius(32)
+        shadow.setOffset(0, 12)
+        shadow.setColor(QColor(0, 0, 0, 56))
         card.setGraphicsEffect(shadow)
 
     def _chips(self, node: dict, user: str, track: str) -> list:
@@ -244,13 +245,17 @@ class MemoryDetailDialog(QDialog):
     def _apply_style(self) -> None:
         self.setStyleSheet(
             "QDialog { background: transparent; }"
-            "#dialogCard { background-color: rgb(252, 250, 245);"
+            # 卡片背景对齐预览页 .mem-modal-card: var(--bg-page) #fbf6ea +
+            # 1px border-l2 + 14px 圆角
+            "#dialogCard { background-color: rgb(251, 246, 234);"
+            " border: 1px solid rgba(200, 185, 158, 130);"
             " border-radius: 14px; }"
             "#titleLabel { color: rgb(40, 35, 25); font-size: 15px;"
             " font-weight: bold; font-family: \"微软雅黑\"; }"
             "#descLabel { color: rgb(114, 95, 77); font-size: 13px;"
             " font-family: \"微软雅黑\"; }"
-            "#divider { background-color: rgba(140, 135, 125, 60); }"
+            # 分隔线对齐预览页 .mem-divider: var(--border-l2) 0.5 alpha
+            "#divider { background-color: rgba(200, 185, 158, 128); }"
             "#bodyEdit { background: transparent; border: none;"
             " color: rgb(70, 65, 55); font-size: 13px;"
             " font-family: \"微软雅黑\"; }"

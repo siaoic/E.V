@@ -9,24 +9,23 @@
 - [1. 全局状态与互斥（src/core/output_lock.py）](#1-全局状态与互斥)
 - [2. 统一异常（src/core/exceptions.py）](#2-统一异常)
 - [3. 应用入口（src/core/application.py）](#3-应用入口)
-- [4. 命令注册表（src/core/commands.py）](#4-命令注册表)
-- [5. LLM 大脑（src/llm/llm_brain.py）](#5-llm-大脑)
-- [6. 对话输出流水线（src/llm/stream.py）](#6-对话输出流水线)
-- [7. 记忆管家（src/llm/agent.py ButlerAgent）](#7-记忆管家)
-- [8. 主动对话（src/llm/proactive.py）](#8-主动对话)
-- [9. TTS 引擎（src/tts/engine.py）](#9-tts-引擎)
-- [10. VTS 控制器（src/vts/controller.py）](#10-vts-控制器)
-- [11. 口型驱动（src/vts/face_driver.py）](#11-口型驱动)
-- [12. 字幕服务器（src/utils/subtitle_server.py）](#12-字幕服务器)
-- [13. B 站弹幕（src/danmaku/bili_danmaku.py）](#13-b-站弹幕)
-- [14. MCP 管理器（src/mcp/manager.py）](#14-mcp-管理器)
-- [15. 插件系统（plugins/manager.py / base.py）](#15-插件系统)
-- [16. 语音识别（src/asr/stt.py）](#16-语音识别)
-- [17. 记忆系统（tools/memory/memory.py）](#17-记忆系统)
-- [18. 配置接口（src/utils/config.py）](#18-配置接口)
-- [19. 事件总线（src/core/bus.py）](#19-事件总线)
-- [20. 消息结构体 Schema（src/core/events/models.py）](#20-消息结构体-schema)
-- [21. 适配器抽象层（src/adapter/）](#21-适配器抽象层)
+- [4. LLM 大脑（src/llm/llm_brain.py）](#4-llm-大脑)
+- [5. 对话输出流水线（src/llm/stream.py）](#5-对话输出流水线)
+- [6. 记忆管家（src/llm/agent.py ButlerAgent）](#6-记忆管家)
+- [7. 主动对话（src/llm/proactive.py）](#7-主动对话)
+- [8. TTS 引擎（src/tts/engine.py）](#8-tts-引擎)
+- [9. VTS 控制器（src/vts/controller.py）](#9-vts-控制器)
+- [10. 口型驱动（src/vts/face_driver.py）](#10-口型驱动)
+- [11. 字幕服务器（src/utils/subtitle_server.py）](#11-字幕服务器)
+- [12. B 站弹幕（src/danmaku/bili_danmaku.py）](#12-b-站弹幕)
+- [13. MCP 管理器（src/mcp/manager.py）](#13-mcp-管理器)
+- [14. 插件系统（plugins/manager.py / base.py）](#14-插件系统)
+- [15. 语音识别（src/asr/stt.py）](#15-语音识别)
+- [16. 记忆系统（tools/memory/memory.py）](#16-记忆系统)
+- [17. 配置接口（src/utils/config.py）](#17-配置接口)
+- [18. 事件总线（src/core/bus.py）](#18-事件总线)
+- [19. 消息结构体 Schema（src/core/events/models.py）](#19-消息结构体-schema)
+- [20. 适配器抽象层（src/adapter/）](#20-适配器抽象层)
 
 ---
 
@@ -89,23 +88,9 @@
 | `Application.run` | `async () -> None` | 完整生命周期：校验配置 → 初始化渲染目标（桌宠/VTS）→ TTS → 记忆 → LLMBrain → 主动对话 → 插件 → STT → 弹幕 → 主循环等待输入 → 会话归档 → 清理 |
 
 主循环输入流：键盘 `input()` / 语音识别（STT）/ 弹幕精选，均汇入 `_wait_input`；
-播报期间键盘/语音输入被丢弃（`is_rejecting_input`），`/quit` 与 `!` 开头热更新命令穿透执行。
+播报期间键盘/语音输入被丢弃（`is_rejecting_input`）。无命令交互，Ctrl+C / EOF 退出。
 
-## 4. 命令注册表
-
-模块：`src/core/commands.py`
-
-| 符号 | 签名 | 说明 |
-|---|---|---|
-| `Command` | dataclass `(prefix, handler, exact=False, exclusive=False, help="")` | `handler: Callable[[str], Awaitable[bool]]`（cmd 为整行），返回 True 表示已消费 |
-| `CommandRegistry` | class | 命令注册与派发 |
-| `register` | `(*cmds: Command) -> None` | 注册命令；重复 prefix 不去重，由注册顺序决定命中 |
-| `dispatch` | `async (cmd: str) -> Optional[bool]` | 按顺序匹配：`exact=True` 整行匹配，否则 `startswith(prefix)`；命中返回 handler 结果，未命中返回 `None` |
-| `help_text` | `() -> str` | 拼接所有带 help 的命令文本 |
-
-现有命令：`/memory`、`!model `、`!clean`、`!plugins`、`!tools`、`!config`、`!stt`、`!tts_audio `、`!tts_text `、`!tts_audios `（详见 config.md 的「热更新命令」）。
-
-## 5. LLM 大脑
+## 4. LLM 大脑
 
 模块：`src/llm/llm_brain.py`，类 `LLMBrain`
 
@@ -114,12 +99,12 @@
 | `__init__` | `(mcp=None)` | mcp 为 `MCPManager` 或 None |
 | `chat_stream` | `async (user_text: str, *, proactive=False, history=None) -> AsyncIterator[str]` | 流式对话：逐句产出回复文本。`proactive=True` 时不写入历史（只保留模型回复）；`history` 为可选历史快照（None 用完整历史） |
 | `push_turn_context` | `(contexts: List[str]) -> None` | 注入本轮系统提示背景信息（插件注入用） |
-| `reload_client` | `() -> None` | 重建 LLM 客户端（`!config` 热更新后调用） |
+| `reload_client` | `() -> None` | 重建 LLM 客户端（配置热更新后调用） |
 
 内部流程：工具调用（本地插件工具 + MCP）→ 深度思考模式 → 最终回复；
 系统提示由「人设 + 技能注入 + 观众画像 + 策略 + 记忆召回（2-gram 片段交集 + 向量记忆）」组装。
 
-## 6. 对话输出流水线
+## 5. 对话输出流水线
 
 模块：`src/llm/stream.py`
 
@@ -143,7 +128,7 @@
 | `describe_image` | `async (image_b64: str, prompt="") -> str` | 多模态看图（look_at_screen 工具用） |
 | `build_proactive_prompt` | `(context) -> str` | 构建主动开口决策 prompt（静态方法，供 ProactiveEngine 用） |
 
-## 8. 主动对话
+## 7. 主动对话
 
 模块：`src/llm/proactive.py`，类 `ProactiveEngine`
 
@@ -167,12 +152,12 @@
 | `drain` | `async () -> None` | 等待队列播完 |
 | `interrupt` / `clear_interrupt` | `() -> None` | 打断当前播放 / 复位打断标志（新一轮输出前调用） |
 | `stop` | `async () -> None` | 关闭客户端 |
-| `apply_ref` | `(ref_audio, ref_text) -> None` | 热更新主参考音频/文本（`!tts_audio` / `!tts_text`） |
-| `apply_ref_extras` | `(ref_audios: str) -> None` | 热更新辅助参考音频（`|` 分隔，`!tts_audios`） |
+| `apply_ref` | `(ref_audio, ref_text) -> None` | 热更新主参考音频/文本 |
+| `apply_ref_extras` | `(ref_audios: str) -> None` | 热更新辅助参考音频（`|` 分隔） |
 | `set_on_play_callback` | `(cb: Callable[[str, str, float], None]) -> None` | 音频播放回调：`(wav_path, text, duration_s)`，用于口型同步 |
 | `set_subtitle_callback` | `(cb: Callable[[str], None]) -> None` | 字幕推送回调 |
 
-## 10. VTS 控制器
+## 9. VTS 控制器
 
 模块：`src/vts/controller.py`，类 `VTSController`（VTube Studio WebSocket 客户端）
 
@@ -231,7 +216,7 @@
 
 弹幕到回复链路：blivedm handler → 清洗净化（`sanitize_external`）→ 脏话过滤 → `DanmakuPicker` 精选（单条或批量聚合 ≤3 条）→ 回复队列 → `_chat_danmaku` 完整对话链路（LLM→TTS→字幕→记忆）。
 
-## 14. MCP 管理器
+## 13. MCP 管理器
 
 模块：`src/mcp/manager.py`，类 `MCPManager`
 
@@ -277,7 +262,7 @@
 
 插件目录约定：`plugins/`（built-in 与社区）→ 目录含入口文件 + `metadata.json`；详见 `plugins/README.md`。
 
-## 16. 语音识别
+## 15. 语音识别
 
 模块：`src/asr/stt.py`，类 `STTEngine`（SiliconFlow 云端转写，SenseVoice）
 
@@ -330,8 +315,8 @@
 |---|---|
 | `cfg` | `Config` 单例，全部配置项为属性（`.env` 读取 + 默认值），详见 `docs/config.md` |
 | `Config.validate()` | 校验必填项（`LLM_API_KEY`），缺失抛 `RuntimeError` |
-| `reload_tool_runtime()` | 热更新工具/MCP/STT 相关字段（`!tools` 命令调用） |
-| `reload_config()` | 热更新全部可热更新字段（`!config` 命令调用） |
+| `reload_tool_runtime()` | 热更新工具/MCP/STT 相关字段 |
+| `reload_config()` | 热更新全部可热更新字段 |
 | `_PROJECT_ROOT` | 项目根路径（PyInstaller 打包后为 exe 目录） |
 
 ---
@@ -370,7 +355,7 @@ bus.unsubscribe(EV_AI_REPLY, on_reply)
 标准化事件契约——新增功能（字幕 / 情绪 / 监控 / 未来 WebUI）只需 `subscribe`，
 无需改动生产方代码。
 
-## 20. 消息结构体 Schema
+## 19. 消息结构体 Schema
 
 模块：`src/core/events/models.py`（Pydantic v2，环境已随 mcp SDK 依赖安装，不新增依赖）。
 
@@ -388,7 +373,7 @@ bus.unsubscribe(EV_AI_REPLY, on_reply)
 设计约束：**仅作用于事件总线新增消息**，不改动既有 dict 接口，行为 100% 不变。
 字段缺失时 Pydantic 自动抛 `ValidationError`。
 
-## 21. 适配器抽象层
+## 20. 适配器抽象层
 
 模块：`src/adapter/`（`base.py` 公共基类 + `llm.py` / `tts.py` / `avatar.py` / `input.py`）。
 

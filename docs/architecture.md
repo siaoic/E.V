@@ -13,10 +13,10 @@ LLM 对话 → 语音合成 → 数字人形象输出（VTube Studio / 本地桌
 |                          UI / 桌面层                                          |
 |   ui/control_center.py（控制中心）  ui/字幕.html   ui/弹幕卡片.html  桌宠窗口   |
 +------------------------------+-----------------------------------------------+
-                               | stdin 命令 / stdout 日志 / SSE 网页
+                               | stdin 输入 / stdout 日志 / SSE 网页
 +------------------------------v-----------------------------------------------+
 |                         src/core/application.py（Application 主循环）         |
-|   输入等待 → 命令派发 → 对话链路 → 会话归档 → 资源清理                          |
+|   输入等待 → 对话链路 → 会话归档 → 资源清理                          |
 +-----+----------+-----------+---------+----------+----------+---------------+
       |          |           |         |          |          |
       v          v           v         v          v          v
@@ -39,7 +39,7 @@ LLM 对话 → 语音合成 → 数字人形象输出（VTube Studio / 本地桌
 
 | 目录 | 职责 | 关键文件 |
 |---|---|---|
-| `src/core/` | 内核：主循环、命令注册表、输出互斥、统一异常、**事件总线、消息 Schema** | `application.py`、`commands.py`、`output_lock.py`、`exceptions.py`、`bus.py`、`events/models.py` |
+| `src/core/` | 内核：主循环、输出互斥、统一异常、**事件总线、消息 Schema** | `application.py`、`output_lock.py`、`exceptions.py`、`bus.py`、`events/models.py` |
 | `src/adapter/` | **统一适配器抽象层**：LLM / TTS / 形象 / 输入源的标准契约 | `llm.py`、`tts.py`、`avatar.py`、`input.py`、`base.py` |
 | `src/llm/` | LLM 大脑、对话流水线、主动对话、记忆管家、自我进化 | `llm_brain.py`、`stream.py`、`proactive.py`、`agent.py`、`evolution.py` |
 | `src/tts/` | 语音合成（GPT-SoVITS HTTP 客户端）+ 播放 | `engine.py`、`player.py` |
@@ -115,7 +115,7 @@ DanmakuPicker 精选（双堆：最高分 / 踢最低分；同窗口高分批量
 ```
 启动（main.py → run_with_cleanup）
    → 初始化：渲染目标 → TTS（后台加载）→ 记忆 → LLMBrain → 主动对话 → 插件 → STT → 弹幕
-   → 主循环：等待输入 → 命令或对话（循环）
+   → 主循环：等待输入 → 对话（Ctrl+C / EOF 退出）
    → 退出：会话归档（摘要 + 蒸馏，20s 超时）→ 停插件/弹幕/字幕/MCP/TTS/面捕/VTS
 ```
 

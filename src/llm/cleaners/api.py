@@ -16,6 +16,9 @@ def _clean_messages_for_api(messages: List[dict]) -> List[dict]:
 
     - assistant 有 tool_calls 但 content 为 null → 设为 ''（部分 API 要求 content 非 null）
     - tool 消息：content 对象→JSON 字符串、移除控制字符、超过 8000 截断
+    - system 消息全部前移到开头（严格模式 API 如 SiliconFlow/Qwen 要求 system
+      必须在消息列表最前，否则报 20015 "System message must be at the beginning"；
+      近因效应注入的尾部 system 段与历史中的 system 消息都在此归一化）
     - 最后用 sanitize_tool_message_sequence 兜底，保证 tool_calls 与 tool 响应严格配对
     """
     normalized: List[dict] = []
@@ -48,6 +51,10 @@ def _clean_messages_for_api(messages: List[dict]) -> List[dict]:
                 "tool_call_id": msg.get("tool_call_id"),
             }
         normalized.append(msg)
+
+    # 严格模式 API 要求 system 必须在最前：把 system 消息稳定前移（保持原有
+    # 相对顺序与内容不变），user/assistant/tool 相对顺序不受影响
+    normalized.sort(key=lambda m: m.get("role") != "system")
 
     # 最后一道防线：清理 assistant.tool_calls 与 tool 响应不配对的序列
     return sanitize_tool_message_sequence(normalized)

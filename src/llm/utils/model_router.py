@@ -104,11 +104,26 @@ class ModelRouter:
             console.warn(f"[模型路由] 写入统计失败：{e}")
 
     def service(self, name: str) -> dict | None:
-        """按名称取服务配置，不存在返回 None。"""
+        """按名称取服务配置，不存在返回 None。
+
+        未配置在 LLM_SERVERS 的服务回退查 Provider 注册表（3.12，
+        name/alias 均可命中），返回带 fallback_models 的服务信息——
+        未注册仍返回 None，保持旧行为。
+        """
         for s in self._servers:
             if s["name"] == name:
                 return s
-        return None
+        from src.llm.providers import get_provider
+        profile = get_provider(name)
+        if profile is None:
+            return None
+        return {
+            "name": profile.name,
+            "base_url": profile.base_url,
+            "api_key": profile.resolve_api_key(),
+            "model": config.cfg.LLM_MODEL,  # 路由主模型缺省用当前配置
+            "fallback_models": list(profile.fallback_models),
+        }
 
     def client_for(self, name: str) -> OpenAI | None:
         """构建（并缓存）指定服务的 OpenAI 客户端，失败返回 None。"""

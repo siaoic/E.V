@@ -10,6 +10,7 @@ ButlerConfig / VoiceConfig / ...），Config 聚合子配置，旧字段名通�
 - 所有模块统一通过 `from src.utils import config` 读取 `config.cfg` 中的字段。
 """
 
+import json
 import os
 import sys
 from dataclasses import dataclass, field
@@ -161,6 +162,22 @@ def _get_optional_int(key: str) -> Optional[int]:
         return None
 
 
+def _parse_aux_models() -> dict:
+    """辅助 LLM 任务→模型路由表：env AUX_MODELS 为 JSON 对象字符串。
+
+    如 AUX_MODELS={"review": "glm-4-flash"}；解析失败/非对象回空表（默认
+    全部走主模型，行为不变）。
+    """
+    raw = os.getenv("AUX_MODELS")
+    if not raw or not raw.strip():
+        return {}
+    try:
+        data = json.loads(raw)
+        return data if isinstance(data, dict) else {}
+    except ValueError:
+        return {}
+
+
 def _get_room_ids() -> list:
     """直播间房间号列表：优先 BILI_ROOM_IDS（逗号分隔，多房间）；
     未配置时回退 BILI_ROOM_ID（单房间，与原行为一致）；都没配返回空列表。"""
@@ -225,6 +242,15 @@ class LLMConfig:
     LLM_ROUTER_EPSILON: float = 0.1
     LLM_MAX_CONCURRENCY: int = 2
     HISTORY_ROUNDS: int = 10
+    # Prompt Cache（对标 Hermes「prompt caching is sacred」）：system 前缀
+    # 保持字节稳定 → 服务端自动前缀缓存命中；0 回退原交错顺序拼装
+    PROMPT_CACHE_MODE: bool = True
+    # 辅助 LLM 记账（3.16）：1 = 辅助调用（butler/proactive 等）统一记账到
+    # DATA_ROOT/aux_usage.jsonl（写失败静默）；0 = 关闭记账（行为不变）
+    AUX_ACCOUNTING: bool = True
+    # 辅助 LLM 按任务路由（3.16）：{"任务名": "模型名"} 覆盖默认主模型，
+    # 如 AUX_MODELS={"review": "glm-4-flash"}；缺省任务走 LLM_MODEL
+    AUX_MODELS: dict = field(default_factory=dict)
 
 
 @dataclass
@@ -239,11 +265,23 @@ class ButlerConfig:
 
 @dataclass
 class MemoryConfig:
-    """记忆系统（Mem0 判决链：ADD/UPDATE/DELETE/IGNORE）。"""
+    """记忆系统（Mem0 判决链 + L2 纯文本长期记忆 + L3 会话历史）。"""
     MEMORY_ENABLED: bool = True
     MEMORY_LIFECYCLE_ENABLED: bool = False
     MEMORY_LIFECYCLE_MODEL: str = ""
     MEMORY_LIFECYCLE_THRESHOLD: float = 0.6
+    # L2 内建长期记忆（Hermes 式纯文本 MEMORY.md/USER.md + 字符硬上限 + 冻结快照）
+    MEMORY_CURATED_ENABLED: bool = True
+    MEMORY_CURATED_MEMORY_LIMIT: int = 2200
+    MEMORY_CURATED_USER_LIMIT: int = 1375
+    # L3 会话历史（SQLite + FTS5 全文检索，Hermes state.db）
+    MEMORY_HISTORY_ENABLED: bool = True
+    HISTORY_DB_PATH: str = ""
+    # L4 治理管道（Hermes「会后秘书」：后台复盘，把值得长期记住的事实写入 L2）
+    MEMORY_CURATOR_ENABLED: bool = True
+    MEMORY_CURATOR_INTERVAL: int = 10  # 每 N 轮对话触发一次复盘
+    # L4 编排（MemoryManager）：每轮召回硬超时（秒，0 关闭），防止慢后端拖垮首字延迟
+    MEMORY_GATE_TIMEOUT: float = 8.0
 
 
 @dataclass
@@ -268,6 +306,34 @@ class AgentConfig:
     AGENT_AVOID_MAIN_LLM: bool = True
     AGENT_HISTORY_SNAPSHOT: int = 6
     AGENT_DUP_THRESHOLD: float = 0.85
+    # 工具集门控（3.3）：live/pet/minimal；空 = 全量（等价旧行为）
+    AGENT_TOOLSET: str = ""
+    # 迭代次数预算（3.1）：LLM 调用轮数上限；0 = 跟随 AGENT_MAX_STEPS（默认行为不变）
+    AGENT_MAX_ITERATIONS: int = 0
+    # 技能 Curator 增强（3.6）：1 = 技能归档/合并前打快照 + 审计日志 + 可回滚；
+    # 0 = 保持现有归档流程不变（默认关闭，先跑通流程再启用）
+    ENABLE_CURATOR: bool = False
+    # Cron 作业化加固（3.9）：1 = 执行账本去重 + 跨进程文件锁 + 3 分钟硬中断
+    # + 注入扫描；0 = 调度行为与现状完全一致（默认关闭）
+    AGENT_CRON_HARDEN: bool = False
+    # 后台委派队列（3.8）：1 = delegate 支持后台持久化执行（delegation.db 队列 +
+    # 常驻 worker）；0 = 仅同步并行委派（现状，默认关闭）
+    AGENT_DELEGATE_BACKEND: bool = False
+    # 会话租约（3.10）：1 = 进入 brain 前按 session_id 排队串行（防同会话重入）；
+    # 0 = 直接放行，行为与现状完全一致（默认关闭）
+    TURN_LEASE_ENABLED: bool = False
+    # 全局急停（3.13）：1 = 存在 DATA_ROOT/ESTOP 哨兵时拒绝高危工具执行；
+    # 0 = 关闭急停检查（行为不变）。默认开启但无哨兵文件时恒放行
+    AGENT_ESTOP_ENABLED: bool = True
+    # 复读防护（3.13）：1 = LLM 流式输出复读主导片段（≥400 字 + 60 字块重复
+    # ≥5 次覆盖过半）时中断该句；0 = 关闭检测（正常文本永不触发）
+    AGENT_REPETITION_GUARD: bool = True
+    # 开播就绪检查（3.15）：1 = 启动时聚合探测 TTS/ASR/VTS/弹幕/记忆/MCP，
+    # 失败仅 WARN 不阻断启动；0 = 关闭探针（行为不变）
+    READINESS_CHECK: bool = True
+    # TTS 回声防护（3.14）：1 = STT 识别结果与最近播报文本 difflib 相似度
+    # ≥0.6 时判为扬声器漏音回声并丢弃；0 = 关闭检测（正常语音不会命中）
+    AGENT_TTS_ECHO_GUARD: bool = True
 
 
 @dataclass
@@ -300,9 +366,14 @@ class ToolConfig:
     TOOL_LOOK_SCREEN_ENABLED: bool = True
     TOOL_PLAY_SFX_ENABLED: bool = True
     TOOL_WRITE_DIARY_ENABLED: bool = True
+    # ToolRegistry（3.2）：1 走注册表统一门控/分发，0 回退旧直连路径（行为不变）
+    TOOL_REGISTRY: bool = True
     MCP_ENABLED: bool = False
     MCP_CONFIG_PATH: str = ""
     SKILLS_DIR: str = "src/llm/skills"
+    # 会话搜索（3.7）：1 = 对话轮次落库 SessionDB 并暴露 session_search 工具；
+    # 0 = 不落库不暴露（默认关闭，纯增量旁路）
+    ENABLE_SESSION_SEARCH: bool = False
 
 
 @dataclass
@@ -316,6 +387,20 @@ class EvolutionConfig:
     EVOLUTION_EVAL_CASES: int = 2
     EVOLUTION_PROMPT_EVO_ENABLED: bool = True
     EVOLUTION_PROMPT_EVO_INTERVAL: int = 21600
+    # 5.1：进化注入段（技能索引/话术建议/GEPA 策略/观众画像）是否注入到
+    # user 消息尾部而非 system 前缀——保持 system 前缀字节稳定以命中提示缓存
+    # （对标 hermes「可变内容注入 user 消息」）；0 = 回退旧行为（system 内拼装）
+    EVOLUTION_INJECT_IN_USER: bool = True
+    # 5.4：对话后路径（maybe_review）的技能库审阅要求"自上次活跃会话起空闲
+    # 至少 EVOLUTION_CURATOR_IDLE_HOURS 小时"才执行，避免开播活跃期后台大动作；
+    # 0 = 不限制（立即审阅）。定期 tick 路径（periodic_tick）不受此门控。
+    EVOLUTION_CURATOR_IDLE_HOURS: float = 2.0
+    # 5.6：观众负反馈信号采集（弹幕负向关键词 / 播报打断）总开关；
+    # 关闭后不再写入 evolution_feedback.jsonl，复盘素材相应不注入负反馈块
+    EVOLUTION_FEEDBACK_ENABLED: bool = True
+    # 5.16：GEPA 策略注入 A/B 盲测开关——开启后按缓存周期奇偶各 50% 轮换
+    # 注入上一版策略（previous），供线上效果对比；默认关闭，行为与现状一致
+    EVOLUTION_POLICY_AB: bool = False
 
 
 @dataclass
@@ -437,6 +522,10 @@ _LLM_LOADERS = {
     "LLM_ROUTER_EPSILON": lambda: float(os.getenv("LLM_ROUTER_EPSILON", "0.1")),
     "LLM_MAX_CONCURRENCY": lambda: int(os.getenv("LLM_MAX_CONCURRENCY") or "2"),
     "HISTORY_ROUNDS": lambda: int(os.getenv("HISTORY_ROUNDS", "10")),
+    "PROMPT_CACHE_MODE": lambda: _get_bool("PROMPT_CACHE_MODE", True),
+    "AUX_ACCOUNTING": lambda: _get_bool("AUX_ACCOUNTING", True),
+    # 辅助 LLM 按任务路由表：env 为 JSON 对象字符串（容错解析，失败回空表）
+    "AUX_MODELS": lambda: _parse_aux_models(),
 }
 
 _BUTLER_LOADERS = {
@@ -452,6 +541,17 @@ _MEMORY_LOADERS = {
     "MEMORY_LIFECYCLE_ENABLED": lambda: _get_bool("MEMORY_LIFECYCLE_ENABLED", False),
     "MEMORY_LIFECYCLE_MODEL": lambda: os.getenv("MEMORY_LIFECYCLE_MODEL") or "",
     "MEMORY_LIFECYCLE_THRESHOLD": lambda: float(os.getenv("MEMORY_LIFECYCLE_THRESHOLD", "0.6")),
+    "MEMORY_CURATED_ENABLED": lambda: _get_bool("MEMORY_CURATED_ENABLED", True),
+    "MEMORY_CURATED_MEMORY_LIMIT": lambda: int(os.getenv("MEMORY_CURATED_MEMORY_LIMIT") or "2200"),
+    "MEMORY_CURATED_USER_LIMIT": lambda: int(os.getenv("MEMORY_CURATED_USER_LIMIT") or "1375"),
+    "MEMORY_HISTORY_ENABLED": lambda: _get_bool("MEMORY_HISTORY_ENABLED", True),
+    # 会话历史库派生路径走 _data_root()（可写数据根单源），避免默认表达式重复
+    "HISTORY_DB_PATH": lambda: (
+        os.getenv("HISTORY_DB_PATH")
+        or os.path.join(_data_root(), "history.db")),
+    "MEMORY_CURATOR_ENABLED": lambda: _get_bool("MEMORY_CURATOR_ENABLED", True),
+    "MEMORY_CURATOR_INTERVAL": lambda: int(os.getenv("MEMORY_CURATOR_INTERVAL") or "10"),
+    "MEMORY_GATE_TIMEOUT": lambda: float(os.getenv("MEMORY_GATE_TIMEOUT") or "8.0"),
 }
 
 _KNOWLEDGE_LOADERS = {
@@ -472,6 +572,16 @@ _AGENT_LOADERS = {
     "AGENT_AVOID_MAIN_LLM": lambda: _get_bool("AGENT_AVOID_MAIN_LLM", True),
     "AGENT_HISTORY_SNAPSHOT": lambda: int(os.getenv("AGENT_HISTORY_SNAPSHOT") or "6"),
     "AGENT_DUP_THRESHOLD": lambda: float(os.getenv("AGENT_DUP_THRESHOLD") or "0.85"),
+    "AGENT_TOOLSET": lambda: (os.getenv("AGENT_TOOLSET") or "").strip().lower(),
+    "AGENT_MAX_ITERATIONS": lambda: int(os.getenv("AGENT_MAX_ITERATIONS") or "0"),
+    "ENABLE_CURATOR": lambda: _get_bool("ENABLE_CURATOR", False),
+    "AGENT_CRON_HARDEN": lambda: _get_bool("AGENT_CRON_HARDEN", False),
+    "AGENT_DELEGATE_BACKEND": lambda: _get_bool("AGENT_DELEGATE_BACKEND", False),
+    "TURN_LEASE_ENABLED": lambda: _get_bool("TURN_LEASE_ENABLED", False),
+    "AGENT_ESTOP_ENABLED": lambda: _get_bool("AGENT_ESTOP_ENABLED", True),
+    "AGENT_REPETITION_GUARD": lambda: _get_bool("AGENT_REPETITION_GUARD", True),
+    "READINESS_CHECK": lambda: _get_bool("READINESS_CHECK", True),
+    "AGENT_TTS_ECHO_GUARD": lambda: _get_bool("AGENT_TTS_ECHO_GUARD", True),
 }
 
 _PERSONA_LOADERS = {
@@ -496,22 +606,32 @@ _TOOL_LOADERS = {
     "TOOL_LOOK_SCREEN_ENABLED": lambda: _get_bool("TOOL_LOOK_SCREEN_ENABLED", True),
     "TOOL_PLAY_SFX_ENABLED": lambda: _get_bool("TOOL_PLAY_SFX_ENABLED", True),
     "TOOL_WRITE_DIARY_ENABLED": lambda: _get_bool("TOOL_WRITE_DIARY_ENABLED", True),
+    "TOOL_REGISTRY": lambda: _get_bool("TOOL_REGISTRY", True),
     "MCP_ENABLED": lambda: _get_bool("MCP_ENABLED", False),
     "MCP_CONFIG_PATH": lambda: os.getenv("MCP_CONFIG_PATH") or os.path.join(
         _PROJECT_ROOT, "src", "mcp", "mcp_config.json"),
     "SKILLS_DIR": lambda: os.getenv("SKILLS_DIR") or "src/llm/skills",
+    "ENABLE_SESSION_SEARCH": lambda: _get_bool("ENABLE_SESSION_SEARCH", False),
 }
 
 _EVOLUTION_LOADERS = {
     "EVOLUTION_ENABLED": lambda: _get_bool("EVOLUTION_ENABLED", True),
     "EVOLUTION_MIN_INTERVAL": lambda: int(os.getenv("EVOLUTION_MIN_INTERVAL", "600")),
     "EVOLUTION_MIN_TURNS": lambda: int(os.getenv("EVOLUTION_MIN_TURNS", "10")),
+    "EVOLUTION_MIN_ACTIVE_GAP": lambda: int(
+        os.getenv("EVOLUTION_MIN_ACTIVE_GAP", "300")),
     "EVOLUTION_PERIODIC_INTERVAL": lambda: int(os.getenv("EVOLUTION_PERIODIC_INTERVAL", "1800")),
     "EVOLUTION_EVAL_ENABLED": lambda: _get_bool("EVOLUTION_EVAL_ENABLED", True),
     "EVOLUTION_EVAL_CASES": lambda: max(
         1, min(int(os.getenv("EVOLUTION_EVAL_CASES", "2")), 3)),
     "EVOLUTION_PROMPT_EVO_ENABLED": lambda: _get_bool("EVOLUTION_PROMPT_EVO_ENABLED", True),
     "EVOLUTION_PROMPT_EVO_INTERVAL": lambda: int(os.getenv("EVOLUTION_PROMPT_EVO_INTERVAL", "21600")),
+    "EVOLUTION_INJECT_IN_USER": lambda: _get_bool("EVOLUTION_INJECT_IN_USER", True),
+    "EVOLUTION_CURATOR_IDLE_HOURS": lambda: float(
+        os.getenv("EVOLUTION_CURATOR_IDLE_HOURS", "2")),
+    "EVOLUTION_FEEDBACK_ENABLED": lambda: _get_bool(
+        "EVOLUTION_FEEDBACK_ENABLED", True),
+    "EVOLUTION_POLICY_AB": lambda: _get_bool("EVOLUTION_POLICY_AB", False),
 }
 
 _VOICE_LOADERS = {
@@ -655,6 +775,8 @@ _TOOL_HOT_FIELDS = (
     "EVOLUTION_ENABLED", "EVOLUTION_MIN_INTERVAL", "EVOLUTION_MIN_TURNS",
     "EVOLUTION_EVAL_ENABLED", "EVOLUTION_EVAL_CASES",
     "EVOLUTION_PROMPT_EVO_ENABLED", "EVOLUTION_PROMPT_EVO_INTERVAL",
+    "EVOLUTION_INJECT_IN_USER", "EVOLUTION_CURATOR_IDLE_HOURS",
+    "EVOLUTION_FEEDBACK_ENABLED", "EVOLUTION_POLICY_AB",
     "LLM_SERVERS", "LLM_ROUTER_ENABLED", "LLM_ROUTER_EPSILON",
     "STT_ENABLED", "STT_MODEL",
     "STT_LOCAL_MODEL_PATH", "STT_LOCAL_MODEL_REVISION",
@@ -676,6 +798,8 @@ _ALL_HOT_FIELDS = _TOOL_HOT_FIELDS + (
     "PROFANITY_FILTER_ENABLED", "PROFANITY_FILTER_RATE",
     "MEMORY_ENABLED", "MEMORY_LIFECYCLE_ENABLED",
     "MEMORY_LIFECYCLE_MODEL", "MEMORY_LIFECYCLE_THRESHOLD",
+    "MEMORY_CURATED_ENABLED", "MEMORY_HISTORY_ENABLED", "HISTORY_DB_PATH",
+    "MEMORY_CURATOR_ENABLED", "MEMORY_CURATOR_INTERVAL",
     "GPTSOVITS_REF_AUDIO", "GPTSOVITS_REF_AUDIOS", "GPTSOVITS_PROMPT_TEXT",
     "PET_ALWAYS_ON_TOP", "PET_WINDOW_SIZE", "PET_IDLE_MOTION",
     "PET_MODEL_PATH",
@@ -819,6 +943,18 @@ class Config:
         return self.llm.LLM_MAX_CONCURRENCY
 
     @property
+    def PROMPT_CACHE_MODE(self) -> bool:
+        return self.llm.PROMPT_CACHE_MODE
+
+    @property
+    def AUX_ACCOUNTING(self) -> bool:
+        return self.llm.AUX_ACCOUNTING
+
+    @property
+    def AUX_MODELS(self) -> dict:
+        return self.llm.AUX_MODELS
+
+    @property
     def HISTORY_ROUNDS(self) -> int:
         return self.llm.HISTORY_ROUNDS
 
@@ -857,6 +993,38 @@ class Config:
     @property
     def MEMORY_LIFECYCLE_THRESHOLD(self) -> float:
         return self.memory.MEMORY_LIFECYCLE_THRESHOLD
+
+    @property
+    def MEMORY_CURATED_ENABLED(self) -> bool:
+        return self.memory.MEMORY_CURATED_ENABLED
+
+    @property
+    def MEMORY_CURATED_MEMORY_LIMIT(self) -> int:
+        return self.memory.MEMORY_CURATED_MEMORY_LIMIT
+
+    @property
+    def MEMORY_CURATED_USER_LIMIT(self) -> int:
+        return self.memory.MEMORY_CURATED_USER_LIMIT
+
+    @property
+    def MEMORY_HISTORY_ENABLED(self) -> bool:
+        return self.memory.MEMORY_HISTORY_ENABLED
+
+    @property
+    def HISTORY_DB_PATH(self) -> str:
+        return self.memory.HISTORY_DB_PATH
+
+    @property
+    def MEMORY_CURATOR_ENABLED(self) -> bool:
+        return self.memory.MEMORY_CURATOR_ENABLED
+
+    @property
+    def MEMORY_CURATOR_INTERVAL(self) -> int:
+        return self.memory.MEMORY_CURATOR_INTERVAL
+
+    @property
+    def MEMORY_GATE_TIMEOUT(self) -> float:
+        return self.memory.MEMORY_GATE_TIMEOUT
 
     @property
     def KNOWLEDGE_ENABLED(self) -> bool:
@@ -907,6 +1075,46 @@ class Config:
         return self.agent.AGENT_DUP_THRESHOLD
 
     @property
+    def AGENT_TOOLSET(self) -> str:
+        return self.agent.AGENT_TOOLSET
+
+    @property
+    def AGENT_MAX_ITERATIONS(self) -> int:
+        return self.agent.AGENT_MAX_ITERATIONS
+
+    @property
+    def ENABLE_CURATOR(self) -> bool:
+        return self.agent.ENABLE_CURATOR
+
+    @property
+    def AGENT_CRON_HARDEN(self) -> bool:
+        return self.agent.AGENT_CRON_HARDEN
+
+    @property
+    def AGENT_DELEGATE_BACKEND(self) -> bool:
+        return self.agent.AGENT_DELEGATE_BACKEND
+
+    @property
+    def TURN_LEASE_ENABLED(self) -> bool:
+        return self.agent.TURN_LEASE_ENABLED
+
+    @property
+    def AGENT_ESTOP_ENABLED(self) -> bool:
+        return self.agent.AGENT_ESTOP_ENABLED
+
+    @property
+    def AGENT_REPETITION_GUARD(self) -> bool:
+        return self.agent.AGENT_REPETITION_GUARD
+
+    @property
+    def READINESS_CHECK(self) -> bool:
+        return self.agent.READINESS_CHECK
+
+    @property
+    def AGENT_TTS_ECHO_GUARD(self) -> bool:
+        return self.agent.AGENT_TTS_ECHO_GUARD
+
+    @property
     def SYSTEM_PROMPT_FILE(self) -> str:
         return self.persona.SYSTEM_PROMPT_FILE
 
@@ -929,6 +1137,14 @@ class Config:
     @property
     def TOOLS_ENABLED(self) -> bool:
         return self.tool.TOOLS_ENABLED
+
+    @property
+    def TOOL_REGISTRY(self) -> bool:
+        return self.tool.TOOL_REGISTRY
+
+    @property
+    def ENABLE_SESSION_SEARCH(self) -> bool:
+        return self.tool.ENABLE_SESSION_SEARCH
 
     @property
     def OPENWEATHERMAP_API_KEY(self) -> str:
@@ -983,6 +1199,10 @@ class Config:
         return self.evolution.EVOLUTION_MIN_TURNS
 
     @property
+    def EVOLUTION_MIN_ACTIVE_GAP(self) -> int:
+        return self.evolution.EVOLUTION_MIN_ACTIVE_GAP
+
+    @property
     def EVOLUTION_PERIODIC_INTERVAL(self) -> int:
         return self.evolution.EVOLUTION_PERIODIC_INTERVAL
 
@@ -1001,6 +1221,22 @@ class Config:
     @property
     def EVOLUTION_PROMPT_EVO_INTERVAL(self) -> int:
         return self.evolution.EVOLUTION_PROMPT_EVO_INTERVAL
+
+    @property
+    def EVOLUTION_INJECT_IN_USER(self) -> bool:
+        return self.evolution.EVOLUTION_INJECT_IN_USER
+
+    @property
+    def EVOLUTION_CURATOR_IDLE_HOURS(self) -> float:
+        return self.evolution.EVOLUTION_CURATOR_IDLE_HOURS
+
+    @property
+    def EVOLUTION_FEEDBACK_ENABLED(self) -> bool:
+        return self.evolution.EVOLUTION_FEEDBACK_ENABLED
+
+    @property
+    def EVOLUTION_POLICY_AB(self) -> bool:
+        return self.evolution.EVOLUTION_POLICY_AB
 
     @property
     def GPTSOVITS_REF_AUDIO(self) -> str:
