@@ -103,9 +103,7 @@ tools/pnpm-store/
 tools/pnpm/
 
 # ================= 大体积 Live2D 模型（保留本地不入库，需要时 git add -f 强制提交） =================
-live2d/【免费版】悠小喵/
-live2d/阿芙洛狄忒模型文件/
-live2d/yumi_vts/
+live2d/
 
 # ================= 音效资源（运行期需本地保留，不入库；讲解.txt 为含义说明仍入库） =================
 plugins/builtin/tools/SFX/*.wav
