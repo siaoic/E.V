@@ -18,6 +18,8 @@ VALID_HOOKS = frozenset({
     "on_danmaku",
     "on_emotion_decide", "on_proactive_decide",
     "on_config_reload",
+    # 工具 pre-execute policy
+    "on_tool_call",
 })
 
 
@@ -82,6 +84,12 @@ class Plugin:
 
     async def on_config_reload(self, new_config) -> None:
         """配置热更新：接收新配置字典。"""
+
+    async def on_tool_call(self, event) -> None:
+        """工具执行前（pre-execute policy）：可拦截 / 替换结果。
+
+        event：ToolCallEvent（name/args 可改写，deny() 拦截，replace_result() 替换）。
+        """
 
     # ---- 工具 ----
     def get_tools(self) -> list:
@@ -165,3 +173,26 @@ class EmotionDecideEvent:
         self.text = text
         self.emotion_candidates = emotion_candidates  # [(name, score)] 有序
         self.decided = decided   # 钩子可修改: plugin 钩子赋值 decided 后终止分类
+
+
+class ToolCallEvent:
+    """onToolCall 钩子事件：插件可在工具执行前拦截 / 替换结果。
+
+    - name / args：解析后的工具名与参数字典（插件可改写 args）。
+    - deny(reason)：拒绝执行，工具返回固定拦截提示（不进真实执行）。
+    - replace_result(text)：用给定结果替换真实执行结果。
+    """
+
+    def __init__(self, name: str, args: dict) -> None:
+        self.name = name
+        self.args = args
+        self.denied: str | None = None      # deny(reason) 的原因
+        self.replaced: str | None = None    # replace_result(text) 的文本
+
+    def deny(self, reason: str) -> None:
+        """拒绝执行该工具，reason 将作为工具结果告知模型。"""
+        self.denied = reason
+
+    def replace_result(self, text: str) -> None:
+        """跳过真实执行，用 text 作为工具结果。"""
+        self.replaced = text

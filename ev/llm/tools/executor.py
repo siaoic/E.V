@@ -1,12 +1,12 @@
-﻿"""工具执行：并行执行 + 失败自动重试 + 单轮结果熔断。"""
+"""工具执行入口：并行执行 + 转发 L3-A 三段式管线。
+
+执行实现已迁移至 ev/agent/tool_pipeline.py（pre-execute / execute /
+post-execute，含插件拦截、schema 校验、预算 stub、超时与后台重试、熔断）。
+本模块保留既有入口签名与返回格式不变，行为 100% 一致。
+"""
 
 import asyncio
-import json
-from typing import Any, List
-
-from ev.utils import console
-from ev.llm.utils.constants import _MAX_ROUND_TOOL_CHARS
-from ev.llm.tools.formatter import _format_search_result, _format_tool_result
+from typing import List
 
 
 async def _execute_tool_calls(mcp, tool_calls: list) -> List[dict]:
@@ -17,50 +17,17 @@ async def _execute_tool_calls(mcp, tool_calls: list) -> List[dict]:
     直接截断为 0 并注入提示，避免 30 轮工具调用 × 8000 字符
     一次性进 LLM 上下文把免费档模型打爆（400/截断/超时）。
     """
-    from plugins.builtin.tools import call_tool
-
     # 共享计数器：本轮已消耗的工具结果字符数
     state = {"round_chars": 0, "truncated": False}
+    return await asyncio.gather(
+        *(_execute_tool_call(mcp, tc, state) for tc in tool_calls))
 
-    async def _run(tc: dict) -> dict:
-        name = tc["function"]["name"]
-        try:
-            args = json.loads(tc["function"]["arguments"] or "{}")
-        except (json.JSONDecodeError, TypeError):
-            args = {}
-        console.dim(f"  ↳ 执行「{name}」...")
-        result = await _call_tool_with_retry(name, args, mcp)
-        if isinstance(result, dict) and isinstance(result.get("results"), list):
-            # 搜索类结果：逐条醒目展示（标题/链接/摘要），便于直播时直接读取
-            console.accent(_format_search_result(name, result))
-        else:
-            console.dim(_format_tool_result(name, result))
-        # 单轮累计熔断：本轮已超阈值时把后续结果直接截断为 0，
-        # 模型依旧能看到「有工具被熔断」的提示
-        if state["truncated"]:
-            result = (f"[后续工具结果因本轮累计超过 "
-                      f"{_MAX_ROUND_TOOL_CHARS // 1000}K 字符被截断]")
-        else:
-            if isinstance(result, str):
-                state["round_chars"] += len(result)
-            if state["round_chars"] > _MAX_ROUND_TOOL_CHARS:
-                state["truncated"] = True
-                result = (f"[后续工具结果因本轮累计超过 "
-                          f"{_MAX_ROUND_TOOL_CHARS // 1000}K 字符被截断]")
-        return {
-            "role": "tool",
-            "name": name,
-            "tool_call_id": tc.get("id") or f"call_{name}",
-            "content": result,
-        }
 
-    async def _call_tool_with_retry(name: str, args: dict, mcp) -> Any:
-        """单工具执行失败自动重试 1 次（指数退避 1s），减少偶发失败。"""
-        try:
-            return await call_tool(name, args, mcp)
-        except Exception as e:
-            console.warn(f"  ↳ 「{name}」执行失败（{e}），1s 后自动重试...")
-            await asyncio.sleep(1.0)
-            return await call_tool(name, args, mcp)
+async def _execute_tool_call(mcp, tc: dict, state: dict) -> dict:
+    """执行单个工具（转发 L3-A 三段式管线）。
 
-    return await asyncio.gather(*(_run(tc) for tc in tool_calls))
+    state 为共享熔断计数（{"round_chars", "truncated"}）。独立可复用：
+    L2-A 流式期间提前启动工具时逐工具调用，与 _execute_tool_calls 行为一致。
+    """
+    from ev.agent.tool_pipeline import tool_pipeline
+    return await tool_pipeline.execute(mcp, tc, state)

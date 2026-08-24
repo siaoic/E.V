@@ -16,7 +16,7 @@ from __future__ import annotations
 
 from typing import Optional, Set
 
-# E.V 内置工具全量清单（与 plugins/tools/defs.py 的 _LOCAL_TOOL_DEFS 对齐）
+# E.V 内置工具全量清单（与 plugins/builtin/tools 目录各工具 index.py 注册对齐）
 _EV_CORE_TOOLS: Set[str] = {
     "get_current_time",
     "get_weather",

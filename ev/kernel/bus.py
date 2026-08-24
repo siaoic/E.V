@@ -33,6 +33,8 @@ EV_SPEAKING_END = "speaking_end"        # 一次播报结束（payload: Speaking
 EV_ERROR = "error"                      # 统一错误事件（payload: ErrorEvent）
 EV_STATE_CHANGE = "state_change"        # 全局状态机变化（payload: StateChangeEvent）
 EV_SESSION_END = "session_end"          # 会话结束（payload: SessionEndEvent）
+EV_TOOL_CALL = "tool_call"              # 工具调用开始（payload: dict{id,name,args}）
+EV_TOOL_RESULT = "tool_result"          # 工具执行结束（payload: dict{name,content}）
 
 # 订阅者回调签名：async (payload: Any) -> None
 Handler = Callable[[object], Awaitable[None]]

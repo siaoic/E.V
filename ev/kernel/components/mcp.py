@@ -1,4 +1,4 @@
-﻿"""MCPManager 创建 + initialize + tools 合并 + skill manager 就绪打印（L254-274）。"""
+"""MCPManager 创建 + initialize + tools 合并 + skill manager 就绪打印（L254-274）。"""
 from __future__ import annotations
 
 from typing import TYPE_CHECKING
@@ -18,6 +18,7 @@ async def setup(runtime: "RuntimeContext") -> None:
     runtime.mcp = MCPManager() if (cfg.MCP_ENABLED and cfg.TOOLS_ENABLED) else None
     if runtime.mcp is not None:
         await runtime.mcp.initialize()
+        runtime.mcp.warmup()
     from plugins.builtin.tools import get_merged_tools
     merged_tools = get_merged_tools(runtime.mcp)
     if merged_tools:

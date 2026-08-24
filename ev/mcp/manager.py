@@ -291,6 +291,20 @@ class MCPManager:
             return []
         return self.tool_registry.to_openai_format()
 
+    def warmup(self) -> None:
+        """启动期预拉 MCP 工具列表（幂等），确认工具集可提供给 LLM。
+
+        在 initialize（服务器全部启动、工具注册完毕）之后调用：把工具
+        列表构建留在启动期而非首轮对话，同时提前暴露异常（仅 warn 不阻塞）。
+        """
+        if not self.is_enabled or not self.is_initialized:
+            return
+        try:
+            tools = self.get_tools_for_llm()
+            console.ok(f"MCP warmup 完成：{len(tools)} 个工具可提供给 LLM")
+        except Exception as e:
+            console.warn(f"[MCP] warmup 失败（不影响启动）：{e}")
+
     async def handle_tool_calls(self, tool_calls: list) -> Optional[list]:
         """处理 LLM 返回的工具调用（仅 MCP 工具）。
 

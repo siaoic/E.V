@@ -11,6 +11,10 @@ import asyncio
 import importlib.util
 import json
 import os
+import time
+import uuid
+from dataclasses import dataclass, field
+from typing import Callable, Optional
 
 from ev.utils import config, console
 
@@ -134,6 +138,71 @@ def save_enabled_plugins(plugins_dir: str, plugins) -> None:
     save_plugin_sets(plugins_dir, plugins, disabled)
 
 
+@dataclass
+class JobState:
+    """后台任务状态（L3-B：插件 start_job 登记，LLM 可经 jobs_* 工具查询）。
+
+    status：running / done / failed / killed；output 为任务完成后的结果文本，
+    error 为失败原因（仅 failed 时有值）。
+    """
+    job_id: str
+    plugin: str
+    kind: str
+    label: str
+    status: str = "running"
+    output: str = ""
+    error: str = ""
+    created_at: float = field(default_factory=time.time)
+    task: Optional[asyncio.Task] = None
+
+
+# jobs 内置工具（toolset="jobs"）：长任务后台化后，LLM 下一轮经这三个
+# 工具查询状态/结果/终止任务，长任务不再阻塞对话流。
+_JOBS_TOOL_DEFS: list = [
+    {
+        "type": "function",
+        "function": {
+            "name": "jobs_list",
+            "description": "列出全部后台任务的摘要（job_id / 状态 / 类型 / 发起插件）。"
+                           "当需要了解有哪些后台任务在跑、或不确定 job_id 时调用。",
+            "parameters": {"type": "object", "properties": {}},
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "jobs_get_output",
+            "description": "查询指定后台任务的当前状态与输出结果。"
+                           "工具返回过「已转后台执行」且任务较慢时，下一轮调用本工具查询结果。",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "job_id": {"type": "string", "description": "后台任务 id"},
+                },
+                "required": ["job_id"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "jobs_kill",
+            "description": "终止指定后台任务（状态置 killed，不再执行）。任务已结束时无副作用。",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "job_id": {"type": "string", "description": "后台任务 id"},
+                },
+                "required": ["job_id"],
+            },
+        },
+    },
+]
+
+# 后台任务记录保留上限：超限淘汰最旧的已完成记录（防内存无界增长）
+_JOB_MAX = 100
+
+
 class PluginManager:
     """插件生命周期与钩子分发中心。app 为 Application 实例（run 时注入）。"""
 
@@ -156,6 +225,8 @@ class PluginManager:
         # 新增：子命令注册表（register_subcommand 写入）
         if not hasattr(self, "_subcommands"):
             self._subcommands: dict[str, dict] = {}
+        # L3-B 后台任务：job_id -> JobState（start_job 登记，jobs_* 工具查询）
+        self._jobs: dict = {}
 
     # ==================== enabled_plugins.json ====================
 
@@ -671,10 +742,17 @@ class PluginManager:
         """执行所有插件的 on_config_reload（配置热更新）。"""
         await self.dispatch_hook("on_config_reload", new_config)
 
+    async def run_tool_call_hooks(self, event) -> None:
+        """执行所有插件的 on_tool_call（工具执行前 policy）。
+
+        插件可通过 event.deny / event.replace_result 拦截或替换工具执行。
+        """
+        await self.dispatch_hook("on_tool_call", event)
+
     # ==================== 工具聚合 ====================
 
     def get_all_tools(self) -> list:
-        """合并所有插件 get_tools + 动态注册工具（OpenAI function calling 格式）。"""
+        """合并所有插件 get_tools + 动态注册工具 + jobs 内置工具（OpenAI function calling 格式）。"""
         tools = []
         for name, entry in self._plugins.items():
             try:
@@ -685,10 +763,18 @@ class PluginManager:
                 pass
         for tool_list in self._dynamic_tools.values():
             tools.extend(tool_list)
+        # L3-B 内置后台任务工具（不依赖具体插件宿主，见 _execute_jobs_tool）
+        tools.extend(_JOBS_TOOL_DEFS)
         return tools
 
     async def execute_tool(self, name: str, params: dict) -> str | None:
-        """路由工具调用到提供它的插件；无插件提供时返回 None（走本地兜底）。"""
+        """路由工具调用到提供它的插件；无插件提供时返回 None（走本地兜底）。
+
+        jobs_* 内置后台任务工具优先处理（L3-B），其余路由到插件。
+        """
+        jobs_result = await self._execute_jobs_tool(name, params or {})
+        if jobs_result is not None:
+            return jobs_result
         for pname, entry in self._plugins.items():
             defs = []
             try:
@@ -717,6 +803,112 @@ class PluginManager:
         self._dynamic_tools[plugin_name] = [
             t for t in self._dynamic_tools.get(plugin_name, [])
             if tool_name(t) != name]
+
+    # ==================== 后台任务（L3-B） ====================
+
+    def start_background_job(
+        self, plugin_name: str, kind: str, run: Callable, label: str = "",
+    ) -> str:
+        """启动后台任务并返回 job_id；LLM 可经 jobs_list / jobs_get_output 查询。
+
+        run 为同步或 async 函数，返回字符串结果（完成后写入 job 输出）。
+        任务执行不阻塞调用方事件循环（fire-and-forget）。
+        """
+        job_id = f"{plugin_name}-{uuid.uuid4().hex[:8]}"
+        state = JobState(job_id=job_id, plugin=plugin_name, kind=kind, label=label)
+        self._jobs[job_id] = state
+        state.task = asyncio.create_task(self._run_job(job_id, run))
+        self._prune_jobs()
+        console.dim(
+            f"[插件] 后台任务已启动：{job_id}"
+            + (f"（{label}）" if label else ""))
+        return job_id
+
+    async def _run_job(self, job_id: str, run: Callable) -> None:
+        """执行后台任务并落状态：成功写 output；异常写 error；取消置 killed。"""
+        state = self._jobs.get(job_id)
+        if state is None:
+            return
+        try:
+            result = run()
+            if asyncio.iscoroutine(result):
+                result = await result
+            state.status = "done"
+            state.output = str(result or "")[:4000]  # 截断，防长输出打爆 LLM 上下文
+        except asyncio.CancelledError:
+            state.status = "killed"
+            raise
+        except Exception as e:
+            state.status = "failed"
+            state.error = f"{type(e).__name__}: {e}"
+            console.warn(f"[插件] 后台任务失败：{job_id}：{state.error}")
+
+    def _prune_jobs(self) -> None:
+        """任务记录超上限时淘汰最旧的已完成记录（防内存无界增长）。"""
+        while len(self._jobs) > _JOB_MAX:
+            finished = [jid for jid, s in self._jobs.items()
+                        if s.status != "running"]
+            if not finished:
+                break
+            oldest = min(finished, key=lambda jid: self._jobs[jid].created_at)
+            self._jobs.pop(oldest, None)
+
+    def list_jobs(self) -> list:
+        """全部后台任务摘要（按创建时间倒序，供 jobs_list 工具）。"""
+        jobs = [{
+            "job_id": s.job_id,
+            "kind": s.kind,
+            "label": s.label,
+            "plugin": s.plugin,
+            "status": s.status,
+        } for s in self._jobs.values()]
+        jobs.sort(key=lambda j: j["job_id"], reverse=True)
+        return jobs
+
+    def get_job_output(self, job_id: str) -> dict:
+        """单个任务详情（status / output / error），供 jobs_get_output 工具。"""
+        state = self._jobs.get(job_id)
+        if state is None:
+            return {"job_id": job_id, "error": "任务不存在"}
+        return {
+            "job_id": job_id,
+            "kind": state.kind,
+            "label": state.label,
+            "plugin": state.plugin,
+            "status": state.status,
+            "output": state.output,
+            "error": state.error,
+        }
+
+    def kill_job(self, job_id: str) -> bool:
+        """终止后台任务（状态置 killed）；任务不存在返回 False。"""
+        state = self._jobs.get(job_id)
+        if state is None:
+            return False
+        if state.task is not None and not state.task.done():
+            state.task.cancel()
+        state.status = "killed"
+        return True
+
+    async def _execute_jobs_tool(self, name: str, params: dict) -> str | None:
+        """jobs 内置工具执行：jobs_list / jobs_get_output / jobs_kill。
+
+        非 jobs 工具返回 None（调用方走插件路由兜底）。
+        """
+        if name == "jobs_list":
+            return json.dumps(self.list_jobs(), ensure_ascii=False)
+        if name in ("jobs_get_output", "jobs_kill"):
+            job_id = (params.get("job_id") or "").strip()
+            if not job_id:
+                return json.dumps(
+                    {"error": "INVALID_ARGS", "details": ["缺少必填参数 job_id"]},
+                    ensure_ascii=False)
+            if name == "jobs_get_output":
+                return json.dumps(self.get_job_output(job_id), ensure_ascii=False)
+            return json.dumps(
+                {"job_id": job_id, "killed": self.kill_job(job_id)},
+                ensure_ascii=False)
+        return None
 
     # ==================== 记忆 provider 暂存（3.11） ====================
 

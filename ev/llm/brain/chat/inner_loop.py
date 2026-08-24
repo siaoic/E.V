@@ -7,6 +7,7 @@
 
 import asyncio
 import time
+from concurrent.futures import ThreadPoolExecutor
 from typing import AsyncGenerator, List, Optional
 
 from ev.utils import config, console
@@ -31,7 +32,7 @@ from ev.llm.utils.constants import (
     _MAX_429_WAIT,
     _SUMMARIZE_MIN_TURNS,
 )
-from ev.llm.tools.executor import _execute_tool_calls
+from ev.llm.tools.executor import _execute_tool_call, _execute_tool_calls
 from ev.llm.tools.formatter import _format_tool_calls
 from ev.llm.tools.parser import _parse_qwen_tool_calls
 from ev.llm.utils.content_check import has_content
@@ -53,6 +54,10 @@ _MEMORY_RECALL_TIMEOUT = 1.5
 _FIRST_SEGMENT_MIN_CHARS = 6    # 首段早产字数（太小 GSV 短文本合成不稳）
 _PAUSE_SEGMENT_MIN_CHARS = 4    # 停顿标点切段的最短段长（防"啊，嗯，"被单切）
 _MAX_SEGMENT_CHARS = 30         # 无标点强制切段上限
+
+# 独立 LLM 流式线程池：与全局默认线程池隔离，避免高并发下工具/Web 服务
+# 与 LLM 流式迭代争抢线程（对标 harness 的 llm/tool_io/cpu 三池设计）
+_LLM_POOL = ThreadPoolExecutor(max_workers=4, thread_name_prefix="llm")
 
 
 async def _run_chat_stream_inner(
@@ -269,7 +274,7 @@ async def _run_chat_stream_inner(
             reasoning_raw=reasoning_raw,
             _first_content=_first_content_ref, tracker=tracker,
         )
-        bg_task = loop.run_in_executor(None, _run_stream_drainer, ctx)
+        bg_task = loop.run_in_executor(_LLM_POOL, _run_stream_drainer, ctx)
 
         # 首轮思考过程提示
         if iteration == 0 and self.cfg.LLM_THINKING:
@@ -278,6 +283,12 @@ async def _run_chat_stream_inner(
         # 主协程：消费 content 增量，按句切分 yield
         buffer = ""
         scanned = 0  # buffer[:scanned] 已确认无句末符号，增量扫描起点
+
+        # L2-A：流式期间提前启动的工具任务（index -> Task，返回 tool 消息）。
+        # tool_state 为共享熔断计数，与流结束后现场执行的工具共用同一把尺。
+        tool_state = {"round_chars": 0, "truncated": False}
+        early_tool_tasks: dict = {}
+        started_indices: set = set()
 
         def _emit(sentence: str) -> str:
             """清洗、保存记忆、计数并返回清理后的文本。空文本返回 ''。"""
@@ -295,6 +306,16 @@ async def _run_chat_stream_inner(
             item = await q.get()
             if item is None:
                 break
+            if isinstance(item, tuple) and item and item[0] == "__TOOL_CALL_READY__":
+                # L2-A：arguments 已累积成合法 JSON，流式期间立即启动工具，
+                # 工具执行与 LLM 后续内容输出并行（同 index 只启动一次）
+                _, index, snapshot = item
+                if (index not in started_indices
+                        and snapshot["function"]["name"]):
+                    started_indices.add(index)
+                    early_tool_tasks[index] = asyncio.create_task(
+                        _execute_tool_call(self.mcp, snapshot, tool_state))
+                continue
             if isinstance(item, str) and item.startswith("__ERROR__::"):
                 console.error(f"LLM 调用失败：{item[len('__ERROR__::'):]}")
                 await bg_task
@@ -395,7 +416,16 @@ async def _run_chat_stream_inner(
             messages.append(assistant_msg)
 
             # 2) 执行工具 → tool 响应消息（工具链完整进入下一轮上下文）
-            tool_messages = await _execute_tool_calls(self.mcp, tool_calls)
+            # L2-A：已提前启动的工具直接 await 其结果（慢工具耗时已与 LLM
+            # 输出重叠）；未提前启动的（Qwen 文本格式等流结束后才解析出）
+            # 在此现场执行。按 index 顺序收集，保证 tool 消息顺序与请求一致。
+            tool_messages = []
+            for index, tc in enumerate(tool_calls):
+                if index in early_tool_tasks:
+                    tool_messages.append(await early_tool_tasks[index])
+                else:
+                    tool_messages.append(
+                        await _execute_tool_call(self.mcp, tc, tool_state))
             messages.extend(tool_messages)
             continue
 

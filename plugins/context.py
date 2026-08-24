@@ -9,6 +9,7 @@ import copy
 from typing import Callable, Optional
 
 from ev.utils import console
+from ev.agent.tool_registry import ToolContext
 from plugins.base import VALID_HOOKS
 
 
@@ -82,6 +83,7 @@ class PluginContext:
         self._plugin_name = plugin_name
         self._plugin_config: dict = {}   # plugin_config.json（可选）
         self.storage = _Storage()
+        self.tools = ToolContext()       # ctx.tools：统一工具注册接口（L3-C）
 
     # ---- 日志 ----
 
@@ -207,6 +209,19 @@ class PluginContext:
     def unregister_tool(self, name: str) -> None:
         """移除本插件动态注册的工具。"""
         self._manager.unregister_dynamic_tool(self._plugin_name, name)
+
+    # ---- 后台任务（L3-B） ----
+
+    def start_job(self, kind: str, run, label: str = "") -> str:
+        """启动后台任务，返回 job_id；LLM 可经 jobs_get_output 工具查询。
+
+        run 为同步或 async 函数，返回字符串结果（完成后写入 job 输出，
+        查询工具会截断到 4000 字）。长任务（>10s）不应阻塞对话流——
+        用本接口后台化，再让 LLM 下一轮用 jobs_list / jobs_get_output
+        查询状态与结果。
+        """
+        return self._manager.start_background_job(
+            self._plugin_name, kind, run, label)
 
     # ---- 钩子 / 记忆 provider（3.11 编程式注册 API） ----
 

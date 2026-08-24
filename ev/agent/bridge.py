@@ -5,9 +5,9 @@
 主动播报结果。主对话不卡 30s 等 LLM 跑完。
 
 - maybe_delegate(user_text, runtime) -> Optional[int]：
-  命中关键词且 Agent 开关开启时入队/启动后台任务，立即给用户反馈
-  "正在后台执行"；未命中或异常返回 None，调用方走原对话路径
-  （行为 100% 不变，向后兼容）。
+  Agent 开关开启时由 LLM 自主判断是否适合委派，适合则入队/启动
+  后台任务并立即给用户反馈"正在后台执行"；不适合或异常返回 None，
+  调用方走原对话路径（行为 100% 不变，向后兼容）。
 - _run_and_report(task, runtime) -> None：后台执行任务 → 结果写
   blackboard（供其他 Agent 召回）→ 主动播报完成（fail-open）。
 
@@ -17,6 +17,8 @@
 from __future__ import annotations
 
 import asyncio
+import json
+import re
 from typing import TYPE_CHECKING, Optional
 
 from ev.utils import console
@@ -26,23 +28,19 @@ if TYPE_CHECKING:
     from ev.kernel.runtime import RuntimeContext
 
 
-# 委派关键词：命中且 Agent 开关开启时委派（保守词表，避免误委）
-_DELEGATE_KEYWORDS = (
-    "调研", "分析", "比较", "总结", "写一首", "搜索",
-    "查一下", "帮我查", "查找", "整理一下",
-)
-
-
 class MainChatSubAgentBridge:
     """主对话与 sub-agent 的桥：长任务自动委派，结果回流主动播报。"""
 
     def __init__(self) -> None:
         self.blackboard = get_blackboard()
 
-    def _should_delegate(self, text: str, runtime: "RuntimeContext") -> bool:
-        """判定规则：Agent 开关开启 + LLM 配置有效 + 命中委派关键词。
+    async def _should_delegate(self, text: str,
+                               runtime: "RuntimeContext") -> bool:
+        """判定规则：Agent 开关开启 + LLM 配置有效 + AI 自主判断。
 
-        任一不满足即返回 False（走原对话路径，行为 100% 不变）。
+        前两个是硬性前置（任一不满足直接 False，走原对话路径，
+        行为 100% 不变）；最后一个交给 LLM 判断输入是否适合委派
+        后台长任务（fail-open：判断失败也走原对话路径）。
         """
         cfg = runtime.cfg
         # Agent 总开关关闭：直接放行原对话路径（默认行为，向后兼容）
@@ -54,7 +52,71 @@ class MainChatSubAgentBridge:
             return False
         if not text or not text.strip():
             return False
-        return any(k in text for k in _DELEGATE_KEYWORDS)
+        # 由 LLM 自主判断是否适合委派后台执行（替代原关键词匹配）
+        return await self._ai_judge_delegate(text, runtime)
+
+    async def _ai_judge_delegate(self, text: str,
+                                 runtime: "RuntimeContext") -> bool:
+        """让 LLM 自主判断输入是否适合委派后台执行。
+
+        适合：需要多步工具调用 / 联网搜索 / 文件读写 / 代码 / 写作 /
+        调研 / 分析 / 总结 / 整理等长任务。
+        不适合：闲聊、打招呼、单句问答、情绪表达等短交互。
+        任何异常均 fail-open 返回 False（走原对话路径）。
+        """
+        from ev.llm.client.factory import get_async_openai_client
+        cfg = runtime.cfg
+        model = cfg.AGENT_MODEL or cfg.LLM_MODEL
+        try:
+            client = get_async_openai_client(
+                api_key=cfg.LLM_API_KEY, base_url=cfg.LLM_BASE_URL,
+                timeout=15.0)
+            system = (
+                "你是任务分发判断器。判断用户输入是否适合交给后台 AI Agent 执行。\n"
+                "适合：需要多步工具调用/联网搜索/文件读写/代码/写作/调研/分析/"
+                "总结/整理等长任务。\n"
+                "不适合：闲聊、打招呼、单句问答、问候、情绪表达等短交互。\n"
+                "只输出一行 JSON，不要任何其他文字："
+                '{"delegate": true, "reason": "简短理由"}'
+                ' 或 {"delegate": false, "reason": "简短理由"}'
+            )
+            resp = await asyncio.wait_for(
+                client.chat.completions.create(
+                    model=model,
+                    messages=[
+                        {"role": "system", "content": system},
+                        {"role": "user", "content": text},
+                    ],
+                    temperature=0.1,
+                ),
+                timeout=10.0,
+            )
+            raw = (resp.choices[0].message.content or "").strip()
+            return self._parse_delegate_judge(raw)
+        except Exception as e:
+            console.warn(f"[SubAgent] AI 委派判断失败，回退原对话：{e}")
+            return False
+
+    @staticmethod
+    def _parse_delegate_judge(raw: str) -> bool:
+        """解析 AI 判断输出：容忍 ```json 代码块，取 delegate 布尔。
+
+        解析失败时兜底用正则找 "delegate": true/false，再找不到返回 False。
+        """
+        text = raw.strip()
+        if text.startswith("```"):
+            text = text.strip("`").strip()
+            if text.lower().startswith("json"):
+                text = text[4:].strip()
+        try:
+            data = json.loads(text)
+            return bool(data.get("delegate"))
+        except (ValueError, TypeError):
+            m = re.search(r'"delegate"\s*:\s*(true|false)', text,
+                          re.IGNORECASE)
+            if m:
+                return m.group(1).lower() == "true"
+            return False
 
     async def maybe_delegate(self, user_text: str,
                              runtime: "RuntimeContext") -> Optional[int]:
@@ -62,9 +124,10 @@ class MainChatSubAgentBridge:
 
         命中则启动后台任务 + 立即给用户反馈"正在后台执行"，
         返回 job_id（>=0）；未命中或异常返回 None，调用方走原对话路径。
+        是否命中由 LLM 自主判断（见 _ai_judge_delegate）。
         """
         try:
-            if not self._should_delegate(user_text, runtime):
+            if not await self._should_delegate(user_text, runtime):
                 return None
             # 优先走持久化队列（AGENT_DELEGATE_BACKEND 开启时）
             from ev.agent.async_delegation import (

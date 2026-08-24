@@ -1,6 +1,6 @@
 """统一工具注册表：注册 / 门控 / 分发（对标 Hermes tools/registry.py 精简落地）。
 
-解决 3.2 差距：工具分散在 plugins/tools/defs.py（定义）与 _LOCAL_REGISTRY（实现）
+解决 3.2 差距：工具分散在 plugins/builtin/tools/ 目录（各工具 index.py 注册）
 中，无统一注册中心、无 check_fn 门控、handler 返回值格式不统一。
 
 本模块提供：
@@ -36,6 +36,134 @@ _GATE_GRACE = 60.0         # 上次成功后的宽限秒数：期内瞬时失败
 _GATE_CACHE_LIMIT = 512    # 门控缓存容量上限：超限淘汰最旧
 
 
+def _type_ok(value: Any, type_name: str) -> bool:
+    """JSON Schema 类型匹配（bool 与 int/float 区分开，避免 True 误判为 number）。"""
+    if type_name == "string":
+        return isinstance(value, str)
+    if type_name == "number":
+        return isinstance(value, (int, float)) and not isinstance(value, bool)
+    if type_name == "integer":
+        return isinstance(value, int) and not isinstance(value, bool)
+    if type_name == "boolean":
+        return isinstance(value, bool)
+    if type_name == "array":
+        return isinstance(value, list)
+    if type_name == "object":
+        return isinstance(value, dict)
+    return True  # 未知类型不拦（fail-open）
+
+
+def _type_label(value: Any) -> str:
+    """实际类型名（给 LLM 看的错误信息用）。"""
+    if isinstance(value, bool):
+        return "boolean"
+    if isinstance(value, str):
+        return "string"
+    if isinstance(value, (int, float)):
+        return "number"
+    if isinstance(value, list):
+        return "array"
+    if isinstance(value, dict):
+        return "object"
+    if value is None:
+        return "null"
+    return type(value).__name__
+
+
+def _build_validator(schema: dict) -> Callable[[dict], List[str]]:
+    """从 OpenAI function schema 的 parameters 编译参数校验函数。
+
+    支持 JSON Schema 子集（够覆盖现有本地工具 100% 用例）：
+    - required：缺失必填参数直接报错；
+    - type：string / number / integer / boolean / array / object；
+    - enum：取值必须在白名单内；
+    - minimum / maximum：数值上下限；
+    - array items：元素类型 + object 元素的 required/type 浅校验。
+    返回 validate(args) -> List[str]（错误列表，空 = 校验通过）。
+    """
+    params = (schema or {}).get("parameters") or {}
+    props = params.get("properties") or {}
+    required = list(params.get("required") or [])
+
+    def validate(args: dict) -> List[str]:
+        errors: List[str] = []
+        if not isinstance(args, dict):
+            return ["参数必须是 JSON 对象"]
+        # required 缺失检查（值为 null 也视为缺失）
+        for key in required:
+            if key not in args or args[key] is None:
+                errors.append(f"缺少必填参数「{key}」")
+        # 逐个属性：type / enum / 范围 / 数组元素检查
+        for key, spec in props.items():
+            if key not in args or args[key] is None:
+                continue
+            value = args[key]
+            type_name = spec.get("type")
+            if type_name and not _type_ok(value, type_name):
+                errors.append(
+                    f"参数「{key}」应为 {type_name} 类型，实际是 {_type_label(value)}")
+                continue  # 类型已错，其余检查无意义
+            enum = spec.get("enum")
+            if enum and value not in enum:
+                errors.append(f"参数「{key}」取值 {value!r} 不在允许范围 {enum}")
+            if isinstance(value, (int, float)) and not isinstance(value, bool):
+                minimum = spec.get("minimum")
+                maximum = spec.get("maximum")
+                if minimum is not None and value < minimum:
+                    errors.append(f"参数「{key}」不能小于 {minimum}")
+                if maximum is not None and value > maximum:
+                    errors.append(f"参数「{key}」不能大于 {maximum}")
+            # array 元素浅校验（items：类型 + object 元素的 required/type）
+            if type_name == "array" and isinstance(spec.get("items"), dict):
+                items = spec["items"]
+                item_type = items.get("type")
+                item_props = items.get("properties") or {}
+                item_required = list(items.get("required") or [])
+                for i, item in enumerate(value):
+                    if item_type and not _type_ok(item, item_type):
+                        errors.append(
+                            f"参数「{key}」第 {i + 1} 项应为 {item_type} 类型，"
+                            f"实际是 {_type_label(item)}")
+                        continue
+                    if not isinstance(item, dict):
+                        continue
+                    for rk in item_required:
+                        if rk not in item or item[rk] is None:
+                            errors.append(
+                                f"参数「{key}」第 {i + 1} 项缺少必填字段「{rk}」")
+                    for ik, ispec in item_props.items():
+                        if ik not in item or item[ik] is None:
+                            continue
+                        itype = ispec.get("type")
+                        if itype and not _type_ok(item[ik], itype):
+                            errors.append(
+                                f"参数「{key}」第 {i + 1} 项「{ik}」应为 {itype} 类型")
+        return errors
+
+    return validate
+
+
+def _expand_parameters(parameters: dict) -> dict:
+    """dsh 简写参数 → 完整 JSON Schema（L3-C ctx.tools.register 用）。
+
+    {"city": {"type": "string", "required": True, "description": "城市名"}} →
+    {"type": "object", "properties": {"city": {"type": "string", "description": "城市名"}},
+     "required": ["city"]}
+    required 为空时省略该键（与既有 OpenAI def 输出保持一致）。
+    """
+    props: Dict[str, dict] = {}
+    required: List[str] = []
+    for key, spec in (parameters or {}).items():
+        spec = dict(spec or {})
+        if spec.pop("required", False):
+            required.append(key)
+        props[key] = spec
+    schema: Dict[str, Any] = {"type": "object", "properties": props}
+    if required:
+        schema["required"] = required
+    return schema
+
+
 @dataclass
 class ToolEntry:
     """单个已注册工具的元信息。"""
@@ -45,6 +173,8 @@ class ToolEntry:
     handler: Callable[..., Any]        # 调用约定：handler(args: dict) -> Any
     check_fn: Optional[Callable[[], bool]] = None  # 可用性门控（无则恒可用）
     generation: int = 0                # 注册时的代际（热重载判定用）
+    validator: Optional[Callable[[dict], List[str]]] = None  # 参数校验（无则放行）
+    timeout: float = 10.0              # 参考超时（秒），dsh defineTool 对齐
 
 
 class ToolRegistry:
@@ -90,6 +220,53 @@ class ToolRegistry:
                 handler=handler,
                 check_fn=check_fn,
                 generation=self._generation,
+                validator=_build_validator(schema),
+            )
+            self._generation += 1
+            return True
+
+    def register_tool(
+        self,
+        name: str,
+        description: str,
+        parameters: dict,
+        execute: Callable[..., Any],
+        timeout: float = 10.0,
+        toolset: str = "local",
+        check_fn: Optional[Callable[[], bool]] = None,
+        override: bool = True,
+    ) -> bool:
+        """dsh 风格统一注册（ctx.tools.register 底层实现，L3-C）。
+
+        parameters 用简写格式 {"key": {"type": ..., "required": True}}，
+        自动扩展为完整 JSON Schema；execute 为执行函数，调用约定与 handler
+        一致（execute(args: dict) -> Any，允许同步/异步）；timeout 为参考
+        超时（秒）。本地工具与插件工具经此走同一条注册路径。
+        """
+        schema = {
+            "name": name,
+            "description": description,
+            "parameters": _expand_parameters(parameters),
+        }
+        with self._lock:
+            existing = self._tools.get(name)
+            if existing is not None and existing.toolset != toolset:
+                if not override:
+                    console.warn(
+                        f"[工具注册表] 拒绝注册 '{name}'：已存在 toolset "
+                        f"'{existing.toolset}'，如需覆盖请传 override=True")
+                    return False
+                console.dim(
+                    f"[工具注册表] '{name}' 覆盖原 toolset '{existing.toolset}'")
+            self._tools[name] = ToolEntry(
+                name=name,
+                toolset=toolset,
+                schema=schema,
+                handler=execute,
+                check_fn=check_fn,
+                generation=self._generation,
+                validator=_build_validator(schema),
+                timeout=timeout,
             )
             self._generation += 1
             return True
@@ -131,6 +308,17 @@ class ToolRegistry:
     def get_toolset_names(self) -> List[str]:
         """全部已注册 toolset 名（排序）。"""
         return sorted({entry.toolset for entry in self.get_all_entries()})
+
+    def validate_args(self, name: str, args: dict) -> List[str]:
+        """按注册 schema 校验参数；未注册/无 parameters 返回空列表（fail-open）。
+
+        L2-C：校验不通过时调用方直接转 INVALID_ARGS 结果，不启动真实工具，
+        省去无谓的工具启动延迟（减少 LLM 幻觉调用造成的浪费）。
+        """
+        entry = self.get_entry(name)
+        if entry is None or entry.validator is None:
+            return []
+        return entry.validator(args or {})
 
     # -- check_fn 门控（30s TTL / 60s 宽限 / 512 上限 / fail-closed） ----------
 
@@ -277,3 +465,37 @@ def _looks_like_json(text: str) -> bool:
 
 # 进程内单例（模块级，对标 Hermes registry = ToolRegistry()）
 tool_registry = ToolRegistry()
+
+
+class ToolContext:
+    """ctx.tools 统一接口（L3-C）：插件/本地工具走同一条注册路径。
+
+    对标 dsh apply(ctx) 的 ctx.tools.register：入参
+    name / description / parameters（简写）/ execute / timeout（可选），
+    屏蔽底层 schema 扩展与注册表细节；同一注册表实例内重名默认覆盖。
+    """
+
+    def __init__(self, registry: Optional[ToolRegistry] = None) -> None:
+        self._registry = registry if registry is not None else tool_registry
+
+    def register(
+        self,
+        name: str,
+        description: str,
+        parameters: dict,
+        execute: Callable[..., Any],
+        timeout: float = 10.0,
+        toolset: str = "local",
+        check_fn: Optional[Callable[[], bool]] = None,
+        override: bool = True,
+    ) -> bool:
+        """dsh 风格注册工具；返回是否注册成功（重名被拒时 False）。"""
+        return self._registry.register_tool(
+            name=name, description=description, parameters=parameters,
+            execute=execute, timeout=timeout, toolset=toolset,
+            check_fn=check_fn, override=override,
+        )
+
+    def get_definitions(self, tool_names: Optional[List[str]] = None) -> List[dict]:
+        """当前可用工具定义（OpenAI function calling 格式，门控通过者）。"""
+        return self._registry.get_definitions(tool_names)

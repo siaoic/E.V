@@ -27,7 +27,6 @@ from pathlib import Path
 
 from openai import AsyncOpenAI
 
-from plugins.builtin.tools.defs import _LOCAL_TOOL_DEFS
 from plugins.builtin.tools.skill_loader import _load_skill, _read_skill_resource
 from plugins.builtin.tools.skills import get_skill_manager
 from ev.llm.client.factory import build_thinking_extra_body, get_async_openai_client
@@ -45,9 +44,50 @@ _MAX_TOKENS = 4096
 _SKILL_STEPS = 3
 
 # 技能系统工具：模型写日记前可自主 load_skill / read_skill_resource
+# （schema 与工具目录中的定义保持一致，避免循环依赖单独内联）
 _SKILL_TOOLS = [
-    t for t in _LOCAL_TOOL_DEFS
-    if t["function"]["name"] in ("load_skill", "read_skill_resource")
+    {
+        "type": "function",
+        "function": {
+            "name": "load_skill",
+            "description": "加载指定技能的完整指令（SKILL.md 全文，并列出该技能捆绑的"
+                           "细节资源清单）。系统提示的「可用技能」段列出各技能的触发时机，"
+                           "情境匹配时先调用本工具获取完整指令再执行。",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "skill_name": {
+                        "type": "string",
+                        "description": "技能名，必须是系统提示「可用技能」中列出的精确名称",
+                    },
+                },
+                "required": ["skill_name"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "read_skill_resource",
+            "description": "按相对路径读取技能捆绑的细节资源（references/examples/scripts "
+                           "目录下的文件，路径来自 load_skill 返回的资源清单）。SKILL.md "
+                           "只含核心指令，需要详细证据、参考模式等细节时按需读取。",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "skill_name": {
+                        "type": "string",
+                        "description": "技能名，与 load_skill 的 skill_name 一致",
+                    },
+                    "resource_path": {
+                        "type": "string",
+                        "description": "相对技能目录的路径，如 references/mental-models.md",
+                    },
+                },
+                "required": ["skill_name", "resource_path"],
+            },
+        },
+    },
 ]
 
 

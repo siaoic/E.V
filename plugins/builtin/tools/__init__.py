@@ -1,37 +1,39 @@
-"""本地 Function Call 工具包 —— 严格参考 live-2d(2) 的 web-search 插件与 tool-executor.js。
+"""本地 Function Call 工具包 —— 工具插件化（L3-C，对标 dsh Tools as Plugins）。
 
-架构（与 live-2d(2) 对齐）：
-  - 每个工具 = OpenAI function 定义（defs.py）+ 异步实现（httpx，不阻塞 asyncio 主循环）
+架构：
+  - 每个工具 = plugins/builtin/tools/<name>/ 目录，index.py 提供 register(ctx) 入口：
+        def register(ctx):
+            ctx.tools.register(
+                name="my_tool",
+                description="...",
+                parameters={"city": {"type": "string", "required": True}},
+                execute=my_impl,          # 或 lambda args: my_impl(**args)
+                timeout=10.0,             # 可选：参考超时（秒）
+                enabled_by="TOOL_MY_ENABLED",   # 可选：控制开关的配置字段名
+                requires="SOME_API_KEY",        # 可选：依赖的外部 key 配置字段名
+            )
+  - 本包只负责扫描目录 + 调 register(ctx)，构建 _TOOL_CATALOG；
+    _LOCAL_REGISTRY / defs.py 硬编码映射已删除（新增工具丢目录即用）。
   - get_merged_tools(mcp)  合并「MCP 工具 + 插件工具 + 本地工具」→ OpenAI tools 格式
-  - call_tool(name, args)  MCP 优先，插件兜底，本地兜底（对标 tool-executor.js）
+  - call_tool(name, args, mcp)  MCP 优先，插件兜底，本地兜底（对标 tool-executor.js）
   - MCP 相关编排统一走 src/mcp/llm_bridge.py（本模块只保留本地工具逻辑）
 
-工具（plugins/builtin/tools/ 下各一模块）：
-  - 联网搜索走 MCP 的 bing-cn-mcp（bing_search，见 src/mcp/mcp_config.json）
-  - get_current_time()   当前时间
-  - get_weather(city)    OpenWeatherMap Geocoding + One Call 3.0
-  - load_skill(name)     按名加载技能完整指令（严格参照 Muika _skill.py）
-  - read_skill_resource(name, path)  按相对路径读取技能捆绑资源（渐进式披露）
-  - skills.py           技能管理器（技能注册表 + watchdog 热重载，技能工具的数据源）
-  - memory_tools.py     记忆管理：remember_fact / forget_memory（LLM 自行判断写入/遗忘）
+可用性门控（等价旧 TOOL_*_ENABLED 开关 + key 过滤）：
+  - enabled_by：工具依赖的配置开关字段名（如 TOOL_GET_WEATHER_ENABLED）；
+  - requires：工具依赖的外部 key 配置字段名（如 OPENWEATHERMAP_API_KEY），
+    未配置则不可用（等价旧「无 key 的工具跳过」）。
 """
 
 from __future__ import annotations
 
-from typing import List
+import importlib.util
+import inspect
+import os
+from typing import Callable, Dict, List
 
+from ev.agent.tool_registry import _expand_parameters
 from ev.utils import config, console
 
-from plugins.builtin.tools.defs import _LOCAL_TOOL_DEFS
-from plugins.builtin.tools.time import _get_current_time
-from plugins.builtin.tools.weather import _get_weather
-from plugins.builtin.tools.skill_loader import _load_skill, _read_skill_resource
-from plugins.builtin.tools.memory_tools import _remember_fact, _forget_memory
-from plugins.builtin.tools.curated_memory import _memory_curated
-from plugins.builtin.tools.screen import _look_at_screen
-from plugins.builtin.tools.sfx import _play_sound_effect, _list_sound_effects
-from plugins.builtin.tools.diary import _write_diary
-from plugins.builtin.tools.session_search import _session_search
 from ev.mcp.llm_bridge import call_mcp_tool, get_mcp_tools_for_llm
 from plugins.manager import get_default_manager, tool_name
 
@@ -40,29 +42,119 @@ __all__ = [
     "call_tool",
     "get_local_tool_names",
     "render_tool_guide",
-    "_LOCAL_TOOL_DEFS",
-    "_LOCAL_REGISTRY",
+    "get_tool_catalog",
+    "_TOOL_CATALOG",
 ]
 
 
 # ---------------------------------------------------------------------------
-# 注册表：name → 实现
+# 工具目录（name → 注册条目）；由各工具目录的 register(ctx) 填充（幂等加载）
 # ---------------------------------------------------------------------------
 
-_LOCAL_REGISTRY = {
-    "get_current_time": _get_current_time,
-    "get_weather": _get_weather,
-    "load_skill": _load_skill,
-    "read_skill_resource": _read_skill_resource,
-    "remember_fact": _remember_fact,
-    "forget_memory": _forget_memory,
-    "memory": _memory_curated,
-    "look_at_screen": _look_at_screen,
-    "play_sound_effect": _play_sound_effect,
-    "list_sound_effects": _list_sound_effects,
-    "write_diary": _write_diary,
-    "session_search": _session_search,
-}
+_TOOL_CATALOG: Dict[str, dict] = {}
+_LOADED = False
+
+
+class _ToolRegistry:
+    """本地 ctx.tools 目录：register() 收集条目到 _TOOL_CATALOG。
+
+    enabled_by / requires 为配置字段名（config.cfg 属性），get_merged_tools
+    按它们门控（等价旧 TOOL_*_ENABLED 开关 + key 过滤逻辑）。
+    """
+
+    def register(
+        self,
+        name: str,
+        description: str,
+        parameters: dict,
+        execute: Callable,
+        timeout: float = 10.0,
+        enabled_by: str = "",
+        requires: str = "",
+    ) -> None:
+        _TOOL_CATALOG[name] = {
+            "def": {
+                "type": "function",
+                "function": {
+                    "name": name,
+                    "description": description,
+                    "parameters": _expand_parameters(parameters),
+                },
+            },
+            "execute": execute,      # execute(args: dict) -> Any（允许同步/异步）
+            "timeout": timeout,
+            "enabled_by": enabled_by or "",
+            "requires": requires or "",
+        }
+
+
+class _ToolContext:
+    """工具注册上下文：ctx.tools 提供与插件 ctx.tools.register 相同的接口。"""
+
+    def __init__(self) -> None:
+        self.tools = _ToolRegistry()
+
+
+def _load_tool_module(index_path: str):
+    """用 importlib 加载工具目录的 index.py（每次全新执行，热重载不命中缓存）。"""
+    module_name = "tool_" + os.path.basename(
+        os.path.dirname(index_path)) + "_" + hex(abs(hash(index_path)))[2:]
+    spec = importlib.util.spec_from_file_location(module_name, index_path)
+    if spec is None or spec.loader is None:
+        raise ImportError(f"无法加载工具模块：{index_path}")
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
+def _load_tool_catalog() -> None:
+    """扫描 plugins/builtin/tools/*/index.py，调 register(ctx) 构建目录（幂等）。"""
+    global _LOADED
+    if _LOADED:
+        return
+    _LOADED = True
+    base = os.path.dirname(os.path.abspath(__file__))
+    ctx = _ToolContext()
+    for entry in sorted(os.listdir(base)):
+        index_path = os.path.join(base, entry, "index.py")
+        if not os.path.isfile(index_path):
+            continue
+        try:
+            module = _load_tool_module(index_path)
+        except Exception as e:
+            console.warn(f"[工具] 加载 {entry}/index.py 失败：{e}")
+            continue
+        register = getattr(module, "register", None)
+        if not callable(register):
+            console.warn(f"[工具] 跳过 {entry}/：index.py 缺少 register(ctx) 入口")
+            continue
+        try:
+            register(ctx)
+        except Exception as e:
+            console.warn(f"[工具] 注册 {entry}/ 失败：{e}")
+
+
+def get_tool_catalog() -> Dict[str, dict]:
+    """确保工具目录已加载并返回（name → 注册条目）。"""
+    _load_tool_catalog()
+    return _TOOL_CATALOG
+
+
+def _is_available(name: str) -> bool:
+    """按目录条目的 enabled_by / requires 元数据判断工具当前是否可用。
+
+    enabled_by：控制开关的配置字段名（如 TOOL_GET_WEATHER_ENABLED）；
+    requires：依赖的外部 key 配置字段名（如 OPENWEATHERMAP_API_KEY），
+    未配置则不可用（等价旧「无 key 的工具跳过」）。
+    """
+    entry = _TOOL_CATALOG.get(name)
+    if entry is None:
+        return False
+    if entry.get("enabled_by") and not getattr(config.cfg, entry["enabled_by"], False):
+        return False
+    if entry.get("requires") and not getattr(config.cfg, entry["requires"], ""):
+        return False
+    return True
 
 
 # ---------------------------------------------------------------------------
@@ -72,23 +164,19 @@ _LOCAL_REGISTRY = {
 def _register_local_tools() -> None:
     """把本地内置工具注册进 ToolRegistry（幂等：已注册跳过）。
 
-    handler 包一层 lambda(args) 适配注册表调用约定（handler(args: dict)），
+    handler 用目录条目的 execute（execute(args: dict)，允许同步/异步），
     不改动各工具实现本身（红线：行为 100% 不变）；toolset 统一 "local"。
     """
     from ev.agent.tool_registry import tool_registry
-    for tool_def in _LOCAL_TOOL_DEFS:
-        function = tool_def.get("function") or {}
-        name = function.get("name")
-        impl = _LOCAL_REGISTRY.get(name)
-        if not name or impl is None:
-            continue
+    for name, entry in _TOOL_CATALOG.items():
         if tool_registry.get_entry(name) is not None:
             continue
+        function = entry["def"].get("function") or {}
         tool_registry.register(
             name,
             "local",
             function,
-            handler=lambda args, impl=impl: impl(**(args or {})),
+            handler=entry["execute"],
         )
 
 
@@ -123,45 +211,14 @@ def get_merged_tools(mcp=None, toolset: str = "") -> List[dict]:
                 tools.append(tool_def)
                 existing_names.add(name)
 
-    # 本地工具：受 .env 的 TOOL_*_ENABLED 开关控制（控制中心「插件」页勾选），
-    # 无 key 的工具跳过（get_weather 依赖 key）
-    available_names = set()
-    if config.cfg.TOOL_GET_CURRENT_TIME_ENABLED:
-        available_names.add("get_current_time")
-    if config.cfg.TOOL_GET_WEATHER_ENABLED and config.cfg.OPENWEATHERMAP_API_KEY:
-        available_names.add("get_weather")
-    # load_skill / read_skill_resource 常驻（技能系统不依赖外部 key，对标 Muika），
-    # 但可被工具屋关闭
-    if config.cfg.TOOL_LOAD_SKILL_ENABLED:
-        available_names.add("load_skill")
-        available_names.add("read_skill_resource")
-    # 记忆工具跟随记忆系统开关（LLM 自行判断何时「记住/忘掉」）
-    if config.cfg.MEMORY_ENABLED:
-        available_names.add("remember_fact")
-        available_names.add("forget_memory")
-    # L2 纯文本长期记忆工具（MEMORY.md/USER.md，Hermes 式 memory 工具）
-    if config.cfg.MEMORY_CURATED_ENABLED:
-        available_names.add("memory")
-    # 屏幕视觉（截屏 + 多模态描述），不依赖外部 key
-    if config.cfg.TOOL_LOOK_SCREEN_ENABLED:
-        available_names.add("look_at_screen")
-    # 音效播放（本地 wav，无外部依赖；列表工具随播放开关）
-    if config.cfg.TOOL_PLAY_SFX_ENABLED:
-        available_names.add("play_sound_effect")
-        available_names.add("list_sound_effects")
-    # 写日记（LLM 自行判断何时记录当天，素材取 memory 会话轮次）
-    if config.cfg.TOOL_WRITE_DIARY_ENABLED:
-        available_names.add("write_diary")
-    # 会话搜索（3.7）：精确检索历史对话，默认关闭（ENABLE_SESSION_SEARCH）
-    if config.cfg.ENABLE_SESSION_SEARCH:
-        available_names.add("session_search")
-
-    # 与 MCP 工具重名的本地工具跳过（外部服务器优先，避免 LLM 调用歧义）
+    # 本地工具：目录即注册，可用性按 enabled_by/requires 门控
+    # （等价旧 TOOL_*_ENABLED 开关 + key 过滤）；与 MCP 重名跳过
+    _load_tool_catalog()
     existing_names = {t["function"]["name"] for t in tools}
-    for tool_def in _LOCAL_TOOL_DEFS:
-        name = tool_def["function"]["name"]
-        if name in available_names and name not in existing_names:
-            tools.append(tool_def)
+    for name in sorted(_TOOL_CATALOG):
+        if name in existing_names or not _is_available(name):
+            continue
+        tools.append(_TOOL_CATALOG[name]["def"])
 
     # 工具集门控（3.3）：非空 toolset 只暴露该场景内置工具；空 = 全量（旧行为）
     if toolset:
@@ -172,7 +229,7 @@ def get_merged_tools(mcp=None, toolset: str = "") -> List[dict]:
 
 
 async def call_tool(name: str, args: dict, mcp=None) -> str:
-    """执行工具调用：MCP 优先，本地兜底（对标 live-2d(2) tool-executor.js）。"""
+    """执行工具调用：MCP 优先，插件兜底，本地兜底（对标 live-2d(2) tool-executor.js）。"""
     # 工具总开关关闭 → 拒绝调用
     if not config.cfg.TOOLS_ENABLED:
         return "错误：工具系统已关闭（设置页「启动工具」未开启），无法调用工具。"
@@ -189,7 +246,8 @@ async def call_tool(name: str, args: dict, mcp=None) -> str:
             return plugin_result
 
     # 3) 本地工具：TOOL_REGISTRY 开启时走注册表（统一门控 + JSON 归一化）；
-    #    未注册（未开启或该工具未入表）回退直连旧路径（行为 100% 不变）
+    #    未注册（未开启）回退直连目录实现（行为 100% 不变）
+    _load_tool_catalog()
     if config.cfg.TOOL_REGISTRY:
         _register_local_tools()
         from ev.agent.tool_registry import tool_registry
@@ -197,40 +255,22 @@ async def call_tool(name: str, args: dict, mcp=None) -> str:
         if registry_result is not None:
             return registry_result
 
-    impl = _LOCAL_REGISTRY.get(name)
-    if impl is not None:
-        return await impl(**(args or {}))
+    entry = _TOOL_CATALOG.get(name)
+    if entry is not None:
+        result = entry["execute"](args or {})
+        if inspect.isawaitable(result):
+            result = await result
+        return result
 
     return f"错误：找不到工具「{name}」，且 MCP 服务器未提供该工具。"
 
 
 def get_local_tool_names() -> List[str]:
-    """当前可用的本地工具名列表（受 TOOL_*_ENABLED 开关与 key 过滤）。"""
-    names = set()
+    """当前可用的本地工具名列表（受 enabled_by 开关与 requires key 过滤）。"""
     if not config.cfg.TOOLS_ENABLED:
         return []
-    if config.cfg.TOOL_GET_CURRENT_TIME_ENABLED:
-        names.add("get_current_time")
-    if config.cfg.TOOL_GET_WEATHER_ENABLED and config.cfg.OPENWEATHERMAP_API_KEY:
-        names.add("get_weather")
-    if config.cfg.TOOL_LOAD_SKILL_ENABLED:
-        names.add("load_skill")
-        names.add("read_skill_resource")
-    if config.cfg.MEMORY_ENABLED:
-        names.add("remember_fact")
-        names.add("forget_memory")
-    if config.cfg.MEMORY_CURATED_ENABLED:
-        names.add("memory")
-    if config.cfg.TOOL_LOOK_SCREEN_ENABLED:
-        names.add("look_at_screen")
-    if config.cfg.TOOL_PLAY_SFX_ENABLED:
-        names.add("play_sound_effect")
-        names.add("list_sound_effects")
-    if config.cfg.TOOL_WRITE_DIARY_ENABLED:
-        names.add("write_diary")
-    if config.cfg.ENABLE_SESSION_SEARCH:
-        names.add("session_search")
-    return sorted(names)
+    _load_tool_catalog()
+    return [name for name in sorted(_TOOL_CATALOG) if _is_available(name)]
 
 
 def render_tool_guide(tools: List[dict]) -> str:

@@ -6,6 +6,8 @@ ctx 字典传入所需引用，避免闭包把 inner_loop.py 撑大。
 """
 
 import asyncio
+import copy
+import json
 import time
 
 from openai import RateLimitError
@@ -158,6 +160,20 @@ def _run_stream_drainer(ctx: dict) -> None:
                                 tool_calls_acc[index]["function"]["name"] = fn.name
                             if getattr(fn, "arguments", None):
                                 tool_calls_acc[index]["function"]["arguments"] += fn.arguments
+                        # L2-A 提前启动：arguments 已累积成合法 JSON（id+name
+                        # 齐全）即视为该工具调用完整，立即通知主循环启动执行，
+                        # 工具耗时与 LLM 后续输出并行，不等流结束再启动。
+                        entry = tool_calls_acc[index]
+                        if (entry["id"] and entry["function"]["name"]
+                                and entry["function"]["arguments"]):
+                            try:
+                                json.loads(entry["function"]["arguments"])
+                                loop.call_soon_threadsafe(
+                                    q.put_nowait,
+                                    ("__TOOL_CALL_READY__", index,
+                                     copy.deepcopy(entry)))
+                            except (json.JSONDecodeError, TypeError):
+                                pass
 
         # 429 自动等待重试：免费档服务端 1 并发限流（高峰期常触发）。
         # 按服务端 Retry-After / X-RateLimit-Reset 等待限流窗口结束后
