@@ -1,4 +1,4 @@
-﻿"""ButlerAgent + 记忆系统（L245-250 前半 + L352-374 + drain）。"""
+"""ButlerAgent + 记忆系统（L245-250 前半 + L352-374 + drain）。"""
 from __future__ import annotations
 
 import asyncio
@@ -32,7 +32,7 @@ async def setup(runtime: "RuntimeContext") -> None:
         # 上次运行时 remember/forget 失败队列（drain 期间要等 memory service
         # 就绪，所以放后台任务里）
         async def _drain_retry_after_load() -> None:
-            from plugins.builtin.tools import memory_tools
+            from plugins.builtin.tools.remember_fact import memory_tools
             # 等几帧让 mm.load() 完成 service 初始化
             await asyncio.sleep(0.5)
             try:

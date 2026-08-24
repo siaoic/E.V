@@ -1,6 +1,6 @@
 """forget_memory 工具注册（L3-C）：按关键词删除长期记忆。"""
 
-from plugins.builtin.tools.memory_tools import _forget_memory
+from plugins.builtin.tools.remember_fact.memory_tools import _forget_memory
 
 
 def register(ctx):

@@ -1,6 +1,6 @@
 """load_skill 工具注册（L3-C）：按名加载技能完整指令。"""
 
-from plugins.builtin.tools.skill_loader import _load_skill
+from plugins.builtin.tools.load_skill.skill_loader import _load_skill
 
 
 def register(ctx):

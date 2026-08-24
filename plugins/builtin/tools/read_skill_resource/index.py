@@ -1,6 +1,6 @@
 """read_skill_resource 工具注册（L3-C）：按相对路径读取技能捆绑资源。"""
 
-from plugins.builtin.tools.skill_loader import _read_skill_resource
+from plugins.builtin.tools.load_skill.skill_loader import _read_skill_resource
 
 
 def register(ctx):

@@ -1,6 +1,6 @@
 """get_current_time 工具注册（L3-C）：当前日期时间。"""
 
-from plugins.builtin.tools.time import _get_current_time
+from plugins.builtin.tools.get_current_time.time import _get_current_time
 
 
 def register(ctx):

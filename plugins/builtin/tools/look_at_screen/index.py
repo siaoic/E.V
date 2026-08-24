@@ -1,6 +1,6 @@
 """look_at_screen 工具注册（L3-C）：截图并让视觉模型描述画面。"""
 
-from plugins.builtin.tools.screen import _look_at_screen
+from plugins.builtin.tools.look_at_screen.screen import _look_at_screen
 
 
 def register(ctx):

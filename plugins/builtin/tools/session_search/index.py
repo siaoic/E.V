@@ -1,6 +1,6 @@
 """session_search 工具注册（L3-C）：精确检索历史会话消息。"""
 
-from plugins.builtin.tools.session_search import _session_search
+from plugins.builtin.tools.session_search.session_search import _session_search
 
 
 def register(ctx):

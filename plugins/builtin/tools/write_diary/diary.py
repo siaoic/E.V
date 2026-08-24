@@ -27,7 +27,7 @@ from pathlib import Path
 
 from openai import AsyncOpenAI
 
-from plugins.builtin.tools.skill_loader import _load_skill, _read_skill_resource
+from plugins.builtin.tools.load_skill.skill_loader import _load_skill, _read_skill_resource
 from plugins.builtin.tools.skills import get_skill_manager
 from ev.llm.client.factory import build_thinking_extra_body, get_async_openai_client
 from ev.utils import config, console

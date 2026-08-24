@@ -1,6 +1,6 @@
 """remember_fact 工具注册（L3-C）：保存长期记忆（固定记忆，不衰减）。"""
 
-from plugins.builtin.tools.memory_tools import _remember_fact
+from plugins.builtin.tools.remember_fact.memory_tools import _remember_fact
 
 
 def register(ctx):

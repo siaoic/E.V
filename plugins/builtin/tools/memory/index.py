@@ -1,6 +1,6 @@
 """memory 工具注册（L3-C）：纯文本长期记忆 add / replace / remove / 批量。"""
 
-from plugins.builtin.tools.curated_memory import _memory_curated
+from plugins.builtin.tools.memory.curated_memory import _memory_curated
 
 
 def register(ctx):

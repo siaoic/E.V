@@ -1,6 +1,6 @@
 """get_weather 工具注册（L3-C）：查询指定城市当前天气。"""
 
-from plugins.builtin.tools.weather import _get_weather
+from plugins.builtin.tools.get_weather.weather import _get_weather
 
 
 def register(ctx):

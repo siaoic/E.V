@@ -1,6 +1,6 @@
 """write_diary 工具注册（L3-C）：基于当天对话写日记并落盘。"""
 
-from plugins.builtin.tools.diary import _write_diary
+from plugins.builtin.tools.write_diary.diary import _write_diary
 
 
 def register(ctx):
