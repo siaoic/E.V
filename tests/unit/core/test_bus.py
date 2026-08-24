@@ -2,7 +2,7 @@
 import asyncio
 import pytest
 
-from src.core.bus import EventBus, EV_USER_INPUT, EV_AI_REPLY
+from ev.kernel.bus import EventBus, EV_USER_INPUT, EV_AI_REPLY
 
 
 class TestSubscribe:
@@ -187,3 +187,48 @@ class TestWildcard:
             assert got == ["ok"]
 
         asyncio.run(_inner())
+
+
+# ---- 新增: subscribers() 方法 & 全局单例共享 ----
+
+async def _noop_a(ev): pass
+async def _noop_b(ev): pass
+
+def test_eventbus_subscribers_count():
+    bus = EventBus()
+    async def a(x): ...
+    async def b(x): ...
+    async def c(x): ...
+    # 精确订阅
+    bus.subscribe("user_input", a)
+    bus.subscribe("user_input", b)
+    bus.subscribe("ai_reply", c)
+    # 通配订阅
+    bus.subscribe("speaking_*", a)
+    info = bus.subscribers()
+    assert info["user_input"] == 2
+    assert info["ai_reply"] == 1
+    assert info["speaking_*"] == 1
+    # unsubscribe
+    bus.unsubscribe("user_input", a)
+    assert bus.subscribers()["user_input"] == 1
+
+def test_eventbus_global_singleton_with_local_is_shared():
+    """Kernel 引用 self.event_bus = 全局 bus；确认两边 emit/sub 互通。"""
+    # 模拟 Kernel 直接引用全局单例（是同一个对象引用）
+    from ev.kernel.bus import bus as global_bus
+    class MockKernel:
+        event_bus = global_bus
+    k = MockKernel()
+    assert k.event_bus is global_bus  # 是同一个引用
+    # 一边订阅、另一边 emit 可收到（用临时 handler）
+    records = []
+    async def handler(payload):
+        records.append(payload)
+    try:
+        global_bus.subscribe("_test_bus_shared", handler)
+        # kernel 侧 emit
+        asyncio.run(k.event_bus.emit("_test_bus_shared", "hello"))
+        assert records == ["hello"]
+    finally:
+        global_bus.unsubscribe("_test_bus_shared", handler)

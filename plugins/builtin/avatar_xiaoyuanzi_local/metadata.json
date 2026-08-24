@@ -1,0 +1,7 @@
+{
+  "name": "avatar_xiaoyuanzi_local",
+  "version": "0.1.0",
+  "description": "小院子本地化 Avatar 骨架（启动本地 exe + WebSocket 通信）。注册 SlotName.avatar → impl=xiaoyuanzi-local",
+  "main": "register.py",
+  "tags": ["avatar", "skeleton", "xiaoyuanzi"]
+}

@@ -1,7 +1,7 @@
 """Agent 沙箱单元测试：路径越界 / 高风险门禁 / 文件名清理。"""
 import pytest
 
-from src.agent.sandbox import Sandbox, SandboxViolation, HIGH_RISK_TOOLS
+from ev.agent.sandbox import Sandbox, SandboxViolation, HIGH_RISK_TOOLS
 
 
 @pytest.fixture

@@ -13,7 +13,7 @@ from PySide6.QtWidgets import (
 
 from tools.memory import memory
 from tools.memory.memory_graph import _display_user
-from src.utils import config
+from ev.utils import config
 from ui.dialogs.memory_list import MemoryListDialog
 from ui.pages.plugins_page import _clear_layout
 from ui.widgets.role_card import _RoleCard

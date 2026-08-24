@@ -6,8 +6,8 @@ import json
 
 import pytest
 
-from src.agent.executor import ToolExecutor
-from src.agent.sandbox import Sandbox
+from ev.agent.executor import ToolExecutor
+from ev.agent.sandbox import Sandbox
 
 
 def _echo(sandbox, **kwargs):
@@ -39,7 +39,7 @@ class TestSchemaFilter:
     async def test_required_missing_still_reports(self, tmp_path):
         """必要参数缺失仍走 TypeError 提示路径（过滤后为空参 → 具名必填参数报错）。"""
         sandbox = Sandbox(root=str(tmp_path))
-        from src.agent.tools import build_builtin_tools
+        from ev.agent.tools import build_builtin_tools
         executor = ToolExecutor(build_builtin_tools(), sandbox)
         out = await executor.execute("write_file", {"mode": "force"})
         assert "参数错误" in out
@@ -51,7 +51,7 @@ class TestAliasMapping:
     async def test_filepath_maps_to_path(self, tmp_path):
         """write_file 幻觉 filepath 参数 → 映射为 path。"""
         sandbox = Sandbox(root=str(tmp_path))
-        from src.agent.tools import build_builtin_tools
+        from ev.agent.tools import build_builtin_tools
         executor = ToolExecutor(build_builtin_tools(), sandbox)
         out = await executor.execute("write_file", {"filepath": "a.txt", "content": "hello"})
         assert "已写入" in out
@@ -60,7 +60,7 @@ class TestAliasMapping:
     async def test_alias_not_override_existing(self, tmp_path):
         """规范参数已提供时，别名键不覆盖。"""
         sandbox = Sandbox(root=str(tmp_path))
-        from src.agent.tools import build_builtin_tools
+        from ev.agent.tools import build_builtin_tools
         executor = ToolExecutor(build_builtin_tools(), sandbox)
         out = await executor.execute("write_file", {"path": "a.txt", "filepath": "b.txt", "content": "x"})
         assert "已写入" in out

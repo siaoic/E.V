@@ -1,0 +1,7 @@
+{
+  "name": "tts_gpt_sovits",
+  "version": "0.1.0",
+  "description": "GPT-SoVITS TTS 骨架。同时满足 SubtitleServer 功能的占位实现。",
+  "main": "register.py",
+  "tags": ["tts", "skeleton", "gptsovits"]
+}

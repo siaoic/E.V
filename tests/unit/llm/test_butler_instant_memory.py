@@ -3,7 +3,7 @@
 只测 _instant_memory_entries（确定性规则，不触网、不依赖配置），
 覆盖捕获、归属、防误捕获（否定/弱宾语/lore 泄漏/AI 自述）三类行为。
 """
-from src.llm.butler_agent import _instant_memory_entries
+from ev.llm.butler_agent import _instant_memory_entries
 
 
 def _turns(*contents):

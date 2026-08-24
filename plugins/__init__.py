@@ -3,7 +3,7 @@
 插件框架、插件本体、本地工具统一放在 plugins/：
   - 框架：base.py / context.py / manager.py（本模块导出）
   - 插件本体：plugins/<插件名>/（metadata.json + index.py，见 example/）
-  - 本地工具：plugins/tools/（Function Calling 工具包）
+  - 本地工具：plugins/builtin/tools/（Function Calling 工具包）
 启用状态由 plugins/enabled_plugins.json 控制。
 
 用法：

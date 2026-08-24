@@ -1,0 +1,7 @@
+{
+  "name": "subtitle_server",
+  "version": "0.1.0",
+  "description": "字幕服务器骨架（SSE 推流）。注册 SlotName.ui → impl=subtitle-sse",
+  "main": "register.py",
+  "tags": ["ui", "skeleton"]
+}

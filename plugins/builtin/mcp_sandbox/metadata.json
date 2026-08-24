@@ -1,0 +1,7 @@
+{
+  "name": "mcp_sandbox",
+  "version": "0.1.0",
+  "description": "MCP Client + Safe Sandbox 二合一骨架。",
+  "main": "register.py",
+  "tags": ["mcp", "sandbox", "skeleton"]
+}

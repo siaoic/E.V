@@ -1,0 +1,89 @@
+name: full
+description: 全功能模式：桌宠 + 直播 + MCP + 管家 + 长期记忆 + 主动交互 + 进化学习。生产环境谨慎开启。
+version: 5.0
+
+# 注意：T3 Profile.resolve 当前只支持单 extends（字符串），不支持 list 多继承。
+# 为避免解析失败，这里直接内联 live_bili + mcp_sandbox 的全部插件与配置，
+# 再叠加 butler_smart。语义等价于：extends = [live_bili.yaml, mcp_sandbox.yaml] + 新增。
+
+plugins:
+  builtin:
+    # 来自 live_bili
+    - echo_llm
+    - tts_edge
+    - avatar_xiaoyuanzi_local
+    - danmaku_bilibili
+    - danmaku_filter
+    - memory_long
+    - emotion_rule
+    - proactive_tick
+    # 来自 mcp_sandbox
+    - mcp_client
+    - sandbox_safe
+    - evolution_day1
+    # 新增 butler
+    - butler_smart
+  pypi: []
+  git: []
+
+slots:
+  # live_bili 部分
+  model: echo-default
+  tts: edge
+  avatar: xiaoyuanzi-local
+  input: bilibili-danmaku
+  danmaku: bilibili
+  memory: longterm
+  emotion: rule-based
+  proactive: ticker
+  # mcp_sandbox 部分
+  mcp: official-client
+  sandbox: safe-sandbox
+  evolution: day1-trace
+  # 新增 butler
+  butler: smart-butler
+
+plugin_config:
+  # live_bili 继承来的配置
+  danmaku_bilibili:
+    impl_name: bilibili
+    room_id: ${BILI_ROOM_ID:-0}
+    sessdata: ${BILI_SESSDATA:-}
+    buvid3: ${BILI_BUVID3:-}
+  danmaku_filter:
+    min_length: 2
+    blacklist:
+      - "签到"
+      - "前排"
+    allow_gifts: true
+  memory_long:
+    impl_name: longterm
+    top_k: 8
+  proactive_tick:
+    impl_name: ticker
+    interval_sec: 120
+    prefix: "自言自语："
+  # mcp_sandbox 继承来的配置
+  mcp_client:
+    impl_name: official-client
+    servers:
+      filesystem:
+        command: npx
+        args: ["-y", "@modelcontextprotocol/server-filesystem", "${HOME}/Downloads"]
+      time:
+        command: python
+        args: ["-m", "mcp_server_time"]
+  sandbox_safe:
+    impl_name: safe-sandbox
+    allow_network: false
+    allow_file_write: false
+    memory_limit_mb: 256
+    time_limit_sec: 30
+  evolution_day1:
+    impl_name: day1-trace
+    session_log_dir: ${EVOLUTION_LOG_DIR:-./data/evolution}
+  # 新增 butler
+  butler_smart:
+    impl_name: smart-butler
+    schedule_refresh_min: 15
+    todo_priority_cap: 3

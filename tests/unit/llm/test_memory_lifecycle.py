@@ -7,7 +7,7 @@ from types import SimpleNamespace
 
 import pytest
 
-from src.llm.memory.lifecycle import LifecycleEngine
+from ev.llm.memory.lifecycle import LifecycleEngine
 
 
 # ---------- 替身 ----------

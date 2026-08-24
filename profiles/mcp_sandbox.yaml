@@ -1,0 +1,42 @@
+name: mcp_sandbox
+description: 开发者模式：加载 MCP servers + 启用代码沙箱。禁止在未隔离环境直接使用。
+version: 5.0
+
+plugins:
+  builtin:
+    - echo_llm
+    - tts_edge
+    - mcp_client
+    - sandbox_safe
+    - evolution_day1
+  pypi:
+    # （Task17 安装前先注释/占位）—— 以下保留作参考：
+    # - "ev-plugin-mcp-fs==1.0.0"
+  git: []
+
+slots:
+  model: echo-default
+  tts: edge
+  mcp: official-client
+  sandbox: safe-sandbox
+  evolution: day1-trace
+
+plugin_config:
+  mcp_client:
+    impl_name: official-client
+    servers:
+      filesystem:
+        command: npx
+        args: ["-y", "@modelcontextprotocol/server-filesystem", "${HOME}/Downloads"]
+      time:
+        command: python
+        args: ["-m", "mcp_server_time"]
+  sandbox_safe:
+    impl_name: safe-sandbox
+    allow_network: false
+    allow_file_write: false
+    memory_limit_mb: 256
+    time_limit_sec: 30
+  evolution_day1:
+    impl_name: day1-trace
+    session_log_dir: ${EVOLUTION_LOG_DIR:-./data/evolution}

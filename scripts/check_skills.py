@@ -88,7 +88,7 @@ def main(argv: list[str]) -> int:
     # 技能根目录也可由 .env SKILLS_DIR 配置（逗号分隔，相对项目根）
     if not argv:
         try:
-            from src.utils import config
+            from ev.utils import config
             for seg in (config.cfg.SKILLS_DIR or "").split(","):
                 seg = seg.strip()
                 if seg:

@@ -1,4 +1,4 @@
-"""ToolRegistry 单元测试（对标 Hermes tools/registry.py 验证点）。
+﻿"""ToolRegistry 单元测试（对标 Hermes tools/registry.py 验证点）。
 
 覆盖 3.2 升级验证点：
 - 注册 / 跨 toolset 重名拒绝 / override 显式许可；
@@ -13,7 +13,7 @@ import time
 
 import pytest
 
-from src.agent.tool_registry import ToolRegistry, tool_registry
+from ev.agent.tool_registry import ToolRegistry, tool_registry
 
 
 def make_registry() -> ToolRegistry:
@@ -126,7 +126,7 @@ class TestCheckFn:
         assert reg.is_available("a") is True
         state["good"] = False
         # 推进时间超过宽限期 → 放行过期，开始拒绝
-        from src.agent import tool_registry as tr_module
+        from ev.agent import tool_registry as tr_module
         monkeypatch.setattr(tr_module, "_GATE_GRACE", 0.0)
         monkeypatch.setattr(tr_module, "_GATE_CACHE_TTL", 0.0)  # 同时让 TTL 缓存失效
         assert reg.is_available("a") is False
@@ -217,8 +217,8 @@ class TestDefinitions:
 
 class TestModuleSingleton:
     def test_singleton_registered_local_tools(self):
-        # plugins.tools 的 _register_local_tools 会把内置工具注册进单例
-        from plugins.tools import _register_local_tools
+        # plugins.builtin.tools 的 _register_local_tools 会把内置工具注册进单例
+        from plugins.builtin.tools import _register_local_tools
         _register_local_tools()
         names = tool_registry.get_all_tool_names()
         assert "get_current_time" in names

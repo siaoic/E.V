@@ -1,0 +1,8 @@
+{
+  "name": "echo_llm",
+  "version": "1.0.0",
+  "description": "Echo LLM 演示插件：chat_stream 原样回显用户文本，用于 Kernel 演示",
+  "author": "E.V Core",
+  "main": "register.py",
+  "tags": ["demo", "llm"]
+}

@@ -14,10 +14,33 @@ pytestmark = pytest.mark.skipif(
 
 @pytest.fixture
 def memu_importable():
-    """把 memU 引擎源码目录加入 sys.path（与 tools/memory/memory.py 一致）。"""
+    """把 memU 引擎源码目录加入 sys.path（与 tools/memory/memory.py 一致）。
+
+    并重置 schema._MODEL_CACHE + models 模块：其他测试（如 test_agent_loop）
+    可能用不同 scope 类触发 build_sqlite_table_model，导致同一 Column 对象
+    重复绑定到同名 Table（"Column 'url' already assigned"）。
+    通过 importlib.reload 重建模型类 → 生成全新的 Column 实例。
+    """
+    import importlib
     if str(_MEMU_SRC) not in sys.path:
         sys.path.insert(0, str(_MEMU_SRC))
-    return _MEMU_SRC
+    # 清缓存 + reload models 模块 → Column 对象重建
+    try:
+        from memu.database.sqlite import schema, models
+        schema._MODEL_CACHE.clear()
+        importlib.reload(models)
+        importlib.reload(schema)
+    except Exception:
+        pass
+    yield _MEMU_SRC
+    # teardown 再清一次
+    try:
+        from memu.database.sqlite import schema, models
+        schema._MODEL_CACHE.clear()
+        importlib.reload(models)
+        importlib.reload(schema)
+    except Exception:
+        pass
 
 
 def _make_old_db(path: Path) -> None:

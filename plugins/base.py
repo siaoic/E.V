@@ -8,9 +8,16 @@
 # 钩子名白名单（3.11）：PluginContext.register_hook 只接受名单内的钩子名，
 # 防止插件注册任意回调名导致的事件分发混乱
 VALID_HOOKS = frozenset({
+    # 原有 10 个
     "on_init", "on_start", "on_stop", "on_destroy",
     "on_user_input", "on_llm_request", "on_llm_response",
     "on_tts_text", "on_tts_start", "on_tts_end",
+    # 新增 7 个
+    "on_slot_activate",
+    "on_session_start", "on_session_end",
+    "on_danmaku",
+    "on_emotion_decide", "on_proactive_decide",
+    "on_config_reload",
 })
 
 
@@ -53,6 +60,28 @@ class Plugin:
 
     async def on_tts_end(self) -> None:
         """语音播放结束。"""
+
+    # ---- 新增钩子 ----
+    async def on_slot_activate(self, event) -> None:
+        """Slot 切换：旧实现卸载、新实现装载。"""
+
+    async def on_session_start(self) -> None:
+        """会话开始：用户建立会话上下文。"""
+
+    async def on_session_end(self) -> None:
+        """会话结束：清理会话级资源。"""
+
+    async def on_danmaku(self, event) -> None:
+        """弹幕到达：跨平台统一格式。"""
+
+    async def on_emotion_decide(self, event) -> None:
+        """情绪分类决策：可修改 decided 覆盖默认结果。"""
+
+    async def on_proactive_decide(self, event) -> None:
+        """主动对话决策：插件可干预主动发起的触发。"""
+
+    async def on_config_reload(self, new_config) -> None:
+        """配置热更新：接收新配置字典。"""
 
     # ---- 工具 ----
     def get_tools(self) -> list:
@@ -106,3 +135,33 @@ class LLMResponseEvent:
 
     def __init__(self, text: str) -> None:
         self.text = text
+
+
+class SlotActivateEvent:
+    """Slot 切换事件：插件可用于释放旧资源/建立新连接。"""
+
+    def __init__(self, slot_name: str, old_impl, new_impl) -> None:
+        self.slot_name = slot_name    # SlotName.value（字符串）
+        self.old_impl = old_impl      # 旧实现实例（可能 None）
+        self.new_impl = new_impl      # 新实现实例
+
+
+class DanmakuEvent:
+    """弹幕到达事件：统一格式（跨任何弹幕源一致）。"""
+
+    def __init__(self, item: dict) -> None:
+        # item 字段约定: user_name, user_id, content, source(平台名), room_id, timestamp
+        self.item = item
+        # 便捷属性
+        self.user_name = item.get("user_name", "")
+        self.content = item.get("content", "")
+        self.source = item.get("source", "")
+
+
+class EmotionDecideEvent:
+    """情绪分类决策事件：插件可覆盖默认分类器或干预 decided 结果。"""
+
+    def __init__(self, text: str, emotion_candidates: list[tuple[str, float]], decided: str | None = None) -> None:
+        self.text = text
+        self.emotion_candidates = emotion_candidates  # [(name, score)] 有序
+        self.decided = decided   # 钩子可修改: plugin 钩子赋值 decided 后终止分类

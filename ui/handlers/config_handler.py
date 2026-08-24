@@ -5,7 +5,7 @@ import os
 from PySide6.QtCore import QProcess, QTimer
 from PySide6.QtWidgets import QMessageBox
 
-from src.utils import config, console
+from ev.utils import config, console
 from ui.utils import env_helpers
 
 

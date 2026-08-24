@@ -6,8 +6,8 @@ import os
 from PySide6.QtCore import QProcess, Qt
 from PySide6.QtWidgets import QGridLayout, QLabel
 
-from src.pet.emotion_actor import scan_model3
-from src.pet.motion_files import (
+from ev.pet.emotion_actor import scan_model3
+from ev.pet.motion_files import (
     _MOTION_FILE_GROUP, _motion_base_name, _scan_motion_files)
 from ui.utils.constants import EMOTIONS, _DRAG_MIME_EXPR, _DRAG_MIME_MOTION
 from ui.widgets.drag_button import _DragButton

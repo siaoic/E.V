@@ -1,7 +1,7 @@
 """抖动退避（3.13）单测：数值分布 / 递增 / 上限 / 去相关。"""
 import random
 
-from src.utils.retry_utils import jittered_backoff
+from ev.utils.retry_utils import jittered_backoff
 
 
 class TestJitteredBackoff:

@@ -12,7 +12,7 @@ import importlib.util
 import json
 import os
 
-from src.utils import config, console
+from ev.utils import config, console
 
 
 def _normalize(path: str) -> str:
@@ -23,6 +23,34 @@ def _normalize(path: str) -> str:
 # ==================== 插件目录与启用列表的公共文件操作 ====================
 # 主程序（PluginManager）与控制中心（plugin_handler）是两个进程，
 # 都直接读写 plugins/ 目录，这里统一文件 IO，避免逻辑分叉。
+#
+# 瘦身 6.1：优先读写 configs/plugins/{enabled,disabled}.json（双文件），
+# 同时读写旧路径 plugins/enabled_plugins.json（单文件）保持兼容。
+_CONFIGS_PLUGIN_DIR = os.path.join(
+    os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
+    "configs", "plugins")
+_CONFIGS_ENABLED_JSON = os.path.join(_CONFIGS_PLUGIN_DIR, "enabled.json")
+_CONFIGS_DISABLED_JSON = os.path.join(_CONFIGS_PLUGIN_DIR, "disabled.json")
+
+
+def _read_json_plugins(path: str) -> set:
+    """读取一个 {"plugins": [...]} JSON 文件并归一化去重；损坏/缺失返空集。"""
+    if not os.path.isfile(path):
+        return set()
+    try:
+        with open(path, "r", encoding="utf-8") as f:
+            data = json.load(f)
+    except (OSError, ValueError):
+        return set()
+    return {_normalize(p) for p in data.get("plugins", [])}
+
+
+def _write_json_plugins(path: str, plugins) -> None:
+    """写 {"plugins": [...]}；自动建上级目录。"""
+    os.makedirs(os.path.dirname(path), exist_ok=True)
+    data = {"plugins": sorted(_normalize(p) for p in plugins)}
+    with open(path, "w", encoding="utf-8") as f:
+        json.dump(data, f, ensure_ascii=False, indent=2)
 
 def tool_name(tool_def) -> str | None:
     """兼容两种工具格式的取名：{name} 或 {function: {name}}。"""
@@ -50,29 +78,47 @@ def scan_plugin_dirs(plugins_dir: str) -> dict:
 def load_plugin_sets(plugins_dir: str) -> tuple:
     """读取启用/禁用相对路径集合：(enabled, disabled)（缺失/损坏返回空集）。
 
+    优先读 configs/plugins/{enabled,disabled}.json（新双文件格式）；
+    与旧格式 plugins/enabled_plugins.json 做并集，保证迁移无遗漏。
     plugins 为 opt-in 启用清单；disabled 为显式禁用清单（禁用后移入，
     永不因自动登记重新启用）。相对路径统一正斜杠。
     """
-    path = os.path.join(plugins_dir, "enabled_plugins.json")
-    if not os.path.isfile(path):
-        return set(), set()
-    try:
-        with open(path, "r", encoding="utf-8") as f:
-            data = json.load(f)
-        enabled = {_normalize(p) for p in data.get("plugins", [])}
-        disabled = {_normalize(p) for p in data.get("disabled", [])}
-        return enabled, disabled
-    except (OSError, ValueError):
-        return set(), set()
+    enabled = set()
+    disabled = set()
+    # 1) 新目录双文件
+    enabled |= _read_json_plugins(_CONFIGS_ENABLED_JSON)
+    disabled |= _read_json_plugins(_CONFIGS_DISABLED_JSON)
+    # 2) 旧格式单文件 fallback（包含 enabled 主表 + 内嵌 disabled 扩展）
+    old_path = os.path.join(plugins_dir, "enabled_plugins.json")
+    if os.path.isfile(old_path):
+        try:
+            with open(old_path, "r", encoding="utf-8") as f:
+                data = json.load(f)
+            enabled |= {_normalize(p) for p in data.get("plugins", [])}
+            disabled |= {_normalize(p) for p in data.get("disabled", [])}
+        except (OSError, ValueError):
+            pass
+    return enabled, disabled
 
 
 def save_plugin_sets(plugins_dir: str, enabled, disabled=None) -> None:
-    """写入启用/禁用清单（空禁用清单不写字段，保持旧文件格式兼容）。"""
-    path = os.path.join(plugins_dir, "enabled_plugins.json")
-    data = {"plugins": sorted(_normalize(p) for p in enabled)}
+    """写入启用/禁用清单：双写新目录 + 旧目录，保持两边同步。
+
+    空禁用清单不写入旧单文件的 disabled 字段（保持原格式兼容）。
+    """
+    enabled_norm = sorted(_normalize(p) for p in enabled)
+    disabled_norm = sorted(_normalize(p) for p in disabled) if disabled else []
+    # 新目录双文件
+    _write_json_plugins(_CONFIGS_ENABLED_JSON, enabled_norm)
+    if disabled is not None:
+        _write_json_plugins(_CONFIGS_DISABLED_JSON, disabled_norm)
+    # 旧格式单文件
+    old_path = os.path.join(plugins_dir, "enabled_plugins.json")
+    os.makedirs(os.path.dirname(old_path) or ".", exist_ok=True)
+    data = {"plugins": enabled_norm}
     if disabled:
-        data["disabled"] = sorted(_normalize(p) for p in disabled)
-    with open(path, "w", encoding="utf-8") as f:
+        data["disabled"] = disabled_norm
+    with open(old_path, "w", encoding="utf-8") as f:
         json.dump(data, f, ensure_ascii=False, indent=2)
 
 
@@ -91,8 +137,10 @@ def save_enabled_plugins(plugins_dir: str, plugins) -> None:
 class PluginManager:
     """插件生命周期与钩子分发中心。app 为 Application 实例（run 时注入）。"""
 
-    def __init__(self, app, plugins_dir: str | None = None) -> None:
+    def __init__(self, app=None, plugins_dir: str | None = None, kernel=None) -> None:
+        """app 为 Application / RuntimeContext；kernel 为 5.0 Kernel 实例（5.0 外旧路径可为 None）。"""
         self.app = app
+        self.kernel = kernel   # 新增：None = 4.x 路径；有值 = 5.0 路径（Profile 驱动）
         # 插件目录即本包目录：example/ 等插件、enabled_plugins.json 与框架代码同处
         self.plugins_dir = plugins_dir or os.path.join(
             config.cfg.PROJECT_ROOT, "plugins")
@@ -105,6 +153,9 @@ class PluginManager:
         self._event_handlers: dict = {}          # 事件名 -> [(插件名, handler)]
         self._memory_providers: dict = {}        # 插件名 -> 记忆 provider（3.11）
         self._dispatching_llm_request = False    # 防 on_llm_request 递归调 LLM
+        # 新增：子命令注册表（register_subcommand 写入）
+        if not hasattr(self, "_subcommands"):
+            self._subcommands: dict[str, dict] = {}
 
     # ==================== enabled_plugins.json ====================
 
@@ -155,8 +206,69 @@ class PluginManager:
 
     # ==================== 加载 / 卸载 / 热重载 ====================
 
+    async def load_by_profile(self, profile: dict) -> None:
+        """按 profile.plugins 加载插件（5.0 路径）。builtin 插件按目录加载；pypi/git 留 stub（Task17 安装）。"""
+        plugins_cfg: dict = profile.get("plugins", {}) if isinstance(profile, dict) else {}
+        builtin_names: list[str] = list(plugins_cfg.get("builtin", []) or [])
+
+        # 收集候选目录：内建根 plugins/（self.plugins_dir）+ 用户根（DATA_ROOT/plugins）
+        candidate_roots: list[str] = [self.plugins_dir]
+        user_dir = self._user_plugins_dir()
+        if user_dir and user_dir not in candidate_roots:
+            candidate_roots.append(user_dir)
+        # 也加上 ~/.ev/plugins（Task17 ev plugin add 目标目录）
+        import os as _os
+        ev_user = _os.path.expanduser("~/.ev/plugins")
+        if _os.path.isdir(ev_user) and ev_user not in candidate_roots:
+            candidate_roots.append(ev_user)
+
+        loaded_count = 0
+        for name in builtin_names:
+            found_path: str | None = None
+            for root in candidate_roots:
+                maybe = _os.path.join(root, name)
+                if _os.path.isdir(maybe) and _os.path.isfile(_os.path.join(maybe, "metadata.json")):
+                    found_path = maybe
+                    break
+            # 兼容 plugins/builtin/<name>/ 子目录（echo_llm/llm_openai_compat 放在 builtin 子目录）
+            if found_path is None:
+                for root in candidate_roots:
+                    maybe = _os.path.join(root, "builtin", name)
+                    if _os.path.isdir(maybe) and _os.path.isfile(_os.path.join(maybe, "metadata.json")):
+                        found_path = maybe
+                        break
+            if found_path is None:
+                console.warn(f"[插件] 找不到 profile 声明的内建插件目录：{name}（已搜索 {candidate_roots}）")
+                continue
+            try:
+                result = await self.load(found_path)   # 复用原 load(plugin_dir) 返回插件名或 None；成功则计数
+                if result is not None:
+                    loaded_count += 1
+            except Exception as e:
+                console.warn(f"[插件] 按 profile 加载 {name} 失败：{e}")
+
+        # pypi/git 远端：当前 stub，等待 Task17
+        remote_count = len(plugins_cfg.get("pypi", [])) + len(plugins_cfg.get("git", []))
+        if remote_count > 0:
+            console.warn(f"[插件] 共 {remote_count} 项远端插件（pypi/git）需等待 Task17 实现，本次跳过")
+
+        console.dim(f"[插件] profile 驱动加载完成：{loaded_count}/{len(builtin_names)} 个内建插件")
+
     async def load_all(self) -> None:
-        """加载 plugins/ 下所有插件（新插件目录自动登记启用，丢目录即用）。"""
+        """有 kernel 且 kernel 有 resolved profile → 走 profile；否则走旧路径（enabled_plugins.json）。"""
+        if self.kernel is not None:
+            try:
+                prof = self.kernel.profile  # Kernel.profile 属性会自动 resolve
+                if isinstance(prof, dict) and prof.get("plugins"):
+                    await self.load_by_profile(prof)
+                    return
+            except Exception as e:
+                console.warn(f"[插件] profile 驱动加载失败，回退旧路径：{e}")
+        # 回退：旧路径（enabled_plugins.json + 自动登记）
+        await self._load_all_legacy()
+
+    async def _load_all_legacy(self) -> None:
+        """旧 load_all 逻辑：扫描 plugins 目录 + enabled_plugins.json + 自动登记新目录。"""
         self._load_enabled_list()
         plugin_dirs = self._scan_all_plugin_dirs()
         self._auto_register_new(plugin_dirs)
@@ -187,11 +299,13 @@ class PluginManager:
             rel_root = self._user_plugins_dir()
         rel = _normalize(os.path.relpath(plugin_dir, rel_root))
 
-        self._load_enabled_list()
-        if rel in self._disabled:
-            return None      # 显式禁用：跳过
-        if rel not in self._enabled:
-            return None      # 未启用：跳过
+        # profile 路径（kernel 存在）：不依赖 enabled_plugins.json，profile 声明即启用
+        if self.kernel is None:
+            self._load_enabled_list()
+            if rel in self._disabled:
+                return None      # 显式禁用：跳过
+            if rel not in self._enabled:
+                return None      # 未启用：跳过
         if name in self._plugins:
             return None      # 已加载：跳过
 
@@ -203,6 +317,51 @@ class PluginManager:
         from plugins.base import Plugin
         from plugins.context import PluginContext
         module = self._load_module(main_path)
+
+        # ---- 5.0 新风格：如果 module 顶层有 register(ctx) 函数 → 调用 ----
+        if hasattr(module, "register") and callable(module.register):
+            try:
+                # 创建 PluginContext（复用旧的 context 构造）
+                ctx = PluginContext(self, plugin_dir, name)
+                # （context.slots / jobs / session / config 已由 context.py 的
+                #  5.0 属性自动从 self.kernel 读取，无需手动注入）
+                # 把 context 的 self._plugin_config 先尝试加载旧 plugin_config.json（如果目录里有）
+                pc_path = os.path.join(plugin_dir, "plugin_config.json")
+                if os.path.isfile(pc_path):
+                    try:
+                        with open(pc_path, "r", encoding="utf-8") as f:
+                            ctx._plugin_config = json.load(f)
+                    except Exception:
+                        ctx._plugin_config = {}
+                # 调用 register(ctx)
+                module.register(ctx)
+                # 记录：作为"已加载"放入 self._plugins（让 list/info 命令能查到）
+                # 为了让 start_all/钩子分发/unload 等旧逻辑不经修改就能兼容，
+                # 这里不再把 plugin 写成 None，而是存一个继承 Plugin 的 Noop 空实例
+                # （基类 Plugin 已实现所有 17 个钩子的空 stub）
+                class _NoopPlugin(Plugin):
+                    """register(function) 风格插件专属的 Plugin 占位桩，避免 plugin=None 导致
+                    start_all/钩子分发/unload_all 出现 AttributeError。"""
+                    pass
+                _noop = _NoopPlugin()
+                _noop.context = ctx
+                _noop.metadata = metadata
+                self._plugins[name] = {
+                    "plugin": _noop,
+                    "metadata": metadata,
+                    "dir": plugin_dir,
+                    "rel": rel,
+                    "register_style": "function",
+                }
+                console.dim(
+                    f"[插件] 已加载（register 风格）："
+                    f"{metadata.get('displayName') or name} v{metadata.get('version', '?')}")
+                return name   # 成功：返回插件名
+            except Exception as e:
+                raise RuntimeError(
+                    f"插件 {name} (register 风格) 初始化失败：{e}") from e
+        # ---- 旧风格：找 Plugin 子类（原逻辑保持一字不动）----
+
         plugin_class = self._find_plugin_class(module, Plugin)
         context = PluginContext(self, plugin_dir, name)
         # 插件自身配置 plugin_config.json（可选）
@@ -215,8 +374,7 @@ class PluginManager:
                 context._plugin_config = {}
 
         # 3.11 可选编程式注册入口：插件包内声明 register(ctx) 即可用
-        # context 编程式注册工具 / 钩子 / 记忆 provider（与 metadata 声明
-        # 方式兼容共存；异常隔离，不影响插件本身与主程序）
+        # （走到这里说明未命中新风格，兼容保留：共存式温和调用，异常只打警告）
         register_fn = getattr(module, "register", None)
         if callable(register_fn):
             try:
@@ -445,6 +603,73 @@ class PluginManager:
                 await entry["plugin"].on_tts_end()
             except Exception as e:
                 console.warn(f"[插件] on_tts_end 错误（{name}）：{e}")
+
+    # ==================== 钩子分发（新增 7 个 + 通用 dispatch） ====================
+
+    async def dispatch_hook(self, name: str, *args, **kwargs):
+        """通用钩子分发：按名字 getattr 调用（兼容 17 个钩子全部）。
+
+        支持 plugin=Plugin 子类实例（旧风格）以及通过事件总线编程式注册
+        的 handler（register_hook → on() → emit 路径）。register 风格
+        插件无 Plugin 实例，其钩子通过 register_hook 注册到事件总线
+        后走同名事件分发（此处同步转发一份到 emit 路径）。
+        """
+        # 1) Plugin 子类实例：getattr 调用
+        for pname, entry in list(self._plugins.items()):
+            plugin = entry.get("plugin")
+            if plugin is None:
+                continue
+            fn = getattr(plugin, name, None)
+            if fn is None or not callable(fn):
+                continue
+            try:
+                ret = fn(*args, **kwargs)
+                if asyncio.iscoroutine(ret):
+                    ret = await ret
+                # on_tts_text 链式：返回字符串时作为下一个插件的第一参数
+                if name == "on_tts_text" and isinstance(ret, str):
+                    if args:
+                        args = (ret,) + tuple(args[1:])
+            except Exception as e:
+                console.warn(f"[插件] {name} 错误（{pname}）：{e}")
+        # 2) 编程式注册钩子（register_hook → on() 事件总线）：按同名事件分发
+        #    这样 register 风格插件通过 ctx.register_hook 注册的回调也能被
+        #    dispatch_hook 命中
+        if self._event_handlers.get(name):
+            data = args[0] if len(args) == 1 else (args if args else kwargs)
+            await self.emit(name, data)
+        # 3) on_tts_text 的返回值：当只有一个 arg（text）时返回链式结果
+        if name == "on_tts_text" and len(args) >= 1:
+            return args[0]
+        return None
+
+    async def run_slot_activate_hooks(self, event) -> None:
+        """执行所有插件的 on_slot_activate（Slot 切换事件）。"""
+        await self.dispatch_hook("on_slot_activate", event)
+
+    async def run_session_start_hooks(self) -> None:
+        """执行所有插件的 on_session_start（会话开始）。"""
+        await self.dispatch_hook("on_session_start")
+
+    async def run_session_end_hooks(self) -> None:
+        """执行所有插件的 on_session_end（会话结束）。"""
+        await self.dispatch_hook("on_session_end")
+
+    async def run_danmaku_hooks(self, event) -> None:
+        """执行所有插件的 on_danmaku（弹幕到达）。"""
+        await self.dispatch_hook("on_danmaku", event)
+
+    async def run_emotion_decide_hooks(self, event) -> None:
+        """执行所有插件的 on_emotion_decide（情绪分类决策）。"""
+        await self.dispatch_hook("on_emotion_decide", event)
+
+    async def run_proactive_decide_hooks(self, event) -> None:
+        """执行所有插件的 on_proactive_decide（主动对话决策）。"""
+        await self.dispatch_hook("on_proactive_decide", event)
+
+    async def run_config_reload_hooks(self, new_config: dict) -> None:
+        """执行所有插件的 on_config_reload（配置热更新）。"""
+        await self.dispatch_hook("on_config_reload", new_config)
 
     # ==================== 工具聚合 ====================
 

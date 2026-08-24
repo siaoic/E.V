@@ -1,4 +1,4 @@
-"""技能系统链路单元测试：扫描 / 注入段 / 工具注册 / 加载 / 资源 / 意图匹配 / 使用统计。
+﻿"""技能系统链路单元测试：扫描 / 注入段 / 工具注册 / 加载 / 资源 / 意图匹配 / 使用统计。
 
 全部本地操作，不触网。技能使用统计文件重定向到 tmp_path，避免污染真实
 data/skill_usage.json（模块级 _USAGE_PATH 在 import 时求值，需显式覆盖）。
@@ -7,17 +7,17 @@ import json
 
 import pytest
 
-from plugins.tools import get_merged_tools
-from plugins.tools import skills as skills_mod
-from plugins.tools.skill_loader import _load_skill, _read_skill_resource
-from plugins.tools.skills import get_skill_manager
-from src.llm.llm_brain import LLMBrain
+from plugins.builtin.tools import get_merged_tools
+from plugins.builtin.tools import skills as skills_mod
+from plugins.builtin.tools.skill_loader import _load_skill, _read_skill_resource
+from plugins.builtin.tools.skills import get_skill_manager
+from ev.llm.llm_brain import LLMBrain
 
 
 @pytest.fixture(autouse=True)
 def _usage_in_tmp(tmp_path, monkeypatch):
     """技能使用统计文件重定向到临时目录，并从临时文件重载统计缓存。"""
-    monkeypatch.setattr("plugins.tools.skills._USAGE_PATH",
+    monkeypatch.setattr("plugins.builtin.tools.skills._USAGE_PATH",
                         str(tmp_path / "skill_usage.json"))
     mgr = get_skill_manager()
     mgr._usage = mgr._load_usage()

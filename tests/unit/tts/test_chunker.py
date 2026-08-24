@@ -5,7 +5,7 @@
 - think 块未闭合时整体暂存（闭合标签可能在下个 delta 到达），闭合后剥除再排出；
 - 需要"逐句切分"的用例显式传小 min_len。
 """
-from src.tts.chunker import SentenceChunker, chunk_text
+from ev.tts.chunker import SentenceChunker, chunk_text
 
 
 class TestBasicSplit:

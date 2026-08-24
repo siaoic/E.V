@@ -8,10 +8,10 @@ import json
 import pytest
 from types import SimpleNamespace
 
-from src.agent.budget import TokenBudget
-from src.agent.executor import ToolExecutor
-from src.agent.loop import ReActAgent
-from src.agent.sandbox import Sandbox
+from ev.agent.budget import TokenBudget
+from ev.agent.executor import ToolExecutor
+from ev.agent.loop import ReActAgent
+from ev.agent.sandbox import Sandbox
 
 
 def _make_resp(content=None, tool_calls=None, usage=None):

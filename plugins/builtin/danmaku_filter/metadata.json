@@ -1,0 +1,7 @@
+{
+  "name": "danmaku_filter",
+  "version": "0.1.0",
+  "description": "弹幕过滤器骨架（黑名单/长度校验）。注册 SlotName.danmaku → impl=bili-filtered（装饰 BilibiliService）",
+  "main": "register.py",
+  "tags": ["danmaku", "filter", "skeleton"]
+}

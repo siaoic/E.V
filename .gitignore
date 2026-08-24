@@ -39,6 +39,8 @@ tools/memory/memU-main.zip
 # ================= TTS 本地模型（体积巨大，不入库，需自行下载/拷贝） =================
 # 注意：实际模型目录在 tools/gsv_tts/API/models 下（旧条目 gsv_tts/API/models/ 已失效）
 tools/gsv_tts/API/models/
+# GPT-SoVITS 官方库源码（gsv_tts/gsv_tts 包），本地依赖，由 ev/tts/server.py 通过 sys.path 加载，不入库
+tools/gsv_tts/gsv_tts/
 
 # ================= 本地 ASR 模型（Qwen3-ASR 权重 1.8GB+，不入库） =================
 src/asr/qwen3_asr/
@@ -65,13 +67,13 @@ E.V.spec
 
 # ================= npm 依赖与捆绑运行时（mindcraft 插件，大体积不入库） =================
 node_modules/
-plugins/mindcraft/node/
+plugins/third_party/mindcraft/node/
 
 # ================= mindcraft 本地密钥 / 运行状态（敏感或可再生成） =================
-plugins/mindcraft/keys.json
-plugins/mindcraft/.claude/
-plugins/mindcraft/bots/*/memory.json
-plugins/mindcraft/bots/*/last_profile.json
+plugins/third_party/mindcraft/keys.json
+plugins/third_party/mindcraft/.claude/
+plugins/third_party/mindcraft/bots/*/memory.json
+plugins/third_party/mindcraft/bots/*/last_profile.json
 
 # ================= 本地日志转储 =================
 /新建 文本文档.txt
@@ -106,12 +108,12 @@ live2d/阿芙洛狄忒模型文件/
 live2d/yumi_vts/
 
 # ================= 音效资源（运行期需本地保留，不入库；讲解.txt 为含义说明仍入库） =================
-plugins/tools/SFX/*.wav
+plugins/builtin/tools/SFX/*.wav
 
 # ================= 第三方接入 SDK（Unity/Godot/Web Game Runner，接入源码本地保留不入库） =================
-plugins/neuro-sdk/Unity/
-plugins/neuro-sdk/Godot/
-plugins/neuro-sdk/Web Game Runner/
+plugins/third_party/neuro-sdk/Unity/
+plugins/third_party/neuro-sdk/Godot/
+plugins/third_party/neuro-sdk/Web Game Runner/
 
 # ================= memU 源码库（仅保留 tools/memu 运行包 + LICENSE.txt + AGENTS.md） =================
 # 其余为库本身的开发期文件，防止重新解压/拷贝时再次误提交
@@ -129,3 +131,15 @@ tools/memory/memu/*
 # ================= Playwright MCP =================
 # AI 浏览器操作的下载/截图/文件保存目录
 browser_files/
+
+# ================= 参考仓库 / 设计文档 / 本机截图（不入库） =================
+dsh-TUI-0.9.0/
+deepseek-harness-master/
+Desktop Screenshot 2026.08.24 - 15.51.30.32.png
+sessions/
+fish-tank.html
+"ui/web/control-center-preview - 交互版.html"
+ui/web/nk64etbosqepg_space_mcode_cn.html
+
+# ================= TUI npm 依赖（与根目录 node_modules 同规则） =================
+ui/tui/node_modules/

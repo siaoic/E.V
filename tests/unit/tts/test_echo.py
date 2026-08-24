@@ -1,5 +1,5 @@
 """TTS 回声防护（3.14）单测：相似度判定 / 窗口滑动 / 短片段跳过 / 最近播报窗口。"""
-from src.tts import echo
+from ev.tts import echo
 
 
 def _clear():

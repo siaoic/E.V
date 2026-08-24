@@ -42,7 +42,7 @@ from PySide6.QtWidgets import (
     QAbstractScrollArea, QApplication, QButtonGroup, QComboBox,
 )
 
-from src.utils import config
+from ev.utils import config
 from ui.filters.close_confirm import _CloseConfirmFilter
 from ui.filters.combo_wheel import _ComboWheelGuard
 from ui.filters.window_drag import _WindowDragFilter

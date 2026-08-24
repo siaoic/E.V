@@ -83,8 +83,8 @@ def _ensure_memu_path() -> None:
 
 _ensure_memu_path()
 
-from src.utils import config, console  # noqa: E402
-from src.utils.constants import (
+from ev.utils import config, console  # noqa: E402
+from ev.utils.constants import (
     ROLE_ASSISTANT, ROLE_AI_ALIAS, SOURCE_DANMAKU_INPUT, SOURCE_DANMAKU_REPLY,
 )
 
@@ -902,7 +902,7 @@ class MemoryManager:
         # 会话落库旁路（3.7，ENABLE_SESSION_SEARCH 门控）：只录 user/assistant
         # 文本（record_turn_queued 内部过滤），失败静默，绝不阻塞对话主流程
         try:
-            from src.llm.sessiondb import record_turn_queued
+            from ev.llm.sessiondb import record_turn_queued
             record_turn_queued(
                 self.started_at or "boot", role, str(content or "").strip(),
                 datetime.now().isoformat())
@@ -1203,7 +1203,7 @@ class MemoryManager:
             return self._lifecycle
         if not config.cfg.MEMORY_LIFECYCLE_ENABLED:
             return None
-        from src.llm.memory.lifecycle import LifecycleEngine
+        from ev.llm.memory.lifecycle import LifecycleEngine
 
         self._lifecycle = LifecycleEngine(
             recall_similar=self._recall_similar_structured,

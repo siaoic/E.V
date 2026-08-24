@@ -8,9 +8,9 @@ import pytest
 from pathlib import Path
 from types import SimpleNamespace
 
-import src.utils.config as config
-from src.llm.evolution._utils import archive_skill
-from src.llm.skills import curator
+import ev.utils.config as config
+from ev.llm.evolution._utils import archive_skill
+from ev.llm.skills import curator
 
 
 @pytest.fixture

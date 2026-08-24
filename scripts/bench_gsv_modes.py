@@ -29,8 +29,8 @@ sys.path.insert(0, str(_GSV_LITE))
 sys.path.insert(0, str(_PROJECT_ROOT))
 
 import httpx
-from src.utils import config
-from src.tts.engine import _STREAM_CHUNK, _STREAM_OVERLAP, _SYNTH_PARAMS
+from ev.utils import config
+from ev.tts.engine import _STREAM_CHUNK, _STREAM_OVERLAP, _SYNTH_PARAMS
 
 MODELS_DIR = _PROJECT_ROOT / "tools" / "gsv_tts" / "API" / "models"
 SERVER_URL = str(config.cfg.TTS_SERVER_URL or "http://127.0.0.1:8000").strip()

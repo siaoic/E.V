@@ -11,7 +11,7 @@ from types import SimpleNamespace
 
 import pytest
 
-from src.llm.providers import (
+from ev.llm.providers import (
     ProviderProfile,
     get_all_providers,
     get_provider,
@@ -24,7 +24,7 @@ from src.llm.providers import (
 @pytest.fixture(autouse=True)
 def clean_registry():
     """每个用例独立注册表：清空后重建内置 Profile，互不污染。"""
-    from src.llm.providers import _register_builtin_profiles
+    from ev.llm.providers import _register_builtin_profiles
     reset_provider_registry()
     _register_builtin_profiles()
     yield
@@ -96,7 +96,7 @@ class TestBuiltinProfiles:
 
 class TestRouterIntegration:
     def test_service_falls_back_to_registry(self, monkeypatch):
-        from src.llm.utils import model_router
+        from ev.llm.utils import model_router
         monkeypatch.setattr(
             model_router, "_parse_servers", lambda: [])  # 无 LLM_SERVERS 配置
         router = model_router.ModelRouter()
@@ -108,14 +108,14 @@ class TestRouterIntegration:
         assert service["fallback_models"]  # 内置 deepseek 有 fallback
 
     def test_service_unknown_returns_none(self, monkeypatch):
-        from src.llm.utils import model_router
+        from ev.llm.utils import model_router
         monkeypatch.setattr(
             model_router, "_parse_servers", lambda: [])
         router = model_router.ModelRouter()
         assert router.service("ghost-service") is None  # 未注册 → 保持旧行为
 
     def test_service_prefers_configured_servers(self, monkeypatch):
-        from src.llm.utils import model_router
+        from ev.llm.utils import model_router
         servers = [{"name": "deepseek", "base_url": "https://custom",
                     "api_key": "k", "model": "m"}]
         monkeypatch.setattr(model_router, "_parse_servers", lambda: servers)

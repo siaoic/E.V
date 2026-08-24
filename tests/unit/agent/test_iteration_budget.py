@@ -1,7 +1,7 @@
 """IterationBudget（3.1）单元测试：额度消耗 / 返还 / 清零 / 线程安全。"""
 import threading
 
-from src.agent.iteration_budget import IterationBudget
+from ev.agent.iteration_budget import IterationBudget
 
 
 class TestConsume:

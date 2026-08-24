@@ -20,9 +20,9 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
-from src.llm.llm_brain import LLMBrain
-from src.tts.engine import TTSEngine
-from src.utils import config
+from ev.llm.llm_brain import LLMBrain
+from ev.tts.engine import TTSEngine
+from ev.utils import config
 
 
 async def main() -> None:

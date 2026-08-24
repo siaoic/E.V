@@ -7,7 +7,7 @@
 """
 import pytest
 
-from src.agent.toolsets import (
+from ev.agent.toolsets import (
     _EV_CORE_TOOLS,
     filter_tool_defs,
     get_toolset_names,

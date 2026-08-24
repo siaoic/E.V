@@ -14,14 +14,14 @@ from types import SimpleNamespace
 
 import pytest
 
-from src.utils import config
-from src.llm.memory.manager import (
+from ev.utils import config
+from ev.llm.memory.manager import (
     MemoryManager,
     StreamingContextScrubber,
     _MEMORY_FENCE_START,
     _MEMORY_FENCE_END,
 )
-from src.llm.memory.provider import MemoryProvider
+from ev.llm.memory.provider import MemoryProvider
 
 
 # ---------- 替身 ----------

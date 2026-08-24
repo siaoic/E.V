@@ -5,7 +5,7 @@ import os
 
 from PySide6.QtCore import QProcess
 
-from src.utils import config
+from ev.utils import config
 from plugins.manager import (
     load_plugin_sets, save_plugin_sets, scan_plugin_dirs,
 )

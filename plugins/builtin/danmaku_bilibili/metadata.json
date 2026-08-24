@@ -1,0 +1,8 @@
+{
+  "name": "danmaku_bilibili",
+  "version": "0.1.0",
+  "description": "Bilibili 弹幕服务（骨架）。注册 SlotName.danmaku → impl=bilibili",
+  "author": "E.V Core",
+  "main": "register.py",
+  "tags": ["danmaku", "bilibili", "skeleton"]
+}

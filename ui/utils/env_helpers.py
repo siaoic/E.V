@@ -8,7 +8,7 @@ import os
 import re
 from typing import Dict
 
-from src.utils import config
+from ev.utils import config
 
 
 def _env_key_re(key: str) -> re.Pattern:

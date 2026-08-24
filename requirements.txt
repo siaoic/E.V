@@ -31,7 +31,7 @@ scipy>=1.10.0
 soundfile>=0.12.0
 
 # ---------- 插件工具（可选） ----------
-# 截屏工具 plugins/tools/screen.py
+# 截屏工具 plugins/builtin/tools/screen.py
 Pillow>=10.0.0
 
 # ---------- TTS 服务端（tools/gsv_tts） ----------

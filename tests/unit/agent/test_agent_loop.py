@@ -6,10 +6,10 @@ import json
 import pytest
 from types import SimpleNamespace
 
-from src.agent.budget import TokenBudget
-from src.agent.executor import ToolExecutor
-from src.agent.loop import AgentStep, ReActAgent
-from src.agent.sandbox import Sandbox
+from ev.agent.budget import TokenBudget
+from ev.agent.executor import ToolExecutor
+from ev.agent.loop import AgentStep, ReActAgent
+from ev.agent.sandbox import Sandbox
 
 
 # ---------- LLM 客户端替身 ----------
@@ -241,7 +241,7 @@ class TestHistoryCompress:
 @pytest.mark.asyncio
 class TestOutputLock:
     async def test_lock_released_after_run(self, tmp_path):
-        from src.core.output_lock import get_global_state, get_output_owner, STATE_IDLE
+        from ev.kernel.output_lock import get_global_state, get_output_owner, STATE_IDLE
         agent, _ = make_agent(tmp_path, [_make_resp(content="完成", usage=SimpleNamespace(total_tokens=1))])
         await agent.run("测试")
         assert get_output_owner() is None

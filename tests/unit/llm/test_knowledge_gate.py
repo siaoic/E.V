@@ -4,8 +4,8 @@
 """
 import pytest
 
-from src.llm.knowledge.gate import KnowledgeGate
-from src.llm.knowledge.loader import load_knowledge
+from ev.llm.knowledge.gate import KnowledgeGate
+from ev.llm.knowledge.loader import load_knowledge
 
 
 @pytest.fixture

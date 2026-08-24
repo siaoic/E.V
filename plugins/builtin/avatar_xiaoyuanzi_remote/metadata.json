@@ -1,0 +1,8 @@
+{
+  "name": "avatar_xiaoyuanzi_remote",
+  "version": "0.1.0",
+  "description": "小院子 Avatar 后端远程版（骨架）。注册 SlotName.avatar → impl=xiaoyuanzi",
+  "author": "E.V Core",
+  "main": "register.py",
+  "tags": ["avatar", "skeleton"]
+}

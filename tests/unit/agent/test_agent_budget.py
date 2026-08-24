@@ -1,5 +1,5 @@
 """Agent Token 预算单元测试：消耗 / 重置 / 满载判定 / 模型窗口映射。"""
-from src.agent.budget import TokenBudget, model_to_max_context
+from ev.agent.budget import TokenBudget, model_to_max_context
 
 
 class TestTokenBudget:

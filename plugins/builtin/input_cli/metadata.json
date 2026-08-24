@@ -1,0 +1,8 @@
+{
+  "name": "input_cli",
+  "version": "0.1.0",
+  "description": "CLI 标准输入源（骨架）。注册 SlotName.input → impl=cli",
+  "author": "E.V Core",
+  "main": "register.py",
+  "tags": ["input", "skeleton"]
+}

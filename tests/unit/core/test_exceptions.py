@@ -1,7 +1,7 @@
 """全局异常体系单元测试：错误码枚举 + 基础异常行为。"""
 import pytest
 
-from src.core.exceptions import ErrorCode, EVBaseException
+from ev.kernel.exceptions import ErrorCode, EVBaseException
 
 
 class TestErrorCode:

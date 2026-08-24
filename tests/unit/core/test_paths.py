@@ -1,8 +1,8 @@
 """数据根路径管理单元测试：集中建目录 + 内置资源首次同步。"""
 import pytest
 
-from src.core import paths
-from src.utils import config
+from ev.kernel import paths
+from ev.utils import config
 
 
 @pytest.fixture

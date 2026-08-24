@@ -1,7 +1,7 @@
 """全局急停（3.13）单测：哨兵生命周期 / fail-safe / 高危工具拦截。"""
 import json
 
-from src.core import estop
+from ev.kernel import estop
 
 
 def _patch_sentinel(monkeypatch, tmp_path):

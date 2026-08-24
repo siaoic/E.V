@@ -6,7 +6,7 @@ import os
 from PySide6.QtCore import QEvent
 from PySide6.QtWidgets import QApplication
 
-from src.utils import console
+from ev.utils import console
 from ui.widgets.slot_label import _as_list
 
 

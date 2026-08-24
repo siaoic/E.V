@@ -5,10 +5,10 @@
 """
 import re
 
-from src.llm.knowledge import KnowledgeService, load_knowledge
-from src.llm.knowledge.format import format_for_injection
-from src.llm.knowledge.loader import _split_lore_paragraphs
-from src.llm.knowledge.recall import KnowledgeRecall
+from ev.llm.knowledge import KnowledgeService, load_knowledge
+from ev.llm.knowledge.format import format_for_injection
+from ev.llm.knowledge.loader import _split_lore_paragraphs
+from ev.llm.knowledge.recall import KnowledgeRecall
 
 
 class TestLoadKnowledge:
@@ -55,7 +55,7 @@ class TestRecall:
     def test_recall_matches_facts(self):
         kb = load_knowledge()
         recall = KnowledgeRecall(kb)
-        hits = recall.recall("neuro是谁")
+        hits = recall.recall("风花是谁")
         assert len(hits["facts"]) >= 1
 
     def test_recall_curated_by_pattern(self):

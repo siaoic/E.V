@@ -2,7 +2,7 @@
 import asyncio
 from types import SimpleNamespace
 
-from src.core.readiness import (
+from ev.kernel.readiness import (
     check_readiness, readiness_check_enabled, warn_failures,
 )
 
@@ -70,9 +70,9 @@ class TestCheckReadiness:
         async def down(_url):
             return False, "mock down"
 
-        monkeypatch.setattr("src.core.readiness._tts_probe", boom)
+        monkeypatch.setattr("ev.kernel.readiness._tts_probe", boom)
         # 内部探针异常触发活体复核：mock 为失败，避免真实服务在线改判健康
-        monkeypatch.setattr("src.core.readiness._probe_http", down)
+        monkeypatch.setattr("ev.kernel.readiness._probe_http", down)
         report = _run(check_readiness(runtime))
         by_name = {c["name"]: c for c in report["checks"]}
         assert by_name["tts"]["ok"] is False
@@ -81,7 +81,7 @@ class TestCheckReadiness:
 
     def test_disabled_returns_empty(self, monkeypatch):
         """READINESS_CHECK 关闭时返回空报告（不打扰启动）。"""
-        monkeypatch.setattr("src.core.readiness.readiness_check_enabled",
+        monkeypatch.setattr("ev.kernel.readiness.readiness_check_enabled",
                             lambda: False)
         report = _run(check_readiness(_healthy_runtime()))
         assert report == {"ok": True, "checks": []}

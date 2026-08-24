@@ -252,7 +252,7 @@ def register(ctx):
 
 - **丢目录即用**：新插件自动登记进启用清单；想关掉用
   `!plugins disable <路径>` 或在控制中心关闭，禁用项不会因自动登记重新启用
-- 目录里没有 `metadata.json` 不会被当作插件（如 `plugins/tools/` 本地工具包、
-  `plugins/mindcraft/` 等）
+- 目录里没有 `metadata.json` 不会被当作插件（如 `plugins/builtin/tools/` 本地工具包、
+  `plugins/third_party/mindcraft/` 等）
 - 一个插件出错（加载失败、钩子抛异常）只影响它自己，主程序正常跑
 - `metadata.json` / `index.py` 修改后执行 `!plugins reload <插件名>` 即时生效

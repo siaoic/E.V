@@ -3,9 +3,9 @@ import asyncio
 
 import pytest
 
-from src.tts import registry
-from src.tts.provider import GPTSoVITSProvider, TTSProvider
-from src.tts.registry import (
+from ev.tts import registry
+from ev.tts.provider import GPTSoVITSProvider, TTSProvider
+from ev.tts.registry import (
     DEFAULT_TTS_PROVIDER, get_provider, register_provider, resolve_provider,
 )
 

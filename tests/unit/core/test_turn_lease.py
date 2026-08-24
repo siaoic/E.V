@@ -3,7 +3,7 @@ import asyncio
 
 import pytest
 
-from src.core.turn_lease import TurnLeaseRegistry, session_turn_gate
+from ev.kernel.turn_lease import TurnLeaseRegistry, session_turn_gate
 
 
 class TestTurnLeaseRegistry:
@@ -90,7 +90,7 @@ class TestTurnLeaseRegistry:
 class TestSessionTurnGate:
     def test_disabled_by_default(self):
         """默认开关关闭：gate 直接放行（行为等同现状）。"""
-        import src.core.turn_lease as tl
+        import ev.kernel.turn_lease as tl
 
         async def case():
             async with session_turn_gate("s1") as ok:
@@ -101,7 +101,7 @@ class TestSessionTurnGate:
 
     def test_enabled_serializes_gate(self):
         """开关开启：gate 包裹的对话按 session 串行。"""
-        import src.core.turn_lease as tl
+        import ev.kernel.turn_lease as tl
 
         async def case():
             orig = tl.turn_lease_enabled

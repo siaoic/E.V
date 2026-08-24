@@ -17,7 +17,7 @@ import asyncio
 import os
 import sys
 
-from src.utils import config
+from ev.utils import config
 
 
 if __name__ == "__main__":
@@ -35,12 +35,12 @@ if __name__ == "__main__":
         _vendor = os.path.join(os.path.dirname(os.path.abspath(__file__)), "vendor_pet")
         if os.path.isdir(_vendor) and _vendor not in sys.path:
             sys.path.insert(0, _vendor)
-        from src.pet.pet_app import run_pet_app
-        from src.core.application import run_with_cleanup
+        from ev.pet.pet_app import run_pet_app
+        from ev.kernel.application import run_with_cleanup
         run_pet_app(run_with_cleanup())
     else:
         try:
-            from src.core.application import run_with_cleanup
+            from ev.kernel.application import run_with_cleanup
             asyncio.run(run_with_cleanup())
         except KeyboardInterrupt:
             print("\n已退出。")

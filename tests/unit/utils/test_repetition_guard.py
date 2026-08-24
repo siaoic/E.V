@@ -1,5 +1,5 @@
 """复读防护（3.13）单测：复读样本命中 / 正常文本不命中 / 开关。"""
-from src.utils.repetition_guard import (
+from ev.utils.repetition_guard import (
     is_repetition_dominated, repetition_guard_enabled,
 )
 
@@ -45,7 +45,7 @@ class TestRepetitionGuard:
     def test_disabled_by_flag(self, monkeypatch):
         """开关关闭时恒不拦截。"""
         monkeypatch.setattr(
-            "src.utils.repetition_guard.repetition_guard_enabled",
+            "ev.utils.repetition_guard.repetition_guard_enabled",
             lambda: False)
         text = _repeat_line("今天天气真好啊我们来聊聊天吧" * 10, 5)
         assert not is_repetition_dominated(text)

@@ -1,0 +1,7 @@
+{
+  "name": "memory_proactive_evolution",
+  "version": "0.1.0",
+  "description": "Memory + Proactive + Evolution 三合一骨架（语义相关三件打包）。",
+  "main": "register.py",
+  "tags": ["memory", "proactive", "evolution", "skeleton"]
+}

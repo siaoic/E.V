@@ -3,20 +3,29 @@ import time
 
 import pytest
 
-from src.agent.async_delegation import (
+from ev.agent.async_delegation import (
     DelegationQueue, DelegationWorker, delegate_backend_enabled,
 )
 
 
 class TestDelegationQueue:
-    def test_enqueue_disabled_by_default(self, tmp_path):
-        """开关默认关闭：enqueue 返回 None（调用方回退同步路径）。"""
+    def test_enqueue_disabled_by_default(self, tmp_path, monkeypatch):
+        """开关关闭：enqueue 返回 None（调用方回退同步路径）。
+
+        优化 7-D 后 AGENT_DELEGATE_BACKEND 默认 True，本测试显式关闭
+        开关以验证关闭路径的回退行为（不再依赖默认值）。
+        """
+        import ev.agent.async_delegation as _mod
+        monkeypatch.setattr(_mod, "delegate_backend_enabled",
+                            lambda: False)
         q = DelegationQueue(tmp_path / "delegation.db")
-        assert not delegate_backend_enabled()
+        # 通过模块属性访问（monkeypatch 生效）；from-import 的本地名字
+        # 不会随 monkeypatch 更新，故用 _mod.delegate_backend_enabled
+        assert not _mod.delegate_backend_enabled()
         assert q.enqueue("任务") is None
 
     def test_enqueue_and_claim(self, tmp_path, monkeypatch):
-        monkeypatch.setattr("src.agent.async_delegation.delegate_backend_enabled",
+        monkeypatch.setattr("ev.agent.async_delegation.delegate_backend_enabled",
                             lambda: True)
         q = DelegationQueue(tmp_path / "delegation.db")
         job_id = q.enqueue("后台查 10 个直播间热度")
@@ -28,13 +37,13 @@ class TestDelegationQueue:
         assert q._claim_next() is None
 
     def test_empty_claim(self, tmp_path, monkeypatch):
-        monkeypatch.setattr("src.agent.async_delegation.delegate_backend_enabled",
+        monkeypatch.setattr("ev.agent.async_delegation.delegate_backend_enabled",
                             lambda: True)
         q = DelegationQueue(tmp_path / "delegation.db")
         assert q._claim_next() is None
 
     def test_retry_schedule_on_failure(self, tmp_path, monkeypatch):
-        monkeypatch.setattr("src.agent.async_delegation.delegate_backend_enabled",
+        monkeypatch.setattr("ev.agent.async_delegation.delegate_backend_enabled",
                             lambda: True)
         q = DelegationQueue(tmp_path / "delegation.db")
         job_id = q.enqueue("会失败的任务")
@@ -49,7 +58,7 @@ class TestDelegationQueue:
         assert row[2] > time.time()
 
     def test_fail_permanent_after_max(self, tmp_path, monkeypatch):
-        monkeypatch.setattr("src.agent.async_delegation.delegate_backend_enabled",
+        monkeypatch.setattr("ev.agent.async_delegation.delegate_backend_enabled",
                             lambda: True)
         q = DelegationQueue(tmp_path / "delegation.db")
         job_id = q.enqueue("任务")
@@ -68,7 +77,7 @@ class TestDelegationQueue:
         assert row[1] == 8
 
     def test_success_marks_done(self, tmp_path, monkeypatch):
-        monkeypatch.setattr("src.agent.async_delegation.delegate_backend_enabled",
+        monkeypatch.setattr("ev.agent.async_delegation.delegate_backend_enabled",
                             lambda: True)
         q = DelegationQueue(tmp_path / "delegation.db")
         job_id = q.enqueue("任务")
@@ -84,7 +93,7 @@ class TestDelegationQueue:
 class TestDelegationWorker:
     def test_worker_executes_jobs(self, tmp_path, monkeypatch):
         """常驻 worker 逐条执行入队任务，结果落 done。"""
-        monkeypatch.setattr("src.agent.async_delegation.delegate_backend_enabled",
+        monkeypatch.setattr("ev.agent.async_delegation.delegate_backend_enabled",
                             lambda: True)
         q = DelegationQueue(tmp_path / "delegation.db")
         done = []
@@ -110,7 +119,7 @@ class TestDelegationWorker:
 
     def test_worker_retries_failure(self, tmp_path, monkeypatch):
         """worker 对失败任务自动排期重试（首次失败后仍 pending 可再领）。"""
-        monkeypatch.setattr("src.agent.async_delegation.delegate_backend_enabled",
+        monkeypatch.setattr("ev.agent.async_delegation.delegate_backend_enabled",
                             lambda: True)
         q = DelegationQueue(tmp_path / "delegation.db")
         calls = {"n": 0}

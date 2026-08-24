@@ -2,7 +2,7 @@
 import asyncio
 import time
 
-from src.llm.memory.decay import (
+from ev.llm.memory.decay import (
     STALENESS_TIER_LABEL,
     competitive_decay,
     decay_stale_memories,

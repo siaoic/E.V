@@ -6,8 +6,8 @@ tool 行不落库；四模式检索；开关关闭时 get_session_db 返回 None
 import pytest
 from types import SimpleNamespace
 
-import src.utils.config as config
-from src.llm.sessiondb import SessionDB, get_session_db, record_turn_queued
+import ev.utils.config as config
+from ev.llm.sessiondb import SessionDB, get_session_db, record_turn_queued
 
 
 @pytest.fixture

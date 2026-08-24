@@ -7,7 +7,7 @@ from PySide6.QtCore import QProcess, QProcessEnvironment, QTimer
 from PySide6.QtGui import QTextCursor
 from PySide6.QtWidgets import QApplication
 
-from src.utils.console import CHAT_TAG
+from ev.utils.console import CHAT_TAG
 from ui.utils.ansi_helpers import strip_ansi
 from ui.utils import env_helpers
 from ui.utils.path_helpers import _find_project_root

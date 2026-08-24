@@ -4,7 +4,7 @@ from PySide6.QtCore import Qt
 from PySide6.QtWidgets import (
     QHBoxLayout, QLabel, QLineEdit, QPlainTextEdit, QWidget)
 
-from src.utils import config
+from ev.utils import config
 from ui.utils import env_helpers
 from ui.utils.constants import PLUGIN_CONFIG_FIELDS
 from ui.widgets.plugin_card import _PluginCard

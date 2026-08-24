@@ -6,8 +6,9 @@
 
 import asyncio
 import copy
+from typing import Callable, Optional
 
-from src.utils import console
+from ev.utils import console
 from plugins.base import VALID_HOOKS
 
 
@@ -27,6 +28,47 @@ class _Storage:
         self._data.pop(key, None)
 
     def get_all(self) -> dict:
+        return copy.deepcopy(self._data)
+
+
+class ConfigView:
+    """插件专属配置的视图：像 dict 一样访问，但缺 KeyError 有友好提示。"""
+
+    def __init__(self, data: dict | None = None) -> None:
+        self._data: dict = dict(data) if data else {}
+
+    def __getitem__(self, key: str):
+        if key not in self._data:
+            available = ", ".join(sorted(self._data.keys())) if self._data else "(空)"
+            raise KeyError(
+                f"插件配置中不存在键 '{key}'。当前可用键：{available}"
+            )
+        return self._data[key]
+
+    def get(self, key: str, default=None):
+        return self._data.get(key, default)
+
+    def __contains__(self, key: str) -> bool:
+        return key in self._data
+
+    def __len__(self) -> int:
+        return len(self._data)
+
+    def __iter__(self):
+        return iter(self._data)
+
+    def keys(self):
+        return self._data.keys()
+
+    def values(self):
+        return self._data.values()
+
+    def items(self):
+        return self._data.items()
+
+    def to_dict(self) -> dict:
+        """返回配置副本（避免外部就地修改内部数据）。"""
+        import copy
         return copy.deepcopy(self._data)
 
 
@@ -79,11 +121,11 @@ class PluginContext:
             app.proactive._enqueue(text, None)
             return
         # 无主动引擎：直接持全局输出锁播报（与主动引擎同一条 speak_text 管线）
-        from src.core.output_lock import (
+        from ev.kernel.output_lock import (
             STATE_AI_SPEAKING, STATE_IDLE, get_output_lock,
             set_global_state, set_output_owner,
         )
-        from src.llm import stream
+        from ev.llm import stream
         output_lock = get_output_lock()
         async with output_lock:
             set_output_owner("plugin")
@@ -204,3 +246,136 @@ class PluginContext:
     async def emit(self, event: str, data=None) -> None:
         """发布事件到总线。"""
         await self._manager.emit(event, data)
+
+    # ======================================================================
+    # 5.0 新增：slots / jobs / session / config / register_subcommand
+    # 有 kernel 时返回真实对象；无 kernel（4.x 路径）返回合理空值，绝不 crash
+    # ======================================================================
+
+    @property
+    def slots(self):
+        """SlotRegistry：插件注册自己的实现，或查询活跃实现。无 Kernel 时返回 None。"""
+        kernel = getattr(self._manager, "kernel", None)
+        if kernel is not None:
+            return getattr(kernel, "slots", None)
+        return None
+
+    @property
+    def jobs(self):
+        """JobScheduler：声明式周期任务 ctx.jobs.every(N).do(fn)。无 Kernel 时返回 None。"""
+        kernel = getattr(self._manager, "kernel", None)
+        if kernel is not None:
+            return getattr(kernel, "jobs", None)
+        return None
+
+    @property
+    def session(self):
+        """SessionLog：append-only 会话日志。无 Kernel 时返回 None。"""
+        kernel = getattr(self._manager, "kernel", None)
+        if kernel is not None:
+            return getattr(kernel, "session_log", None)
+        return None
+
+    @property
+    def config(self) -> ConfigView:
+        """本插件专属配置（profile.yaml → plugin_config[plugin_name]）。未配置时返回空 ConfigView。"""
+        kernel = getattr(self._manager, "kernel", None)
+        if kernel is None:
+            return ConfigView({})
+        try:
+            # profile 结果（dict 格式）.plugin_config[<本插件名>]
+            profile = kernel.profile  # 会触发 resolve，dict 格式
+            cfg = (profile.get("plugin_config") or {}).get(self._plugin_name) or {}
+            return ConfigView(cfg)
+        except Exception:
+            return ConfigView({})
+
+    def register_subcommand(self, name: str, handler, help_text: str = "") -> None:
+        """注册 `!name` 控制台子命令。handler 签名: async fn(text: str) -> tuple[handled:bool, result:str]。
+
+        暂存到 PluginManager._subcommands dict（无 manager 时 console.warn 并丢弃）；
+        实际分发由 Application._main_loop 在命令解析阶段统一读取 manager._subcommands。
+        """
+        if not isinstance(name, str) or not name:
+            raise ValueError("子命令名必须是非空字符串")
+        mgr = self._manager
+        if not hasattr(mgr, "_subcommands"):
+            try:
+                mgr._subcommands = {}
+            except Exception:
+                console.warn(f"[插件:{self._plugin_name}] 无法注册子命令 !{name}（管理器不支持）")
+                return
+        if name in mgr._subcommands:
+            console.warn(f"[插件:{self._plugin_name}] 子命令 !{name} 已存在，覆盖注册")
+        mgr._subcommands[name] = {
+            "handler": handler,
+            "help": help_text,
+            "plugin": self._plugin_name,
+        }
+        self.log("ok", f"已注册子命令 !{name}" + (f"（{help_text}）" if help_text else ""))
+
+    # ======================================================================
+    # Sub-agent 委派（优化 7-B）：插件把长任务交给后台 sub-agent，
+    # 完成后回调。AGENT_DELEGATE_BACKEND 开启时走 SQLite 持久化队列
+    # （重启不丢、自动重试）；关闭时回退进程内 asyncio 后台任务
+    # （重启即丢、行为与现状一致）。回调签名：fn(result: str | None)
+    # 或 async fn(result: str | None)，超时或失败时 result 为 None。
+    # ======================================================================
+
+    async def delegate(self, task: str, *,
+                       callback: Optional[Callable] = None,
+                       timeout: int = 300) -> Optional[int]:
+        """把任务委派给后台 sub-agent（fire-and-forget），完成时回调。
+
+        返回值：
+        - 持久化路径：返回 job_id（int，可在 delegation.db 追踪状态）
+        - 进程内路径：返回 id(task) 作为软追踪号（仅本进程内有效）
+        - 任务为空或异常：返回 None
+        """
+        if not task or not task.strip():
+            return None
+        # 1) 优先走持久化队列（AGENT_DELEGATE_BACKEND 开启时）
+        try:
+            from ev.agent.async_delegation import (
+                delegate_backend_enabled, get_delegation_queue,
+            )
+            if delegate_backend_enabled():
+                job_id = get_delegation_queue().enqueue(task)
+                if job_id is not None:
+                    self.log("ok", f"已后台入队委派任务 #{job_id}")
+                    return job_id
+        except Exception as e:
+            self.log("dim", f"持久化队列不可用，回退进程内委派：{e}")
+        # 2) 进程内 fire-and-forget：复用 run_task（自管 agent 生命周期）
+        from ev.agent import run_task
+
+        async def _run() -> None:
+            try:
+                result = await asyncio.wait_for(run_task(task), timeout=timeout)
+            except asyncio.TimeoutError:
+                self.log("warn", f"委派任务超时（{timeout}s）：{task[:80]}")
+                result = None
+            except Exception as e:
+                self.log("error",
+                         f"委派任务失败：{type(e).__name__}: {e}")
+                result = None
+            if callback is None:
+                return
+            try:
+                ret = callback(result)
+                if asyncio.iscoroutine(ret):
+                    await ret
+            except Exception as e:
+                self.log("warn", f"委派回调异常：{type(e).__name__}: {e}")
+
+        asyncio.create_task(_run())
+        return id(task)
+
+    async def delegate_parallel(self, tasks: list, *,
+                                callback: Optional[Callable] = None,
+                                timeout: int = 300) -> list:
+        """并行委派多个独立子任务；返回每个任务的追踪 id 列表（顺序与入参一致）。"""
+        if not isinstance(tasks, list):
+            return []
+        return [await self.delegate(t, callback=callback, timeout=timeout)
+                for t in tasks if isinstance(t, str) and t.strip()]

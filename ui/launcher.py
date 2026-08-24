@@ -31,7 +31,7 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
-from src.utils import config
+from ev.utils import config
 from ui.utils.env_helpers import _update_env
 
 

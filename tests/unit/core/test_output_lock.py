@@ -2,7 +2,7 @@
 import asyncio
 import pytest
 
-import src.core.output_lock as ol
+import ev.kernel.output_lock as ol
 
 
 @pytest.fixture(autouse=True)

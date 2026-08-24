@@ -8,7 +8,7 @@ import time
 
 import pytest
 
-from src.utils.deadline import (
+from ev.utils.deadline import (
     BoundedResult, DeadlineExpired, clamp_timeout, run_bounded_async,
 )
 

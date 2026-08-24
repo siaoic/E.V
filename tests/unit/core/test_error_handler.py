@@ -1,9 +1,9 @@
 """统一错误处理测试：异常 → ErrorEvent → EV_ERROR 广播。"""
 import asyncio
 
-from src.core.bus import EV_ERROR, bus
-from src.core.error_handler import report_error
-from src.core.exceptions import ErrorCode, EVBaseException
+from ev.kernel.bus import EV_ERROR, bus
+from ev.kernel.error_handler import report_error
+from ev.kernel.exceptions import ErrorCode, EVBaseException
 
 
 class TestReportError:
