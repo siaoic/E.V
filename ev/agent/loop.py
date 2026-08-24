@@ -39,6 +39,9 @@ class AgentStep:
     action: dict  # {"name": ..., "arguments": {...}}
     observation: str
     timestamp: float = field(default_factory=time.time)
+    # 思考模式模型（如 DeepSeek）assistant 的 reasoning_content，
+    # 多轮对话必须原样回传，否则 API 400 拒绝。
+    reasoning_content: str = ""
 
 
 # 进度回调：async (step, max_steps, action, observation)
@@ -335,6 +338,7 @@ class ReActAgent:
                 observation = f"[TIMEOUT] 步骤超时（>{int(_STEP_TIMEOUT)}s）"
             self._history.append(AgentStep(
                 plan=plan["reasoning"], action=plan["tool_call"], observation=observation,
+                reasoning_content=plan.get("reasoning_content", ""),
             ))
             if self._budget.is_full(self._estimate_tokens()):
                 self._compress_history()
@@ -367,7 +371,7 @@ class ReActAgent:
                 messages.append({"role": "user", "content": step.observation})
                 continue
             call_id = f"call_{i}"
-            messages.append({
+            assistant_msg = {
                 "role": "assistant",
                 "content": step.plan or None,
                 "tool_calls": [{
@@ -376,7 +380,12 @@ class ReActAgent:
                                  "arguments": json.dumps(
                                      step.action["arguments"], ensure_ascii=False)},
                 }],
-            })
+            }
+            # 思考模式模型（DeepSeek 等）：reasoning_content 必须原样回传，
+            # 缺失会触发 400（The reasoning_content ... must be passed back）。
+            if step.reasoning_content:
+                assistant_msg["reasoning_content"] = step.reasoning_content
+            messages.append(assistant_msg)
             messages.append({"role": "tool", "tool_call_id": call_id,
                              "content": step.observation})
         return messages
@@ -405,6 +414,8 @@ class ReActAgent:
             self._budget.consume(getattr(usage, "total_tokens", 0) or 0)
         msg = resp.choices[0].message
         content = (msg.content or "").strip()
+        # 思考模式模型（DeepSeek 等）的推理内容：多轮必须回传，否则 API 400
+        reasoning_content = getattr(msg, "reasoning_content", None) or ""
         if not getattr(msg, "tool_calls", None):
             # 部分模型（如 GLM-4-flash）可能不用 tool_calls，改用文本+JSON 代码块兜底
             fallback = self._extract_tool_call(content)
@@ -415,6 +426,7 @@ class ReActAgent:
             return {
                 "action": "tool",
                 "reasoning": content,
+                "reasoning_content": reasoning_content,
                 "tool_call": fallback["tool_call"],
             }
         tc = msg.tool_calls[0]
@@ -430,6 +442,7 @@ class ReActAgent:
         return {
             "action": "tool",
             "reasoning": (msg.content or "").strip(),
+            "reasoning_content": reasoning_content,
             "tool_call": {"name": name, "arguments": args},
         }
 

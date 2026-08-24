@@ -110,9 +110,42 @@ async def _play_sound_effect(sandbox: Sandbox, sfx_id: str, repeat: int = 1) -> 
     return await _core_play_sound_effect(sfx_id, repeat)
 
 
-def build_builtin_tools() -> dict[str, ToolEntry]:
-    """内置工具注册表：{name: (schema, fn)}。"""
-    return {
+def _make_call_tool_adapter(name: str, mcp):
+    """把主对话工具（plugins.builtin.tools.call_tool）适配成 ToolExecutor 签名。
+
+    ToolExecutor 约定 fn(sandbox, **params)；主对话工具是 call_tool(name, args, mcp)。
+    包一层：忽略 sandbox 首参，转发给 call_tool（MCP 优先 → 插件 → 本地兜底）。
+    """
+    from plugins.builtin.tools import call_tool
+
+    async def _adapter(sandbox: Sandbox, **kwargs) -> str:
+        return await call_tool(name, kwargs or {}, mcp)
+    return _adapter
+
+
+def _merge_main_chat_tools(tools: dict[str, ToolEntry], mcp) -> None:
+    """合并主对话的完整工具集（MCP + 插件 + 本地，开关门控与主对话一致）。
+
+    只补 Agent 缺失的工具（重名跳过）；工具 schema 与执行逻辑 100% 复用主对话
+    的实现（call_tool），不重复造轮子——bing_search 等 MCP 搜索工具因此可用。
+    """
+    from plugins.builtin.tools import get_merged_tools
+    for tool_def in get_merged_tools(mcp):
+        function = tool_def.get("function") or {}
+        name = function.get("name")
+        if not name or name in tools:
+            continue
+        tools[name] = (function, _make_call_tool_adapter(name, mcp))
+
+
+def build_builtin_tools(mcp=None) -> dict[str, ToolEntry]:
+    """内置工具注册表：{name: (schema, fn)}。
+
+    含 Agent 专用文件工具（sandbox 隔离）+ 主对话完整工具集合并
+    （MCP 搜索 / 天气 / 技能 / 记忆等，见 _merge_main_chat_tools）。
+    mcp 传 MCPManager 时 MCP 工具（如 bing_search）一并可用。
+    """
+    tools: dict[str, ToolEntry] = {
         "read_file": ({
             "name": "read_file",
             "description": "读取工作空间内文本文件内容（UTF-8）。",
@@ -188,3 +221,6 @@ def build_builtin_tools() -> dict[str, ToolEntry]:
             },
         }, _run_shell),
     }
+    # 合并主对话完整工具集（MCP + 插件 + 本地）：bing_search 等搜索 API 可用
+    _merge_main_chat_tools(tools, mcp)
+    return tools

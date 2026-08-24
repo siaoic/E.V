@@ -72,6 +72,8 @@ class MCPManager:
         self.tool_registry = MCPToolRegistry()
         self.is_initialized: bool = False
         self.startup_timeout: float = cfg.get("startup_timeout") or 30.0
+        # 创建本实例的事件循环引用（initialize 时记录；Agent worker 线程跨循环用）
+        self._loop = None
 
     # ------------------------------------------------------------------
     # 初始化
@@ -79,6 +81,9 @@ class MCPManager:
 
     async def initialize(self) -> bool:
         """加载配置并启动所有服务器。失败不抛出，仅标记状态。"""
+        # 记录创建本实例的事件循环：Agent worker 线程跨循环调 MCP 工具时
+        # 桥回此循环执行（见 llm_bridge.call_mcp_tool 的线程安全桥）
+        self._loop = asyncio.get_running_loop()
         if not self.is_enabled:
             self.is_initialized = True
             return True

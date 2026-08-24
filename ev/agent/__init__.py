@@ -30,8 +30,12 @@ __all__ = [
 ]
 
 
-def create_agent(cfg: Any = None, *, workspace: Optional[str] = None) -> ReActAgent:
-    """按配置构造 Agent（OpenAI 兼容客户端 + 内置工具 + 沙箱）。"""
+def create_agent(cfg: Any = None, *, workspace: Optional[str] = None,
+                 mcp: Any = None) -> ReActAgent:
+    """按配置构造 Agent（OpenAI 兼容客户端 + 内置工具 + 沙箱）。
+
+    mcp 传 MCPManager 时 Agent 额外获得 MCP 工具（bing_search 等联网搜索）。
+    """
     cfg = cfg if cfg is not None else config.cfg
     from ev.llm.client.factory import get_async_openai_client
 
@@ -51,7 +55,7 @@ def create_agent(cfg: Any = None, *, workspace: Optional[str] = None) -> ReActAg
         ),
         audit_path=cfg.AGENT_AUDIT_LOG or None,
     )
-    executor = ToolExecutor(build_builtin_tools(), sandbox)
+    executor = ToolExecutor(build_builtin_tools(mcp), sandbox)
     return ReActAgent(
         llm_client=client,
         llm_model=model,
@@ -63,9 +67,10 @@ def create_agent(cfg: Any = None, *, workspace: Optional[str] = None) -> ReActAg
     )
 
 
-async def run_task(task: str, *, cfg: Any = None, progress_cb: Optional[Any] = None) -> str:
+async def run_task(task: str, *, cfg: Any = None, progress_cb: Optional[Any] = None,
+                   mcp: Any = None) -> str:
     """一键执行任务：构造 Agent → 运行 → 关闭客户端。"""
-    agent = create_agent(cfg)
+    agent = create_agent(cfg, mcp=mcp)
     try:
         if progress_cb is not None:
             agent.on_progress(progress_cb)

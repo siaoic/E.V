@@ -93,7 +93,7 @@ class MainChatSubAgentBridge:
         """后台执行任务 → 结果写 blackboard → 主动播报（fail-open）。"""
         from ev.agent import run_task
         try:
-            result = await run_task(task)
+            result = await run_task(task, mcp=runtime.mcp)
         except Exception as e:
             console.warn(f"[SubAgent] 后台任务失败：{type(e).__name__}: {e}")
             return

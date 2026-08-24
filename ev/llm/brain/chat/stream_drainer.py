@@ -28,6 +28,7 @@ def _run_stream_drainer(ctx: dict) -> None:
       - q（asyncio.Queue，主线程消费 content 增量）
       - tool_calls_acc（list，累积工具调用增量）
       - full_raw（list，累积原始 content 增量）
+      - reasoning_raw（list，累积原始 reasoning_content 增量，多轮需回传）
       - _first_content（list[bool]，首字延迟标记，用 list 以便 nonlocal 修改）
       - tracker（PerfTracker，首字延迟打点）
     """
@@ -38,6 +39,7 @@ def _run_stream_drainer(ctx: dict) -> None:
     q = ctx["q"]
     tool_calls_acc = ctx["tool_calls_acc"]
     full_raw = ctx["full_raw"]
+    reasoning_raw = ctx["reasoning_raw"]
     _first_content_ref = ctx["_first_content"]   # list[bool]
 
     # 这些是 inout，需要从 ctx 取/回写
@@ -127,7 +129,9 @@ def _run_stream_drainer(ctx: dict) -> None:
                 delta = chunk.choices[0].delta
                 reasoning = getattr(delta, "reasoning_content", None) or ""
                 if reasoning:
-                    # 思考过程：灰字实时打印
+                    # 思考过程：灰字实时打印 + 累积（DeepSeek 等思考模式
+                    # 要求多轮对话原样回传 reasoning_content，否则 API 400）
+                    reasoning_raw.append(reasoning)
                     print(console.paint(reasoning, console.GRAY), end="", flush=True)
                 content = getattr(delta, "content", None) or ""
                 if content:

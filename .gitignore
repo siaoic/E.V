@@ -138,8 +138,13 @@ deepseek-harness-master/
 Desktop Screenshot 2026.08.24 - 15.51.30.32.png
 sessions/
 fish-tank.html
-"ui/web/control-center-preview - 交互版.html"
+ui/web/control-center-preview - 交互版.html
+ui/web/control-center-preview - 副本.html
 ui/web/nk64etbosqepg_space_mcode_cn.html
+
+# ================= ASR 本地模型 / 商用需授权字体（不入库） =================
+ev/asr/models/
+ev/utils/字魂布丁体(商用需授权).ttf
 
 # ================= TUI npm 依赖（与根目录 node_modules 同规则） =================
 ui/tui/node_modules/

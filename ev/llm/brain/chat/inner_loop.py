@@ -1,4 +1,4 @@
-﻿"""_chat_stream_inner 主循环：system prompt 组装 + 多轮工具调用流式消费。
+"""_chat_stream_inner 主循环：system prompt 组装 + 多轮工具调用流式消费。
 
 模块级函数 `_run_chat_stream_inner(self, ...)` 与原 `_ChatMixin._chat_stream_inner`
 的方法体逐字一致，仅把 self 作为第一参数传入；最后把副作用收尾委托给
@@ -253,6 +253,7 @@ async def _run_chat_stream_inner(
         q: asyncio.Queue = asyncio.Queue()
         tool_calls_acc: List[Optional[dict]] = []
         full_raw: List[str] = []
+        reasoning_raw: List[str] = []   # 思考内容增量（DeepSeek 多轮需回传）
         round_content: List[str] = []
         _first_content = True
 
@@ -265,6 +266,7 @@ async def _run_chat_stream_inner(
             route_name=route_name, route_client=route_client,
             route_model=route_model,
             loop=loop, q=q, tool_calls_acc=tool_calls_acc, full_raw=full_raw,
+            reasoning_raw=reasoning_raw,
             _first_content=_first_content_ref, tracker=tracker,
         )
         bg_task = loop.run_in_executor(None, _run_stream_drainer, ctx)
@@ -380,11 +382,17 @@ async def _run_chat_stream_inner(
 
             # 1) assistant 消息（含 tool_calls；content 为 null 时
             #    由 _clean_messages_for_api 兜底转为 ''，兼容严格模式 API）
-            messages.append({
+            assistant_msg = {
                 "role": "assistant",
                 "content": clean_content.strip() or None,
                 "tool_calls": tool_calls,
-            })
+            }
+            # 思考模式模型（DeepSeek 等）：reasoning_content 必须原样回传，
+            # 缺失会触发 400（The reasoning_content ... must be passed back）。
+            reasoning_text = "".join(reasoning_raw).strip()
+            if reasoning_text:
+                assistant_msg["reasoning_content"] = reasoning_text
+            messages.append(assistant_msg)
 
             # 2) 执行工具 → tool 响应消息（工具链完整进入下一轮上下文）
             tool_messages = await _execute_tool_calls(self.mcp, tool_calls)

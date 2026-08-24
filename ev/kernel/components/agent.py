@@ -22,13 +22,13 @@ async def setup(runtime: "RuntimeContext") -> None:
         asyncio.create_task(runtime._agent_schedule_loop())
 
     # 后台委派 worker（3.8）：AGENT_DELEGATE_BACKEND 开启时启动常驻线程，
-    # 消费 delegation.db 队列中的长任务（复用 run_task 执行）
+    # 消费 delegation.db 队列中的长任务（复用 run_task 执行，带 MCP 工具）
     if cfg.AGENT_DELEGATE_BACKEND:
         from ev.agent.async_delegation import ensure_worker
         from ev.agent import run_task
 
         def _delegate_executor(job: dict) -> Any:
-            return run_task(str(job.get("task") or ""))
+            return run_task(str(job.get("task") or ""), mcp=runtime.mcp)
 
         ensure_worker(_delegate_executor)
 

@@ -215,9 +215,11 @@ class DelegationWorker:
 
 
 # 模块级单例（进程内一个队列 + 一个 worker）
+# 使用 RLock 而非 Lock：ensure_worker() 内部会调用 get_delegation_queue()，
+# 在已持有 guard 的同线程内二次 acquire，普通 Lock 会直接死锁。
 _queue: Optional[DelegationQueue] = None
 _worker: Optional[DelegationWorker] = None
-_singleton_guard = threading.Lock()
+_singleton_guard = threading.RLock()
 
 
 def get_delegation_queue() -> DelegationQueue:

@@ -8,6 +8,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import json
 from typing import List, Optional
 
@@ -50,13 +51,29 @@ async def call_mcp_tool(name: str, args: dict, mcp) -> Optional[str]:
 
     返回该工具的执行结果文本；mcp 未启用 / 非 MCP 工具 / 无结果时返回 None，
     交由调用方走本地工具兜底。
+
+    线程安全：MCP 客户端生命周期绑定创建它的主事件循环。若当前调用发生在
+    其他线程的事件循环（如 Agent 委派 worker 线程 asyncio.run），桥回主循环
+    执行，避免跨循环操作 anyio 流报错；主循环内调用零开销直走。
     """
     if mcp is None or not mcp.is_enabled:
         return None
-    results = await mcp.handle_tool_calls(
-        [{"id": f"local_{name}", "type": "function",
-          "function": {"name": name, "arguments": json.dumps(args or {}, ensure_ascii=False)}}]
-    )
-    if results:
-        return results[0]["content"]
-    return None
+
+    async def _do_call() -> Optional[str]:
+        results = await mcp.handle_tool_calls(
+            [{"id": f"local_{name}", "type": "function",
+              "function": {"name": name, "arguments": json.dumps(args or {}, ensure_ascii=False)}}]
+        )
+        if results:
+            return results[0]["content"]
+        return None
+
+    loop = getattr(mcp, "_loop", None)
+    if loop is not None and asyncio.get_running_loop() is not loop:
+        # 跨线程：桥回主循环执行，阻塞等待结果（超时兜底防主循环卡死拖垮 worker）
+        try:
+            future = asyncio.run_coroutine_threadsafe(_do_call(), loop)
+            return future.result(timeout=60.0)
+        except Exception as e:
+            return f"工具调用失败（跨线程调度超时/异常）：{e}"
+    return await _do_call()
