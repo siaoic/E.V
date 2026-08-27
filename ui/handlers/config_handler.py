@@ -12,13 +12,14 @@ from ui.utils import env_helpers
 def _save_ui_system_prompt(text: str) -> None:
     """保存控制中心 UI 人设到 ui/data/system_prompt.txt。
 
-    SYSTEM_PROMPT_FILE 未配置时，src/utils/config.py 会自动读取该文件作为人设
-    （路径与 config._UI_SYSTEM_PROMPT_FILE 保持一致，含 PyInstaller frozen 模式）。
+    SYSTEM_PROMPT_FILE 未配置时，ev/utils/config 会自动读取该文件作为人设
+    （路径与 config._resolve_ui_system_prompt_file() 保持一致：优先
+    configs/personas/default/SKILL.md，回退 ui/data/system_prompt.txt）。
     编辑框只显示正文（config 加载时剥离 frontmatter）；若原文件带 YAML
     frontmatter（--- name/description ---），保存时原样保留，避免覆盖保存
     把 skill 元数据静默清掉。
     """
-    path = config._UI_SYSTEM_PROMPT_FILE
+    path = config._resolve_ui_system_prompt_file()
     frontmatter = ""
     try:
         with open(path, "r", encoding="utf-8") as f:

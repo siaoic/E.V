@@ -1,6 +1,9 @@
 """TTSEngine 类骨架：__init__ + 生命周期 + 对外接口。
 
-播放/合成实现在 playback.py，磁盘缓存在 cache.py，常量/文本清洗在 ref_audio.py。
+播放/合成实现在 playback.py，磁盘缓存在 cache.py，常量/文本清洗/本地
+模型工厂在 ref_audio.py。合成改为进程内直连 GSV-TTS-Lite
+（对齐 test_basic_infer / test_stream_20runs），不再依赖外部 HTTP 服务
+（ev/tts/server.py 仅保留供调试用）。
 """
 
 from __future__ import annotations
@@ -8,21 +11,24 @@ from __future__ import annotations
 import asyncio
 from typing import Optional, Tuple
 
-import httpx
-
 from ev.utils import console
 from ev.tts.player import TTSPlayer
 from ev.adapter.tts import BaseTTSAdapter
 
 from .ref_audio import (
-    _SERVER_DEFAULT_URL,
+    _build_tts,
+    _preheat,
 )
 from . import cache as _cache_mod
 from . import playback as _playback_mod
 
 
 class TTSEngine(BaseTTSAdapter):
-    """GPT-SoVITS HTTP 服务端客户端引擎（合成在独立进程，本引擎只播放）。"""
+    """GPT-SoVITS 本地引擎（进程内直连 GSV-TTS-Lite，合成与播放同进程）。
+
+    对齐 test_basic_infer / test_stream_20runs：TTS 单例 + infer_stream 流式
+    合成；播放层沿用 TTSPlayer（口型/字幕/打断强依赖）。
+    """
 
     def __init__(self) -> None:
         from ev.utils import config as _config
@@ -36,12 +42,8 @@ class TTSEngine(BaseTTSAdapter):
         self.ref_text = str(
             getattr(_config.cfg, "GPTSOVITS_PROMPT_TEXT", "") or ""
         ).strip()
-        self._server_url = (
-            str(getattr(_config.cfg, "TTS_SERVER_URL", "") or "").strip()
-            or _SERVER_DEFAULT_URL
-        )
 
-        self._client: Optional[httpx.AsyncClient] = None
+        self._tts = None        # 本地 GSV-TTS 实例（start() 加载后非空）
         self._ready = False
         self._player = TTSPlayer()
         self._gen = 0
@@ -60,32 +62,22 @@ class TTSEngine(BaseTTSAdapter):
     # ---------- 生命周期 ----------
 
     async def start(self) -> bool:
-        """探测服务端可用性（未配置参考音频或服务未启动时返回 False）。"""
+        """加载本地 GSV-TTS 模型（未配置参考音频或加载失败时返回 False）。"""
         if not self._ref_params()[0]:
             console.warn("TTS：未配置 GPTSOVITS_REF_AUDIO，语音合成关闭")
             return False
         self._player.set_loop(asyncio.get_running_loop())
-        self._client = httpx.AsyncClient(
-            timeout=120.0,
-            limits=httpx.Limits(
-                max_connections=8,
-                max_keepalive_connections=4,
-                keepalive_expiry=30.0,
-            ),
-        )
         try:
-            resp = await self._client.get(f"{self._server_url}/")
-            resp.raise_for_status()
+            # 模型加载约 20s：to_thread 避免阻塞事件循环
+            # （init_tts_async 是后台任务，期间 speak/drain 由守卫静默处理）
+            self._tts = await asyncio.to_thread(_build_tts)
         except Exception as e:
-            console.warn(
-                f"TTS：无法连接服务端 {self._server_url}（{e}）——"
-                f"请先运行 tts.bat 启动 GPT-SoVITS 服务，语音将降级为纯字幕"
-            )
-            await self._close_client()
+            console.warn(f"TTS：本地模型加载失败（{e}），语音将降级为纯字幕")
+            self._tts = None
             return False
         self._pending = asyncio.Queue()
         self._ready = True
-        console.ok(f"TTS 服务端已连接（{self._server_url}）")
+        console.ok("TTS 本地模型已加载（进程内合成）")
         asyncio.create_task(asyncio.to_thread(_cache_mod.evict_tts_cache))
         try:
             import numpy as _np
@@ -98,48 +90,27 @@ class TTSEngine(BaseTTSAdapter):
             pass
         return True
 
-    async def _close_client(self) -> None:
-        if self._client is not None:
-            try:
-                await self._client.aclose()
-            except Exception:
-                pass
-            self._client = None
-
     async def warmup(self) -> None:
-        """预热：启动时一次性完成服务端流式合成链路。"""
-        if not self._ready or self._client is None:
+        """预热：跑一句短文本走通完整推理链路（对齐 test_stream_20runs.py）。"""
+        if not self._ready or self._tts is None:
             return
         speaker_audio, prompt_audio, prompt_text = self._ref_params()
         if not speaker_audio:
             return
         try:
-            from .ref_audio import _STREAM_CHUNK, _STREAM_OVERLAP, _SYNTH_PARAMS
-            payload = {
-                "text": "你好呀",
-                "speaker_audio": speaker_audio,
-                "prompt_audio": prompt_audio,
-                "prompt_text": prompt_text,
-                "stream_chunk": _STREAM_CHUNK,
-                "overlap_len": _STREAM_OVERLAP,
-                **_SYNTH_PARAMS,
-            }
-            async with self._client.stream(
-                "POST", f"{self._server_url}/tts/stream", json=payload
-            ) as resp:
-                resp.raise_for_status()
-                async for _ in resp.aiter_lines():
-                    pass
-            console.dim("[TTS] 服务端预热完成（流式合成链路已就绪）")
+            await asyncio.to_thread(
+                _preheat, self._tts, speaker_audio, prompt_audio, prompt_text)
+            console.dim("[TTS] 本地预热完成（推理链路已就绪）")
         except Exception as e:
             console.dim(f"[TTS] 预热失败（不影响使用）：{e}")
 
     def preheat(self) -> None:
-        """每轮对话起始预热：仅本地播放链路，不触网。"""
-        if not self._ready or self._client is None or self._interrupted:
+        """每轮对话起始预热：仅本地播放链路。"""
+        if not self._ready or self._tts is None or self._interrupted:
             return
         try:
             import numpy as _np
+
             self._player._ensure_queue(32000)
             warmup = _np.zeros(int(0.05 * 32000), dtype=_np.float32)
             self._player._queue.put(warmup.reshape(-1, 1))
@@ -147,7 +118,7 @@ class TTSEngine(BaseTTSAdapter):
             pass
 
     async def stop(self) -> None:
-        """停止：打断播放/合成并关闭 HTTP 客户端。"""
+        """停止：打断播放/合成并释放本地模型引用。"""
         self.interrupt()
         if self._pump_task is not None and not self._pump_task.done():
             try:
@@ -159,7 +130,7 @@ class TTSEngine(BaseTTSAdapter):
                     pass
         self._pump_task = None
         self._player.close()
-        await self._close_client()
+        self._tts = None
         self._ready = False
 
     async def drain(self) -> None:
@@ -240,6 +211,3 @@ class TTSEngine(BaseTTSAdapter):
 
     async def _synth_one(self, text: str, gen: int):
         return await _playback_mod._synth_one(self, text, gen)
-
-    async def _download_audio(self, filename: str, cache_key: str = ""):
-        return await _playback_mod._download_audio(self, filename, cache_key)

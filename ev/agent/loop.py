@@ -21,6 +21,8 @@ import time
 from dataclasses import dataclass, field
 from typing import Any, Callable, Optional
 
+from openai import RateLimitError
+
 from ev.agent.budget import TokenBudget
 from ev.agent.executor import ToolExecutor
 from ev.agent.iteration_budget import IterationBudget
@@ -29,6 +31,7 @@ from ev.kernel.output_lock import (
     STATE_IDLE, get_output_lock, set_agent_owner, set_output_owner,
     set_global_state,
 )
+from ev.llm.client.factory import build_thinking_extra_body
 from ev.utils import config, console
 from ev.utils.deadline import DeadlineExpired, run_bounded_async
 
@@ -396,19 +399,32 @@ class ReActAgent:
         summarize=True（预算耗尽宽限收尾）：不带任何工具定义，
         仅请求模型基于已有上下文给出最终总结结果。
         """
+        tools = (None if summarize else
+                 ([{"type": "function", "function": t}
+                  for t in self._executor.schemas]
+                  + [_FINISH_TOOL_SCHEMA]))
+        # 思考模式与主对话链路保持一致：显式声明 thinking，避免服务端
+        # 隐式开启后偶发要求回传 reasoning_content（400）。
+        extra_body = build_thinking_extra_body(bool(config.cfg.LLM_THINKING))
+
+        async def _send(with_thinking: bool = True) -> Any:
+            kwargs = dict(model=self._model, messages=self._build_messages(),
+                          tools=tools, tool_choice="auto", temperature=0.3)
+            if with_thinking:
+                kwargs["extra_body"] = extra_body
+            return await self._llm.chat.completions.create(**kwargs)
+
         try:
-            resp = await self._llm.chat.completions.create(
-                model=self._model,
-                messages=self._build_messages(),
-                tools=(None if summarize else
-                       ([{"type": "function", "function": t}
-                        for t in self._executor.schemas]
-                        + [_FINISH_TOOL_SCHEMA])),
-                tool_choice="auto",
-                temperature=0.3,
-            )
+            resp = await _send()
         except Exception as e:
-            return {"action": "finish", "result": f"LLM 调用失败：{e}"}
+            # 429 是服务端限流不是 thinking 不支持，不能走降级分支
+            if isinstance(e, RateLimitError) or "429" in str(e):
+                return {"action": "finish", "result": f"LLM 调用失败：{e}"}
+            console.warn("[Agent] LLM 服务不支持 thinking 参数，降级为普通模式")
+            try:
+                resp = await _send(with_thinking=False)
+            except Exception as e2:
+                return {"action": "finish", "result": f"LLM 调用失败：{e2}"}
         usage = getattr(resp, "usage", None)
         if usage is not None:
             self._budget.consume(getattr(usage, "total_tokens", 0) or 0)

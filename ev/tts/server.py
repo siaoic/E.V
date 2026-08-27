@@ -126,6 +126,19 @@ async def startup_event():
         # 50 = stream_chunk * 2 = 25 * 2, 55 = stream_chunk * 2 + overlap_len
         sovits_cache=[50, 55],
     )
+
+    # GPT 的 SDPA 后端从 CUDNN_ATTENTION 换成 EFFICIENT_ATTENTION：
+    # cuDNN attention 对每个新序列形状会做一次 kernel 编译（约 400ms，导致新文本
+    # 首字延迟偏高），EFFICIENT 无编译开销。仅运行时替换 t2s_model 模块级变量，
+    # 不改任何库源码。
+    try:
+        import gsv_tts.GPT_SoVITS.GPT.t2s_model as _tm
+        from torch.nn.attention import SDPBackend as _SDPBackend
+
+        _tm.SDPBACKEND = _SDPBackend.EFFICIENT_ATTENTION
+    except Exception:
+        pass
+
     print("✅ TTS 模型加载完成！")
 
 

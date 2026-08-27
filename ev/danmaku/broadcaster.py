@@ -16,7 +16,7 @@ import threading
 from typing import List, Tuple
 
 
-_MAX_HISTORY = 20  # SSE 历史缓存条数
+_MAX_HISTORY = 200  # SSE 历史缓存条数（原 20 太小，繁忙直播间几秒就把初始 status 挤掉，新订阅者拿不到连接状态）
 
 
 class Broadcaster:

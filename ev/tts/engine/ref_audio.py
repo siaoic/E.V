@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import io
 import re
+import threading
 from typing import Tuple
 
 import numpy as np
@@ -78,16 +79,95 @@ _SERVER_DEFAULT_URL = "http://127.0.0.1:8000"
 # 泵单次收拢句数：固定 1（每句独立合成，一句失败只影响自身）
 _BATCH_MAX = 1
 
-# 流式合成参数
+# 流式合成参数（对齐 test_stream_20runs.py：stream_chunk=25, overlap_len=5）
+# sovits_cache 随 stream_chunk 联动（见 _build_tts）：50 = stream_chunk*2，
+# 55 = stream_chunk*2 + overlap_len。
 _STREAM_CHUNK = 25
 _STREAM_OVERLAP = 5
 
-# 合成参数（服务端 /tts/stream 透传到 infer_stream）
+# 合成参数（对齐 test_basic_infer.py / test_stream_20runs.py 的 PARAMS，
+# 即 gsv_tts 库默认采样档 top_k=15 / top_p=1.0）
 _SYNTH_PARAMS = {
-    "top_k": 5,
-    "top_p": 0.9,
+    "top_k": 15,
+    "top_p": 1.0,
     "temperature": 1.0,
     "repetition_penalty": 1.35,
     "noise_scale": 0.5,
     "speed": 1.0,
 }
+
+
+# ---------- 本地 GSV-TTS 模型工厂（进程内合成，对齐 test_basic_infer / test_stream_20runs） ----------
+
+# 预热短文本（启动时跑一句让模型权重就位，避免首句冷启动延迟）
+_PREHEAT_TEXT = "你好。"
+
+_tts_instance = None
+_tts_build_lock = threading.Lock()
+_tts_built = False
+
+
+def _build_tts():
+    """构建 GSV-TTS 本地单例（模型权重只加载一次，对齐 test_basic_infer / test_stream_20runs）。
+
+    惰性加载 + 双重检查锁；TTS(use_bert=True, sovits_cache=[50, 55])，
+    models_dir 用库默认（~/.cache/gsv 下的 s1v3.ckpt 与 s2Gv2ProPlus.pth），
+    构造后显式 load_gpt_model / load_sovits_model 加载默认权重。推理为
+    同步阻塞，需由调用方包到线程/线程池执行（core.start / playback 的 to_thread）。
+    """
+    global _tts_instance, _tts_built
+    if _tts_built:
+        return _tts_instance
+    with _tts_build_lock:
+        if _tts_built:
+            return _tts_instance
+        from gsv_tts import TTS
+
+        _tts_instance = TTS(
+            use_bert=True,
+            sovits_cache=[_STREAM_CHUNK * 2, _STREAM_CHUNK * 2 + _STREAM_OVERLAP],
+        )
+        _tts_instance.load_gpt_model()
+        _tts_instance.load_sovits_model()
+        _tts_built = True
+        return _tts_instance
+
+
+def _preheat(tts, speaker_audio: str, prompt_audio: str, prompt_text: str) -> None:
+    """预热推理路径：跑一句短文本走通「文本→BERT→GPT→SoVITS→解码」全链路。
+
+    对齐 test_stream_20runs.py 预热语义——权重落入设备、kernel 编译完成，后续
+    infer_stream 首块产出只受推理本身耗时限制。预热产物不播放；
+    失败静默（首句多一次冷启动延迟，不阻断启动）。
+
+    预热完成后把 GPT 的 prefill 切到 EFFICIENT backend：decode 的 CUDA Graph
+    已在预热期用默认 CUDNN backend 捕获并固定（速度不变），而 prefill 走
+    EFFICIENT 可避开 cuDNN 对每个新 token 长度触发 autotune 的首跑开销
+    （约 400-500ms）。仅运行时修改模块级变量，不改任何库源码。
+    """
+    try:
+        generator = tts.infer_stream(
+            spk_audio_path=speaker_audio,
+            prompt_audio_path=prompt_audio,
+            prompt_audio_text=prompt_text,
+            text=_PREHEAT_TEXT,
+            stream_chunk=_STREAM_CHUNK,
+            overlap_len=_STREAM_OVERLAP,
+            return_subtitles=False,
+            debug=False,
+            **_SYNTH_PARAMS,
+        )
+        for _ in generator:
+            pass
+    except Exception:
+        pass
+    finally:
+        # 切换 prefill backend（不改库源码）：t2s_model.SDPBACKEND 是模块级变量，
+        # 构造/预热期以 CUDNN 捕获的 decode CUDA Graph 不受影响
+        try:
+            import gsv_tts.GPT_SoVITS.GPT.t2s_model as _tm
+            from torch.nn.attention import SDPBackend as _SDPBackend
+
+            _tm.SDPBACKEND = _SDPBackend.EFFICIENT_ATTENTION
+        except Exception:
+            pass

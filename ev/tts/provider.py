@@ -88,13 +88,13 @@ class GPTSoVITSProvider(TTSProvider):
     async def synthesize(
         self, text: str, output_path: Optional[str] = None, **extra
     ) -> Optional[bytes]:
-        """复用引擎的批量合成路径（含退化重试兜底）产出 wav。
+        """复用引擎的整句合成路径（含退化重试兜底）产出 wav。
 
-        依赖引擎内部接口（_synth_one / _gen / _client）：仅包装不修改，
+        依赖引擎内部接口（_synth_one / _gen / _ready）：仅包装不修改，
         引擎未就绪或合成失败（退化兜底后仍失败）时返回 None。
         """
         engine = self._engine
-        if engine is None or engine._client is None:
+        if engine is None or not getattr(engine, "_ready", False):
             return None
         import io
 

@@ -62,7 +62,7 @@ if __name__ == "__main__":
     else:
         manager = BiliServiceManager(
             room_ids, cfg.BILI_SERVER_PORT,
-            os.path.join(cfg.PROJECT_ROOT, "ui", "弹幕卡片.html"))
+            os.path.join(cfg.PROJECT_ROOT, "ui", "弹幕卡片v2.html"))
         # 把 client.py 的线程启动函数注入到每个 BiliService，
         # 避免 service.py ⇄ client.py 循环引用
         manager.attach_client_starter(_bili_loop)

@@ -75,6 +75,33 @@ class _BiliDanmakuClient(blivedm.BLiveClient):
         """每次成功建立 WebSocket 连接时调用（鉴权前）。"""
         await super()._on_ws_connect()
         self._broadcaster.push({"type": "status", "connected": True})
+        # 每 30 秒重推一次 status，保证新 SSE 订阅者/断线重连者能尽快拿到连接状态
+        def _repush(loop):
+            import asyncio
+            try:
+                loop.create_task(self.__repush_status_loop())
+            except Exception:
+                pass
+        try:
+            loop = asyncio.get_event_loop()
+        except Exception:
+            loop = None
+        if loop and loop.is_running() and not getattr(self, '_repush_status_scheduled', False):
+            self._repush_status_scheduled = True
+            # 不阻塞 _on_ws_connect：用 call_soon 排一个常驻协程
+            loop.call_soon(lambda: _repush(loop))
+
+    async def __repush_status_loop(self):
+        import asyncio
+        try:
+            while True:
+                await asyncio.sleep(30)
+                try:
+                    self._broadcaster.push({"type": "status", "connected": True})
+                except Exception:
+                    pass
+        except asyncio.CancelledError:
+            raise
 
     async def _on_ws_close(self):
         """连接断开时调用。"""
@@ -109,11 +136,12 @@ class _BiliDanmakuHandler(blivedm.BaseHandler):
                 f"/avatar?u={quote(url, safe='')}")
 
     def _push(self, username: str, text: str, avatar: str = "",
-              uid: int = 0) -> None:
+              uid: int = 0, privilege_type: int = 0) -> None:
         """推送到 SSE（字段与气泡网页约定一致：用户名/弹幕/头像）。
 
         头像为空且 uid 有效时，后台调 card API 补全，完成后推
         avatar 事件由网页就地更新气泡头像。
+        privilege_type：0 普通观众，1 总督，2 提督，3 舰长；用于前端渲染会员边框。
         """
         # 弹幕内容仅推 SSE 展示（网页左侧实时流 + 精选回复卡片），不在控制台
         # 显示——被选中回复的弹幕由主程序 _chat_danmaku 在左栏「对话」显示
@@ -123,6 +151,7 @@ class _BiliDanmakuHandler(blivedm.BaseHandler):
             "text": text,
             "avatar": self._proxy_avatar(avatar),
             "uid": uid,
+            "privilege_type": privilege_type,
         })
         if not avatar and uid:
             self._schedule_avatar(uid)
@@ -175,11 +204,63 @@ class _BiliDanmakuHandler(blivedm.BaseHandler):
             self._schedule_prefetch(avatar)
             self._b.push({"type": "avatar", "uid": uid,
                           "avatar": self._proxy_avatar(avatar)})
-        self._push(uname, text, avatar, uid)
+        priv = message.privilege_type or 0
+        self._push(uname, text, avatar, uid, priv)
         # 交给弹幕挑选器：兴趣度评分 → 排队 → 挑"有趣"的让 AI 回复
         picker = get_danmaku_picker()
         if picker is not None:
             picker.submit(uid=uid, username=uname, text=text)
+
+    # ===== SC 醒目留言（paid 类型） =====
+    def _on_super_chat(self, client, message: web_models.SuperChatMessage):
+        uid = message.uid or 0
+        uname = message.uname or "匿名"
+        avatar = message.face or self._avatars.get(uid)
+        text = message.message or ""
+        price = message.price or 0
+        bg_color = message.background_bottom_color or ""
+
+        if avatar:
+            self._schedule_prefetch(avatar)
+            self._b.push({
+                "type": "avatar",
+                "uid": uid,
+                "avatar": self._proxy_avatar(avatar),
+            })
+        self._b.push({
+            "type": "superchat",
+            "uid": uid,
+            "username": uname,
+            "text": text,
+            "avatar": self._proxy_avatar(avatar) if avatar else "",
+            "price": price,
+            "amount": f"￥{price}",
+            "bg_color": bg_color,
+        })
+        if not avatar and uid:
+            self._schedule_avatar(uid)
+
+    # ===== 大航海入列（crew 类型，用 UserToastV2 带附言） =====
+    def _on_user_toast_v2(self, client, message: web_models.UserToastV2Message):
+        # source=2 是系统补发的"赠送"副本，官方评论栏也不显示，直接跳过去重
+        if message.source == 2:
+            return
+        uid = message.uid or 0
+        uname = message.username or "匿名"
+        level = message.guard_level or 0
+        toast = message.toast_msg or ""
+        avatar = self._avatars.get(uid) or ""
+
+        self._b.push({
+            "type": "guard",
+            "uid": uid,
+            "username": uname,
+            "guard_level": level,
+            "text": toast,
+            "avatar": self._proxy_avatar(avatar) if avatar else "",
+        })
+        if not avatar and uid:
+            self._schedule_avatar(uid)
 
     def _schedule_prefetch(self, url: str) -> None:
         try:

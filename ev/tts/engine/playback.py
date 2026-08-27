@@ -1,14 +1,16 @@
-﻿"""TTS Engine 的合成 + 播放方法（串行泵 / 流式 / 批量合成 / 字幕）。
+"""TTS Engine 的合成 + 播放方法（串行泵 / 流式 / 批量合成 / 字幕）。
 
 全部以「接受 TTSEngine self 作为首参数」的模块级函数形式存在，
 由 core.TTSEngine 的同名方法转发。
+
+合成改为进程内直连 GSV-TTS-Lite（对齐 test_basic_infer / test_stream_20runs）：
+_synth_local_stream 在 to_thread 线程内跑 tts.infer_stream 生成器，逐块喂给
+播放器；退化检测、磁盘缓存、gen 代次打断等健壮性保留原样。
 """
 
 from __future__ import annotations
 
 import asyncio
-import base64
-import json
 from typing import Optional, Tuple
 
 import numpy as np
@@ -88,10 +90,82 @@ async def _synth_remote(self, texts: list, gen: int) -> None:
         await self._synth_stream(text, gen, sfx)
 
 
+# ---------- 流式合成（进程内 infer_stream 生成器）----------
+
+def _synth_local_stream(
+    self, text: str, gen: int, sfx: str,
+    speaker_audio: str, prompt_audio: str, prompt_text: str, key: str,
+) -> bool:
+    """同步：进程内跑 infer_stream 生成器，逐块喂给播放器（to_thread 线程内）。
+
+    对齐 test_stream_20runs.py 流式消费：首块到达即开播（begin_stream），
+    逐块 feed_subtitles / feed_stream；收集整段用于退化检测与磁盘缓存写回。
+    返回 True 表示检测到退化合成（调用方应重试一次）；异常向上抛。
+    """
+    tts = self._tts
+    if tts is None:
+        return False
+    generator = tts.infer_stream(
+        spk_audio_path=speaker_audio,
+        prompt_audio_path=prompt_audio,
+        prompt_audio_text=prompt_text,
+        text=text,
+        stream_chunk=_STREAM_CHUNK,
+        overlap_len=_STREAM_OVERLAP,
+        return_subtitles=True,
+        debug=False,
+        **_SYNTH_PARAMS,
+    )
+    collected = []
+    sent_id = None
+    sr = 32000
+    try:
+        for chunk in generator:
+            if gen != self._gen:
+                self._player.abort_stream()
+                return False
+            audio_data = np.asarray(
+                chunk.audio_data, dtype=np.float32).reshape(-1)
+            sr = int(getattr(chunk, "samplerate", sr) or sr)
+            if sent_id is None:
+                sent_id = self._player.begin_stream(sr, text, gen)
+                if sent_id is None:
+                    return False
+                if sfx:
+                    play_sfx_sequence([sfx])
+            subtitles = getattr(chunk, "subtitles", None)
+            if subtitles:
+                self._player.feed_subtitles(subtitles, gen)
+            collected.append(audio_data)
+            pcm = (audio_data * 32768.0).astype("<i2").tobytes()
+            if not self._player.feed_stream(pcm, gen):
+                return False
+    except Exception:
+        self._player.abort_stream()
+        raise
+    if sent_id is None:
+        raise RuntimeError("流式无音频块")
+    self._player.end_stream(gen)
+    audio_data = np.concatenate(collected)
+    if _is_degraded_audio(len(audio_data) / sr, len(text)) or _has_burst_noise(
+        audio_data
+    ):
+        console.warn(
+            f"TTS 流式检测到异常合成（文本 {len(text)} 字、音频 "
+            f"{len(audio_data) / sr:.1f}s），重试…"
+        )
+        _cache_mod._cache_delete(key)
+        return True
+    wav_bytes = _encode_wav_bytes(audio_data, sr)
+    if wav_bytes:
+        _cache_mod._cache_save(key, wav_bytes, _cache_mod.evict_tts_cache)
+    return False
+
+
 async def _synth_stream(
     self, text: str, gen: int, sfx: str = "", _retried: bool = False
 ) -> None:
-    """Token 级流式合成一句（POST /tts/stream，SSE 边收边播）。"""
+    """Token 级流式合成一句（进程内 infer_stream，边合成边播）。"""
     speaker_audio, prompt_audio, prompt_text = self._ref_params()
     key = _cache_mod._tts_cache_key(
         text, speaker_audio, prompt_audio, prompt_text, _SYNTH_PARAMS)
@@ -110,90 +184,63 @@ async def _synth_stream(
                 play_sfx_sequence([sfx])
             self._player.emit(audio_data, sr, text, _fallback_subtitles(text), gen)
             return
-    payload = {
-        "text": text,
-        "speaker_audio": speaker_audio,
-        "prompt_audio": prompt_audio,
-        "prompt_text": prompt_text,
-        "stream_chunk": _STREAM_CHUNK,
-        "overlap_len": _STREAM_OVERLAP,
-        **_SYNTH_PARAMS,
-    }
-    collected = bytearray()
-    sent_id = None
     try:
-        async with self._client.stream(
-            "POST", f"{self._server_url}/tts/stream", json=payload
-        ) as resp:
-            resp.raise_for_status()
-            async for line in resp.aiter_lines():
-                if gen != self._gen:
-                    self._player.abort_stream()
-                    return
-                if not line.startswith("data: "):
-                    continue
-                evt = json.loads(line[6:])
-                if evt.get("done"):
-                    break
-                pcm = base64.b64decode(evt["audio"])
-                if sent_id is None:
-                    sent_id = self._player.begin_stream(32000, text, gen)
-                    if sent_id is None:
-                        return
-                    if sfx:
-                        play_sfx_sequence([sfx])
-                if evt.get("subtitles"):
-                    self._player.feed_subtitles(evt["subtitles"], gen)
-                collected += pcm
-                if not self._player.feed_stream(bytes(pcm), gen):
-                    return
-        if sent_id is None:
-            raise RuntimeError("流式无音频块")
-        self._player.end_stream(gen)
-        audio_data = (
-            np.frombuffer(bytes(collected), dtype="<i2").astype(np.float32)
-            / 32768.0
+        degraded = await asyncio.to_thread(
+            _synth_local_stream, self, text, gen, sfx,
+            speaker_audio, prompt_audio, prompt_text, key,
         )
-        if audio_data.size:
-            if _is_degraded_audio(
-                len(audio_data) / 32000, len(text)
-            ) or _has_burst_noise(audio_data):
-                console.warn(
-                    f"TTS 流式检测到异常合成（文本 {len(text)} 字、音频 "
-                    f"{len(audio_data) / 32000:.1f}s），重试…"
-                )
-                if not _retried:
-                    await self._synth_stream(text, gen, sfx, _retried=True)
-            else:
-                wav_bytes = await asyncio.to_thread(
-                    _encode_wav_bytes, audio_data, 32000
-                )
-                if wav_bytes:
-                    await asyncio.to_thread(
-                        _cache_mod._cache_save, key, wav_bytes,
-                        _cache_mod.evict_tts_cache,
-                    )
     except Exception as e:
-        self._player.abort_stream()
-        if gen == self._gen:
+        if gen == self._gen and not _retried:
             console.dim(f"TTS 流式合成失败（{e}）")
-            if not _retried:
-                await self._synth_stream(text, gen, sfx, _retried=True)
+            await self._synth_stream(text, gen, sfx, _retried=True)
+        return
+    if degraded and not _retried:
+        await self._synth_stream(text, gen, sfx, _retried=True)
+
+
+# ---------- 整句合成（provider.synthesize 复用）----------
+
+def _synth_local_one(
+    self, text: str, gen: int,
+    speaker_audio: str, prompt_audio: str, prompt_text: str, key: str,
+) -> Optional[Tuple[np.ndarray, int]]:
+    """同步：进程内整句合成（infer 整句），含退化检测与缓存写回。
+
+    返回 (audio_data, sr)；退化或失败时删除缓存并返回 None。
+    """
+    tts = self._tts
+    if tts is None:
+        return None
+    try:
+        clip = tts.infer(
+            spk_audio_path=speaker_audio,
+            prompt_audio_path=prompt_audio,
+            prompt_audio_text=prompt_text,
+            text=text,
+            **_SYNTH_PARAMS,
+        )
+        audio_data = np.asarray(clip.audio_data, dtype=np.float32).reshape(-1)
+        sr = int(getattr(clip, "samplerate", 32000) or 32000)
+        if _is_degraded_audio(len(audio_data) / sr, len(text)) or _has_burst_noise(
+            audio_data
+        ):
+            _cache_mod._cache_delete(key)
+            return None
+        wav_bytes = _encode_wav_bytes(audio_data, sr)
+        if wav_bytes:
+            _cache_mod._cache_save(key, wav_bytes, _cache_mod.evict_tts_cache)
+        return audio_data, sr
+    except Exception as e:
+        console.dim(f"TTS 合成失败（{e}）")
+        return None
 
 
 async def _synth_one(self, text: str, gen: int):
-    """整句批量合成一句并下载解码，返回 (audio_data, sr)。
+    """整句批量合成一句并解码，返回 (audio_data, sr)。
 
     仅供 provider.synthesize（一次性产出 wav 字节的对外交付接口）复用。
     """
     speaker_audio, prompt_audio, prompt_text = self._ref_params()
-    payload = {
-        "texts": [text],
-        "speaker_audio": speaker_audio,
-        "prompt_audio": prompt_audio,
-        "prompt_text": prompt_text,
-        **_SYNTH_PARAMS,
-    }
     key = _cache_mod._tts_cache_key(
         text, speaker_audio, prompt_audio, prompt_text, _SYNTH_PARAMS)
     cached = await asyncio.to_thread(_cache_mod._cache_load, key)
@@ -209,54 +256,25 @@ async def _synth_one(self, text: str, gen: int):
     for _ in range(2):
         if gen != self._gen:
             return None
-        try:
-            resp = await self._client.post(
-                f"{self._server_url}/tts/batch", json=payload
-            )
-            resp.raise_for_status()
-        except Exception as e:
-            console.dim(f"TTS 合成失败（{e}），重试…")
+        audio = await asyncio.to_thread(
+            _synth_local_one, self, text, gen,
+            speaker_audio, prompt_audio, prompt_text, key)
+        if audio is None:
             continue
-        filenames = resp.json().get("filenames") or []
-        if not filenames:
-            return None
-        for filename in filenames:
-            audio = await self._download_audio(filename, key)
-            if audio is None:
-                continue
-            audio_data, sr = audio
-            if not (
-                _is_degraded_audio(len(audio_data) / sr, len(text))
-                or _has_burst_noise(audio_data)
-            ):
-                return audio_data, sr
-            await asyncio.to_thread(_cache_mod._cache_delete, key)
-            console.warn(
-                f"TTS 检测到异常合成（文本 {len(text)} 字、音频 "
-                f"{len(audio_data) / sr:.1f}s），重试…"
-            )
-            break
+        audio_data, sr = audio
+        if not (
+            _is_degraded_audio(len(audio_data) / sr, len(text))
+            or _has_burst_noise(audio_data)
+        ):
+            return audio_data, sr
+        await asyncio.to_thread(_cache_mod._cache_delete, key)
+        console.warn(
+            f"TTS 检测到异常合成（文本 {len(text)} 字、音频 "
+            f"{len(audio_data) / sr:.1f}s），重试…"
+        )
     return None
 
 
-async def _download_audio(
-    self, filename: str, cache_key: str = ""
-) -> Optional[Tuple[np.ndarray, int]]:
-    """下载 wav 字节流并解码为 (1D float32, 采样率)。失败返回 None。"""
-    try:
-        resp = await self._client.get(f"{self._server_url}/audio/{filename}")
-        resp.raise_for_status()
-        content = resp.content
-        if cache_key:
-            await asyncio.to_thread(_cache_mod._cache_save, cache_key, content,
-                                    _cache_mod.evict_tts_cache)
-        data, sr = await asyncio.to_thread(_decode_wav_bytes, content)
-        return np.asarray(data, dtype=np.float32).reshape(-1), int(sr)
-    except Exception as e:
-        console.dim(f"TTS 下载音频失败（{filename}）：{e}")
-        return None
-
-
 def _fallback_subtitles(text: str) -> list:
-    """服务端不返回词级时间戳：构造整句时间戳整句显示。"""
+    """无词级时间戳时：构造整句时间戳整句显示。"""
     return [{"start_s": 0.0, "text": text, "orig_idx_end": len(text) - 1}]
