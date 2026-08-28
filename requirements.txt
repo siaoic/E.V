@@ -1,7 +1,7 @@
 # ============ E.V（AI 虚拟主播）一键安装依赖 ============
 # 安装：pip install -r requirements.txt
 # 注：TTS 推理依赖 torch / torchaudio，需按本机 CUDA 版本手动安装；
-#     gsv_tts 为本地包（tools/gsv_tts/），直接 import 无需 pip 安装。
+#     TTS 引擎为 gsv-tts-lite（pip 包），由 ev/tts/engine 进程内调用。
 
 # ---------- 主程序 ----------
 # UI / 桌面宠物
@@ -34,7 +34,8 @@ soundfile>=0.12.0
 # 截屏工具 plugins/builtin/tools/screen.py
 Pillow>=10.0.0
 
-# ---------- TTS 服务端（tools/gsv_tts） ----------
+# ---------- TTS（gsv-tts-lite，pip 包进程内推理） ----------
+gsv-tts-lite>=0.4.7
 fastapi>=0.100.0
 uvicorn>=0.23.0
 einops

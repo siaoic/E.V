@@ -7,7 +7,6 @@ extends: live_bili.yaml      # 大部分相同，只覆写 danmaku 槽位 + 插�
 plugins:
   builtin:
     - echo_llm
-    - tts_edge
     - avatar_xiaoyuanzi_local
     - danmaku_douyin         # 占位：与 danmaku_bilibili 结构一致，真实插件化时替换
     - danmaku_filter
@@ -19,7 +18,7 @@ plugins:
 
 slots:
   model: echo-default
-  tts: edge
+  tts: null
   avatar: xiaoyuanzi-local
   input: douyin-danmaku
   danmaku: douyin

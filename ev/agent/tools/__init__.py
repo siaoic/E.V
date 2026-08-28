@@ -6,7 +6,9 @@
 
 from __future__ import annotations
 
+import ast
 import asyncio
+import math
 import os
 
 from ev.agent.executor import ToolEntry
@@ -66,6 +68,71 @@ def _list_dir(sandbox: Sandbox, path: str = ".") -> str:
         return f"列目录失败：{e}"
     lines = [f"{d}/" if os.path.isdir(p / d) else d for d in entries]
     return _fold_observation("\n".join(lines), _LIST_LIMIT)
+
+
+def _calculator(_sandbox: Sandbox, expression: str) -> str:
+    """安全计算器：AST 白名单求值，杜绝任意代码执行。
+
+    支持 + - * / // % ** 与括号、常量 pi/e、常用数学函数；
+    兼容 LLM 常见符号（× ÷ ^ 自动归一）。
+    """
+    allowed_funcs = {
+        "sqrt": math.sqrt, "abs": abs, "round": round,
+        "min": min, "max": max, "floor": math.floor, "ceil": math.ceil,
+        "log": math.log, "exp": math.exp, "sin": math.sin,
+        "cos": math.cos, "tan": math.tan,
+    }
+    allowed_consts = {"pi": math.pi, "e": math.e}
+    _bin_ops = {
+        ast.Add: lambda l, r: l + r, ast.Sub: lambda l, r: l - r,
+        ast.Mult: lambda l, r: l * r, ast.Div: lambda l, r: l / r,
+        ast.FloorDiv: lambda l, r: l // r, ast.Mod: lambda l, r: l % r,
+        # 幂运算设指数上限：防 9**9**9 之类超大整数求值卡死单步
+        ast.Pow: lambda l, r: l ** r if abs(r) <= 1000 else (_ for _ in ()).throw(
+            ValueError("指数过大（上限 ±1000）")),
+    }
+
+    def _eval(node: ast.AST):
+        if isinstance(node, ast.Expression):
+            return _eval(node.body)
+        if isinstance(node, ast.Constant):
+            if isinstance(node.value, (int, float)) and not isinstance(node.value, bool):
+                return node.value
+            raise ValueError(f"不支持的字面量：{node.value!r}")
+        if isinstance(node, ast.UnaryOp) and isinstance(node.op, (ast.UAdd, ast.USub)):
+            v = _eval(node.operand)
+            return v if isinstance(node.op, ast.UAdd) else -v
+        if isinstance(node, ast.BinOp):
+            fn = _bin_ops.get(type(node.op))
+            if fn is None:
+                raise ValueError(f"不支持的运算符：{ast.dump(node.op)}")
+            return fn(_eval(node.left), _eval(node.right))
+        if isinstance(node, ast.Name):
+            if node.id in allowed_consts:
+                return allowed_consts[node.id]
+            raise ValueError(f"未知变量：{node.id}")
+        if isinstance(node, ast.Call):
+            if not isinstance(node.func, ast.Name) or node.keywords:
+                raise ValueError("仅支持白名单函数的简单调用")
+            fn = allowed_funcs.get(node.func.id)
+            if fn is None:
+                raise ValueError(f"不支持的函数：{node.func.id}")
+            args = [_eval(a) for a in node.args]
+            if len(args) > 4:
+                raise ValueError("函数参数过多")
+            return fn(*args)
+        raise ValueError("不支持的表达式语法")
+
+    expr = (expression or "").strip().replace("×", "*").replace("÷", "/").replace("^", "**")
+    if not expr:
+        return "表达式为空"
+    try:
+        result = _eval(ast.parse(expr, mode="eval"))
+    except (ValueError, ZeroDivisionError, OverflowError, SyntaxError, TypeError) as e:
+        return f"计算失败：{e}"
+    if isinstance(result, float) and result.is_integer() and abs(result) < 1e15:
+        return f"{expr} = {int(result)}"
+    return f"{expr} = {result}"
 
 
 async def _run_shell(sandbox: Sandbox, command: str) -> str:
@@ -187,6 +254,22 @@ def build_builtin_tools(mcp=None) -> dict[str, ToolEntry]:
                 "properties": {"path": {"type": "string", "description": "目录路径，默认当前目录"}},
             },
         }, _list_dir),
+        "calculator": ({
+            "name": "calculator",
+            "description": "精确数学计算器：任何数值计算都应使用本工具而非心算。"
+                           "支持 + - * / // % ** 与括号、常量 pi/e，以及 "
+                           "sqrt/abs/round/min/max/floor/ceil/log/exp/sin/cos/tan。",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "expression": {
+                        "type": "string",
+                        "description": "数学表达式，如 (137*892)/2、sqrt(2)**10",
+                    },
+                },
+                "required": ["expression"],
+            },
+        }, _calculator),
         "play_sound_effect": ({
             "name": "play_sound_effect",
             "description": "播放音效库音效来增强表现力（如惊讶、爆炸、wow）。"

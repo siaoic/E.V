@@ -1,88 +1,59 @@
-"""TTS→STT 回声防护（3.14）：识别结果与最近播报文本相似则丢弃。
+"""TTS 回声防护（3.14）：识别结果与最近播报文本比对。
 
-对标 hermes `tools/voice_mode.py` 的 is_tts_echo：打断场景（说话中用户插话）
-存在被自己声音触发 STT 的潜在回环——扬声器漏音被麦克风拾取 → 识别出与
-刚播报文本高度相似的内容 → 触发"自己回复自己"。用 difflib 字符级相似度
-（跨语言无需分词）做 fail-closed 判定，命中即丢弃该识别结果。
+STT 在「AI 开口瞬间被自己声音打断」的回环场景下，麦克风会把扬声器漏音
+识别成用户语音。本模块维护一个最近播报文本的环形缓冲，供
+``ev/asr/stt.py`` 在投递识别结果前做相似度判决：
 
-E.V 原本通过"输出时丢弃输入"规避整段回环，但打断瞬间的漏音片段仍可能
-穿过该机制，这里补上最后一道文本级防线（正常用户插话内容几乎不可能与
-刚播报文本相似 ≥0.6，误杀风险极低）。
+- 相似度 ≥ 0.6（difflib SequenceMatcher）→ 判为回声，丢弃；
+- 否则正常投递。
+
+只做内存环形缓冲，不持久化；缓冲容量与文本量都很小，不引入额外依赖。
 """
+from __future__ import annotations
 
 import difflib
-import re
 import threading
 from collections import deque
-from typing import List
+from typing import Optional
 
-# 相似度阈值（difflib.SequenceMatcher 0..1）：≥0.6 判为回声
-DEFAULT_TTS_ECHO_SIMILARITY_THRESHOLD = 0.6
-
-# 窗口滑动兜底的最小识别文本长度：短于该长度不做片段匹配，避免把正常
-# 单字插话（如 "对"）误判为回声（它可能恰好是长回复里的一个词）
-MIN_FRAGMENT_LENGTH_FOR_ECHO = 10
-
-# 最近播报文本窗口（句数）：覆盖"打断瞬间正在播 + 刚播完"的比对基准
-_ECHO_WINDOW = 5
+# 最近播报文本缓冲上限 / 相似度阈值（对齐 config AGENT_TTS_ECHO_GUARD 注释）
+_MAX_SAMPLES = 8
+_MAX_CHARS = 400
+_SIM_THRESHOLD = 0.6
 
 _lock = threading.Lock()
-_recent_spoken: deque = deque(maxlen=_ECHO_WINDOW)
+_recent: deque = deque(maxlen=_MAX_SAMPLES)
 
 
-def remember_spoken(text: str) -> None:
-    """TTS 播报文本时调用，记录为回声比对基准（进程内，无副作用）。"""
+def record_spoken(text: str) -> None:
+    """记录一段新播报文本（TTS 引擎在 speak 时调用）。"""
     text = (text or "").strip()
     if not text:
         return
     with _lock:
-        _recent_spoken.append(text)
+        _recent.append(text[: _MAX_CHARS])
 
 
-def recent_spoken_texts() -> List[str]:
-    """返回最近播报文本列表（快照，从新到旧）。"""
-    with _lock:
-        return list(reversed(_recent_spoken))
+def is_echo_of_recent(text: str, threshold: float = _SIM_THRESHOLD) -> bool:
+    """判断识别文本是否与最近播报文本高度相似（扬声器回声）。
 
-
-def _normalize_for_echo_compare(text: str) -> str:
-    return re.sub(r"\s+", " ", text).strip().lower()
-
-
-def is_tts_echo(
-    transcript: str,
-    spoken_text: str,
-    threshold: float = DEFAULT_TTS_ECHO_SIMILARITY_THRESHOLD,
-) -> bool:
-    """判断 transcript 是否为 spoken_text 的自我捕获（回声）。
-
-    先比全串相似度；未命中且 transcript 长度 ≥10 且短于 spoken_text 时，
-    用等长滑动窗口在 spoken_text 上逐段比对（打断瞬间捕获的往往只是
-    播报内容的一段碎片，全串比会因 spoken_text 过长而被稀释）。
+    空缓冲 / 空文本恒返回 False。相似度取与所有缓冲样本的最大值。
     """
-    if not transcript or not spoken_text:
+    text = (text or "").strip()
+    if not text:
         return False
-    a = _normalize_for_echo_compare(transcript)
-    b = _normalize_for_echo_compare(spoken_text)
-    if not a or not b:
+    with _lock:
+        samples = list(_recent)
+    if not samples:
         return False
-    if difflib.SequenceMatcher(None, a, b).ratio() >= threshold:
-        return True
-    if len(a) < MIN_FRAGMENT_LENGTH_FOR_ECHO or len(a) >= len(b):
-        return False
-    for start in range(0, len(b) - len(a) + 1):
-        window = b[start : start + len(a)]
-        if difflib.SequenceMatcher(None, a, window).ratio() >= threshold:
+    best = 0.0
+    for s in samples:
+        sim = difflib.SequenceMatcher(None, s, text).ratio()
+        if sim > best:
+            best = sim
+        if best >= threshold:
             return True
-    return False
+    return best >= threshold
 
 
-def is_echo_of_recent(
-    transcript: str,
-    threshold: float = DEFAULT_TTS_ECHO_SIMILARITY_THRESHOLD,
-) -> bool:
-    """判断识别文本是否与最近播报的任一文本构成回声。"""
-    for spoken in recent_spoken_texts():
-        if is_tts_echo(transcript, spoken, threshold):
-            return True
-    return False
+__all__ = ["record_spoken", "is_echo_of_recent"]

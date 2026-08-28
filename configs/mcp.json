@@ -5,6 +5,12 @@
             "args": ["-y", "bing-cn-mcp"],
             "timeout": 120,
             "description": "必应中文搜索：bing_search（联网搜索）、crawl_webpage（抓取网页内容），用于获取实时信息、新闻、资料。"
+        },
+        "piano": {
+            "command": "node",
+            "args": ["e:/AI/vtuber/plugins/third_party/piano/mcp-piano/server.js"],
+            "timeout": 60,
+            "description": "虚拟钢琴：get_status（查看连接状态）、play_note（单音）、play_chord（和弦）、play_melody（旋律）、play_score（多声部乐谱）、play_midi_file（播放本地 .mid）、stop_all（停止）、set_volume（音量）、set_sustain（延音踏板）。需在浏览器打开 Piano/Piano.html 建立桥接后才能发声。"
         }
     }
 }

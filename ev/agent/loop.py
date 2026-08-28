@@ -53,6 +53,9 @@ ProgressCallback = Callable[[int, int, dict, str], Any]
 # 单步执行超时（秒）：工具调用挂起时强制中断，防止单步卡死整个任务
 _STEP_TIMEOUT = 60.0
 
+# 空响应特征结果：GLM-4-flash 等模型在大工具集下偶发 stop+空内容回合
+_EMPTY_RESULT = "（无输出）"
+
 # 内置 finish 工具：让走原生 tool_calls 的模型也能显式结束任务。
 # 若不提供，模型只能靠「输出纯文本」表达完成，而 ReAct system 提示又要求
 # 每步产生动作，部分模型（如 GLM-4-flash）会陷入反复调用工具永不终止。
@@ -144,7 +147,8 @@ class ReActAgent:
         # 委派工具：注册到执行器。子 Agent 构造时传 allow_delegate=False 且
         # executor 已剔除 delegate（双保险防无限递归）。
         if allow_delegate:
-            self._executor.register("delegate", _DELEGATE_TOOL_SCHEMA["function"], self._delegate)
+            self._executor.register(
+                "delegate", _DELEGATE_TOOL_SCHEMA["function"], self._delegate_tool)
 
     def on_progress(self, callback: ProgressCallback) -> None:
         """注册进度回调（每步执行后触发，用于控制中心推送）。"""
@@ -256,6 +260,11 @@ class ReActAgent:
         console.dim("[Agent] 任务结论已写入记忆库")
 
     # ---------- 子 Agent 委派（对标 hermes "Delegates and parallelizes"） ----------
+
+    async def _delegate_tool(self, _sandbox: Any, tasks: list,
+                             backend: bool = False) -> str:
+        """delegate 工具入口：适配 executor 约定（首参固定传 sandbox，忽略）。"""
+        return await self._delegate(tasks, backend)
 
     async def _delegate(self, tasks: list, backend: bool = False) -> str:
         """把相互独立的子任务分派给子 Agent 执行并汇总结果。
@@ -425,6 +434,19 @@ class ReActAgent:
                 resp = await _send(with_thinking=False)
             except Exception as e2:
                 return {"action": "finish", "result": f"LLM 调用失败：{e2}"}
+        plan = self._parse_plan(resp)
+        if (plan["action"] == "finish" and plan.get("result") == _EMPTY_RESULT
+                and not summarize):
+            # 服务端偶发纯空响应（finish_reason=stop、无内容、无 tool_calls，
+            # 大工具集下概率更高）：静默重试一次，避免任务被空回合终结
+            try:
+                plan = self._parse_plan(await _send())
+            except Exception:
+                pass  # 重试失败沿用首次空响应结果
+        return plan
+
+    def _parse_plan(self, resp: Any) -> dict:
+        """把原始 completion 响应解析为动作 dict（_plan 的解析半程）。"""
         usage = getattr(resp, "usage", None)
         if usage is not None:
             self._budget.consume(getattr(usage, "total_tokens", 0) or 0)
@@ -436,7 +458,8 @@ class ReActAgent:
             # 部分模型（如 GLM-4-flash）可能不用 tool_calls，改用文本+JSON 代码块兜底
             fallback = self._extract_tool_call(content)
             if fallback is None:
-                return {"action": "finish", "result": content or "（无输出）"}
+                return {"action": "finish",
+                        "result": content or _EMPTY_RESULT}
             if fallback["action"] == "finish":
                 return fallback
             return {
@@ -454,7 +477,7 @@ class ReActAgent:
         if name == "finish":
             # 显式完成工具：模型调用 finish 即结束任务（原生 tool_calls 路径）
             return {"action": "finish",
-                    "result": str(args.get("result") or "").strip() or "（无输出）"}
+                    "result": str(args.get("result") or "").strip() or _EMPTY_RESULT}
         return {
             "action": "tool",
             "reasoning": (msg.content or "").strip(),

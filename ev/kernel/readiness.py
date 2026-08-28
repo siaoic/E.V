@@ -155,8 +155,6 @@ async def check_readiness(runtime) -> dict:
                 item["detail"] = detail
 
     checks = []
-    if getattr(runtime, "tts", None) is not None and not _ok_of(results, "tts"):
-        checks.append(_http_check("tts", f"{config.cfg.TTS_SERVER_URL}/"))
     if (getattr(runtime, "stt_engine", None) is not None
             and not _ok_of(results, "asr")):
         checks.append(_http_check("asr", f"{config.cfg.STT_SERVER_URL}/health"))

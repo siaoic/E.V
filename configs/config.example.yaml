@@ -27,13 +27,16 @@
 # MOUTH_GAIN: 0.4
 
 # ===== GPT-SoVITS TTS =====
-# TTS_SERVER_URL: "http://127.0.0.1:8000"
 # TTS_OUTPUT_DEVICE: "Voicemeeter In"   # 低延迟输出设备名子串（WASAPI 独占）；留空用系统默认
 # GPTSOVITS_REF_AUDIO: ""
 # GPTSOVITS_REF_AUDIOS: ""
 # GPTSOVITS_PROMPT_TEXT: ""
 # GPTSOVITS_TIMEOUT: 120
-# GPTSOVITS_MODELS_DIR: "tools/gsv_tts/API/models"
+# GPTSOVITS_MODELS_DIR: "ev/tts/models"
+# 角色专训权重（成对填写，留空用官方底模 s1v3.ckpt + s2Gv2ProPlus.pth）；
+# 只填文件名则在模型目录下查找
+# GPTSOVITS_ROLE_GPT: "恩骨v2-e15.ckpt"
+# GPTSOVITS_ROLE_SOVITS: "恩骨v2_e8_s584.pth"
 
 # ===== 内容过滤 =====
 # PROFANITY_FILTER_ENABLED: true

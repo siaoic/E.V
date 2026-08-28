@@ -37,17 +37,15 @@ env/
 tools/memory/memU-main.zip
 
 # ================= TTS 本地模型（体积巨大，不入库，需自行下载/拷贝） =================
-# 注意：实际模型目录在 tools/gsv_tts/API/models 下（旧条目 gsv_tts/API/models/ 已失效）
-tools/gsv_tts/API/models/
-# GPT-SoVITS 官方库源码（gsv_tts/gsv_tts 包），本地依赖，由 ev/tts/server.py 通过 sys.path 加载，不入库
-tools/gsv_tts/gsv_tts/
+# 实际模型目录：ev/tts/models（官方底模 s1v3 + 角色专训权重）
+ev/tts/models/
 
 # ================= 本地 ASR 模型（Qwen3-ASR 权重 1.8GB+，不入库） =================
 src/asr/qwen3_asr/
 # ================= 本地 ASR 模型（fsmn-vad / paraformer 流式快照，不入库） =================
 src/asr/models/
 
-# ================= 临时 TTS 音频（GPT-SoVITS 为 wav，edge 为 mp3） =================
+# ================= 临时 TTS 音频（GPT-SoVITS 输出 wav） =================
 vtuber_tts_*
 
 # ================= 桌宠模式本地依赖（pip --target 安装，避免污染系统环境） =================
@@ -146,3 +144,25 @@ ev/utils/字魂布丁体(商用需授权).ttf
 
 # ================= TUI npm 依赖（与根目录 node_modules 同规则） =================
 ui/tui/node_modules/
+
+# ================= 钢琴插件（自研 mcp-piano 入库；第三方网页钢琴与音源不入库） =================
+# Piano/ 为第三方开源网页钢琴（含 147MB SoundFonts 音色采样），本地保留
+plugins/third_party/piano/Piano/
+plugins/third_party/piano.zip
+# 测试脚本不入库
+plugins/third_party/piano/mcp-piano/test/
+plugins/third_party/piano/mcp-piano/test-*.js
+
+# ================= OMR 谱面临时转换产物（smallpdf→musicxml→score.json） =================
+smallpdf-convert-*/
+
+# ================= 根目录一次性调试脚本 =================
+/1.py
+/33.py
+/_steinway_tmp/
+
+# ================= TTS 基准测试脚本（测试代码不入库） =================
+ev/tts/bench_*.py
+
+# ================= TTS 运行音频资产（参考音频本地保留） =================
+assets/tts/

@@ -34,13 +34,14 @@
 
 | 变量 | 默认值 | 说明 |
 |---|---|---|
-| `TTS_SERVER_URL` | `http://127.0.0.1:8000` | **外部 TTS 合成服务**（`tts.bat` 启动的 fastapi_server_example.py） |
 | `TTS_OUTPUT_DEVICE` | 空 | 低延迟输出设备名子串（如 `Voicemeeter In`）：走 WASAPI 独占直达混音台，首句出声 ~120ms→几 ms；留空用系统默认输出（缓冲 50ms） |
 | `GPTSOVITS_REF_AUDIO` | 空 | 主参考音频（音色 + 发音参考）；**为空则语音合成关闭** |
-| `GPTSOVITS_REF_AUDIOS` | 空 | 辅助参考音频，多条 `\|` 分隔（服务端仅支持单说话人，当前忽略） |
+| `GPTSOVITS_REF_AUDIOS` | 空 | 辅助参考音频，多条 `\|` 分隔（多参考增强音色稳定性） |
 | `GPTSOVITS_PROMPT_TEXT` | 空 | 参考音频对应文本 |
 | `GPTSOVITS_TIMEOUT` | `120` | 合成超时（秒） |
-| `GPTSOVITS_MODELS_DIR` | `tools/gsv_tts/API/models` | 本地模型目录（GSV-TTS-Lite） |
+| `GPTSOVITS_MODELS_DIR` | `ev/tts/models` | 本地模型目录（GSV-TTS-Lite） |
+| `GPTSOVITS_ROLE_GPT` | 空 | 角色专训 GPT ckpt 文件名/路径（成对填写，留空用官方底模 s1v3） |
+| `GPTSOVITS_ROLE_SOVITS` | 空 | 角色专训 SoVITS pth 文件名/路径（成对填写，留空用官方底模 s2Gv2ProPlus） |
 
 ## 5. 内容过滤
 

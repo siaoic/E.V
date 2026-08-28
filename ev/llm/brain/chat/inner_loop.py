@@ -330,6 +330,13 @@ async def _run_chat_stream_inner(
                 return
             buffer += item
 
+            # 打字机流式：把当前累加文本立刻 yield 给下游做实时显示。
+            # 注意 mode="delta" 仅用于打印/打字机显示，绝不触发 TTS / 字幕 /
+            # 复读检测 / 事件总线等副作用（下游 stream.converse 据此分流）。
+            # 不在 sound_effect_used 时推送：本轮已播音效的文字不再播报。
+            if buffer and not sound_effect_used:
+                yield ("delta", buffer)
+
             # 增量切段（压 TTS 首句延迟）：每 chunk 只扫描新增区域
             # （scanned 之后），切出段后剩余 buffer 从头开始。
             # 边界优先级：句末标点 > 停顿标点（逗号/顿号） > 首段早产 > 超长兜底，
@@ -355,13 +362,19 @@ async def _run_chat_stream_inner(
                 scanned = 0
                 cleaned = _emit(sentence)
                 if cleaned and not sound_effect_used:
-                    yield cleaned
+                    # mode="final"：下游走完整流水线（脏话过滤/复读检测/
+                    # SFX 标记/TTS 入队/字幕推送/事件总线）。
+                    yield ("final", cleaned)
+                # 段切完立刻推一次 delta，让下游看到「当前 buffer 已重置」
+                # 之后的下一段累加起点（视觉上无缝衔接）
+                if buffer and not sound_effect_used:
+                    yield ("delta", buffer)
             scanned = len(buffer)
 
         # 收尾：剩余内容作为最后一句
         cleaned = _emit(buffer)
         if cleaned and not sound_effect_used:
-            yield cleaned
+            yield ("final", cleaned)
 
         await bg_task
         # 同步子线程可能写回的路由状态（服务不可用时被回退为 None/默认值），
@@ -447,7 +460,7 @@ async def _run_chat_stream_inner(
                 continue
             console.error(f"❌ 连续 {empty_count} 次空响应，放弃等待")
             final_reply = "抱歉，我好像卡住了，请重新问我吧~"
-            yield final_reply
+            yield ("final", final_reply)
             break
 
         # 正常产出文本，结束（本轮已流式 yield 的句子即最终回复）
@@ -462,7 +475,7 @@ async def _run_chat_stream_inner(
         for seg in _split_sentences(final_reply):
             cleaned = _clean_sentence(seg)
             if cleaned.strip() and not sound_effect_used:
-                yield cleaned
+                yield ("final", cleaned)
 
     # 思考过程换行
     if self.cfg.LLM_THINKING:

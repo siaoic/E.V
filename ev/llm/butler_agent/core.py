@@ -190,7 +190,9 @@ class ButlerAgent:
 
     # ---------- 视觉描述（图片直接交给 agent 处理） ----------
 
-    async def describe_image(self, image_b64: str, prompt: str = "") -> str:
+    async def describe_image(
+        self, image_b64: str, prompt: str = "", max_tokens: int = 1024,
+    ) -> str:
         """把图片（base64）交给视觉模型描述，返回描述文本。"""
         prompt = prompt or "用简洁自然的中文描述这张图片的内容。"
         candidates = self._vision_candidates()
@@ -218,7 +220,7 @@ class ButlerAgent:
                                 ],
                             }
                         ],
-                        max_tokens=1024,
+                        max_tokens=max_tokens,
                         temperature=0.4,
                     ),
                     timeout=60.0,

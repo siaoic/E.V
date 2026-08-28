@@ -5,7 +5,6 @@ version: 5.0
 plugins:
   builtin:
     - echo_llm                  # 占位：真实接入时替换为 llm_deepseek / llm_chatglm_local 等
-    - tts_edge                  # TTS：Edge TTS（免费）
     - avatar_xiaoyuanzi_local   # Avatar：小院子本地化（或 VTS）
     - input_cli                 # Input：命令行交互
     - emotion_rule              # Emotion：规则映射
@@ -14,7 +13,7 @@ plugins:
 
 slots:
   model: echo-default
-  tts: edge
+  tts: null
   avatar: xiaoyuanzi-local
   input: cli
   memory: null
@@ -31,11 +30,6 @@ plugin_config:
   echo_llm:
     prefix: "[Pet] "
     impl_name: echo-default
-  tts_edge:
-    voice: zh-CN-XiaoxiaoNeural
-    impl_name: edge
-    rate: "+0%"
-    volume: "+0%"
   avatar_xiaoyuanzi_local:
     impl_name: xiaoyuanzi-local
     host: 127.0.0.1

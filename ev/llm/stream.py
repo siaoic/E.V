@@ -150,7 +150,35 @@ async def converse(brain: LLMBrain,
         # 首句偶发 500）；preheat() 只做本地播放链路激活，不触网，立即返回。
         if tts is not None:
             tts.preheat()
-        async for sentence in brain.chat_stream(text, proactive=proactive, history=history):
+        # 打字机流式：累计已打印字符数，delta 时只打 buffer 的「新增尾段」，
+        # 完整段 final 时清零，下一段 delta 不会重复打印。
+        printed_len = 0
+        async for item in brain.chat_stream(text, proactive=proactive, history=history):
+            # chat_stream 新协议：yield (mode, text)，mode ∈ {"delta","final"}
+            # - delta: 实时累加文本（打字机显示），不触发 TTS/字幕/复读/事件
+            # - final: 完整可合成段，走完整副作用流水线
+            if isinstance(item, tuple) and item and item[0] == "delta":
+                delta_text: str = item[1]
+                if not delta_text:
+                    continue
+                # 主动对话：仅在首段前加一次前缀（delta 是连续流，不再重复）
+                if proactive and not turn_prefixed:
+                    console.chat("主动对话：", end="", flush=True)
+                    turn_prefixed = True
+                # 只打 buffer 新增尾段（与上一轮 delta 相比）
+                if len(delta_text) > printed_len:
+                    console.chat(delta_text[printed_len:], end="", flush=True)
+                    printed_len = len(delta_text)
+                continue
+            # 兼容旧协议（部分替代实现可能仍 yield 纯 str）
+            if isinstance(item, tuple) and item and item[0] == "final":
+                sentence: str = item[1]
+            elif isinstance(item, str):
+                sentence = item
+            else:
+                continue
+            # final 段：清零打印游标，下一段 delta 重新累加
+            printed_len = 0
             # 复读防护（宁缺毋怪）：句子拼入累积文本后检测，命中即中止本轮，
             # 丢弃后续全部输出，避免把退化复读流播给观众
             accumulated += sentence
@@ -174,8 +202,9 @@ async def converse(brain: LLMBrain,
             for seg, sfx in split_sfx_markers(spoken):
                 if not seg.strip():
                     continue  # 纯标记段已合并到其后文本段，正常不会出现
-                # AI 说的话走「对话」通道：控制中心左栏显示（读哪句显示哪句）
-                console.chat(seg, end="", flush=True)
+                # final 段：整段打印（delta 已逐字打印过，final 时不再重打）
+                # — 但 LLM 流式情况下 delta 的「最后一截」= final 段末尾，
+                # console.chat 已打过，final 这里跳过避免重复；非流式兜底再打
                 full_reply_parts.append(seg)
                 # 逐句情绪判断（规则分类零开销）：每句话播放对应表情/动作，
                 # 与 TTS 播放并行，不阻塞句子入队节奏

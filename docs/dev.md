@@ -74,22 +74,28 @@
 
 ```python
 from src.adapter.llm import BaseLLMAdapter
+from typing import AsyncIterator, Tuple
 
 class MyLLMAdapter(BaseLLMAdapter):
     name = "my_llm"
 
     def chat_stream(self, user_text: str, *, proactive: bool = False,
-                    history=None):
-        """流式对话：逐句产出回复文本。
+                    history=None) -> AsyncIterator[Tuple[str, str]]:
+        """流式对话：按 (mode, text) 协议产出。
 
-        Args:
-            user_text: 用户输入（或主动对话决策文本）
-            proactive: 是否以「内部自主行动指令」身份调用（不写历史）
-            history: 可选历史快照（None = 完整历史）
-        Yields:
-            str: 逐段回复文本
+        协议：
+          yield ("delta", text) → 打字机流式实时显示（累加 buffer）
+          yield ("final", text) → 一个完整可播分段（送 TTS / 字幕 / 复读检测）
         """
-        ...
+        buffer = ""
+        for token in upstream_iter_tokens(user_text):
+            buffer += token
+            yield ("delta", buffer)
+            if should_cut(buffer):
+                yield ("final", flush(buffer))
+                buffer = ""
+        if buffer:
+            yield ("final", buffer)
 
     def push_turn_context(self, contexts: list) -> None: ...
     def reload_client(self) -> None: ...

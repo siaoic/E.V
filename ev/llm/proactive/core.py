@@ -102,7 +102,14 @@ class ProactiveEngine:
         history_len = len(self.brain.history)
         try:
             parts = []
-            async for sentence in self.brain.chat_stream(prompt, proactive=True):
+            async for item in self.brain.chat_stream(prompt, proactive=True):
+                # chat_stream 新协议：只关心 final 段（决策文本），跳过 delta
+                if isinstance(item, tuple) and item and item[0] == "final":
+                    sentence = item[1]
+                elif isinstance(item, str):
+                    sentence = item
+                else:
+                    continue
                 if sentence:
                     parts.append(sentence)
         except Exception as e:

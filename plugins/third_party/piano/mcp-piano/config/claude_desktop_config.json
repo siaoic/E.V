@@ -1,0 +1,11 @@
+{
+  "mcpServers": {
+    "mcp-piano": {
+      "command": "node",
+      "args": ["/绝对路径/mcp-piano/server.js"],
+      "env": {
+        "MCP_PIANO_PORT": "7788"
+      }
+    }
+  }
+}

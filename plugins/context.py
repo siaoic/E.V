@@ -170,7 +170,14 @@ class PluginContext:
         history_len = len(app.brain.history)
         parts = []
         try:
-            async for sentence in app.brain.chat_stream(prompt, proactive=True):
+            async for item in app.brain.chat_stream(prompt, proactive=True):
+                # chat_stream 新协议：只关心 final 段，跳过 delta
+                if isinstance(item, tuple) and item and item[0] == "final":
+                    sentence = item[1]
+                elif isinstance(item, str):
+                    sentence = item
+                else:
+                    continue
                 if sentence:
                     parts.append(sentence)
         finally:

@@ -52,6 +52,11 @@ class LLMContract(Protocol):
 
     start/stop 生命周期不强制：EchoLLM 等骨架实现无它们也能通过 isinstance，
     真实实现（LLMBrain 等）如有则 kernel 在启动/关闭时自动调用（用 hasattr 判定）。
+
+    chat_stream 协议（v2）：
+        yield (mode, text)，mode ∈ {"delta", "final"}
+          - ("delta", text): 打字机流式实时显示（累加 buffer）
+          - ("final", text): 一个完整可播分段（触发 TTS / 字幕 / 复读检测 / 事件）
     """
     name: str
     async def chat_stream(self, user_text: str, **kwargs): ...

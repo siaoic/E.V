@@ -2,7 +2,10 @@
 
 满足协议（从 src.core.slots import LLMContract 验证 isinstance）：
   name: str
-  chat_stream(text, *, proactive=False, history=None) -> AsyncIterator[str]
+  chat_stream(text, *, proactive=False, history=None) -> AsyncIterator[Tuple[str, str]]
+      - 产出 (mode, text) 元组：mode ∈ {"delta", "final"}
+        * "delta"  : 当前累加文本（打字机流式实时显示）
+        * "final"  : 一个完整可播分段（送 TTS / 字幕 / 复读检测）
   push_turn_context(contexts: list[str]) -> None
   reload_client() -> None
 额外：
@@ -10,7 +13,7 @@
   contexts: list（存 push_turn_context 注入的内容，下次 echo 时附加在文本前）
 """
 from __future__ import annotations
-from typing import Any, AsyncIterator, Optional
+from typing import Any, AsyncIterator, Optional, Tuple
 
 from plugins.base import Plugin  # noqa: F401  (让 PluginManager 能找到 Plugin 子类)
 
@@ -57,8 +60,13 @@ class EchoLLM:
         *,
         proactive: bool = False,
         history: Optional[list[dict[str, Any]]] = None,
-    ) -> AsyncIterator[str]:
-        """流式生成：合并 contexts + prefix + text 后按句 yield。"""
+    ) -> AsyncIterator[Tuple[str, str]]:
+        """流式生成：合并 contexts + prefix + text 后按句 yield。
+
+        新协议：yield (mode, text)，mode ∈ {"delta","final"}
+          - delta: 打字机流式（每块累加文本实时显示）
+          - final: 一个完整可播分段（送 TTS/字幕/事件）
+        """
         parts: list[str] = []
         if self._turn_contexts:
             parts.append("（注入背景：" + "；".join(self._turn_contexts) + "）")
@@ -71,10 +79,16 @@ class EchoLLM:
         self._turn_contexts.clear()
         # 流式：按 len(full)//4 切 3~4 块（模拟真实 LLM 分块）
         n = max(1, len(full) // 4)
+        acc = ""  # 打字机累加 buffer
         for i in range(0, len(full), n):
             chunk = full[i:i + n]
-            if chunk:
-                yield chunk
+            if not chunk:
+                continue
+            acc += chunk
+            yield ("delta", acc)
+        # 整段一次性送出（Echo 没有段落切分逻辑）
+        if acc:
+            yield ("final", acc)
 
     def push_turn_context(self, contexts: list[str]) -> None:
         """注入本轮背景：合并到下次 chat_stream 输出。"""

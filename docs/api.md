@@ -97,7 +97,7 @@
 | 方法 | 签名 | 说明 |
 |---|---|---|
 | `__init__` | `(mcp=None)` | mcp 为 `MCPManager` 或 None |
-| `chat_stream` | `async (user_text: str, *, proactive=False, history=None) -> AsyncIterator[str]` | 流式对话：逐句产出回复文本。`proactive=True` 时不写入历史（只保留模型回复）；`history` 为可选历史快照（None 用完整历史） |
+| `chat_stream` | `async (user_text: str, *, proactive=False, history=None) -> AsyncIterator[Tuple[str, str]]` | 流式对话：按 `(mode, text)` 协议产出。`mode="delta"` 是打字机流式实时显示（累加 buffer），`mode="final"` 是完整可播分段（触发 TTS/字幕/复读检测/事件）。`proactive=True` 时不写入历史（只保留模型回复）；`history` 为可选历史快照（None 用完整历史） |
 | `push_turn_context` | `(contexts: List[str]) -> None` | 注入本轮系统提示背景信息（插件注入用） |
 | `reload_client` | `() -> None` | 重建 LLM 客户端（配置热更新后调用） |
 

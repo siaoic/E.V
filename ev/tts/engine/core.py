@@ -1,213 +1,408 @@
-"""TTSEngine 类骨架：__init__ + 生命周期 + 对外接口。
+"""TTSEngine：GSV-TTS-Lite 进程内 Token 级流式合成引擎。
 
-播放/合成实现在 playback.py，磁盘缓存在 cache.py，常量/文本清洗/本地
-模型工厂在 ref_audio.py。合成改为进程内直连 GSV-TTS-Lite
-（对齐 test_basic_infer / test_stream_20runs），不再依赖外部 HTTP 服务
-（ev/tts/server.py 仅保留供调试用）。
+链路：LLM 文本（final 段）→ speak 入队 → pump 线程串行消费 →
+``infer_stream(stream_mode="token", stream_chunk=25, overlap_len=5)`` 逐块
+yield AudioClip → ``player._emit_block`` 写入 GSV AudioQueue 出声（首块即
+触发 on_play 回调，口型同步）→ 字幕丢给 SubtitlesQueue 按字级时间戳推送。
+
+不复制声卡逻辑：实际出声由 GSV-TTS-Lite 的 AudioQueue（sounddevice）驱动。
 """
-
 from __future__ import annotations
 
 import asyncio
-from typing import Optional, Tuple
+import threading
+from pathlib import Path
+from queue import Empty, Queue
+from typing import Callable, Optional
 
-from ev.utils import console
-from ev.tts.player import TTSPlayer
 from ev.adapter.tts import BaseTTSAdapter
+from ev.utils import config, console
+from ev.tts.player import AsyncAudioPlayer
+from ev.tts.subtitles import SubtitlesQueue
+from ev.tts.echo import record_spoken
 
-from .ref_audio import (
-    _build_tts,
-    _preheat,
+# ── pump 线程调度优化（Windows）────────────────────────────────────────
+# GPT token 循环是 Python 密集型，与 LLM 流式解析争抢 CPU 时片；
+# 提升线程优先级 + 1ms 系统定时器粒度，实测可显著缓解并发下的首块延迟。
+try:  # 全局只需一次；无 winmm（非 Windows）则跳过
+    import ctypes
+
+    _winmm = ctypes.WinDLL("winmm")
+    _winmm.timeBeginPeriod(1)
+except Exception:
+    pass
+
+
+def _boost_thread_priority() -> None:
+    """把当前线程提到 HIGH 优先级（失败静默，不影响功能）。"""
+    try:
+        import ctypes
+
+        THREAD_SET_INFORMATION = 0x0020
+        THREAD_PRIORITY_HIGHEST = 2
+        k32 = ctypes.WinDLL("kernel32")
+        handle = k32.OpenThread(
+            THREAD_SET_INFORMATION, False, threading.get_native_id()
+        )
+        if handle:
+            k32.SetThreadPriority(handle, THREAD_PRIORITY_HIGHEST)
+            k32.CloseHandle(handle)
+    except Exception:
+        pass
+
+# ── 模块级导出（cleaner / bench 脚本引用）─────────────────────────────
+# GPT 累积 25 token 即解码一块音频（首块快速产出），5 token 重叠用于块间平滑
+_STREAM_CHUNK = 25
+_STREAM_OVERLAP = 5
+_SYNTH_PARAMS = {
+    "top_k": 5,
+    "top_p": 0.9,
+    "temperature": 1.0,
+    "repetition_penalty": 1.35,
+    "noise_scale": 0.5,
+    "speed": 1.0,
+}
+_WARMUP_TEXTS = (
+    "你好。",
+    "我是一名虚拟主播，很高兴今天能和大家见面！",
+    "嗯……让我想想怎么回答比较好呢？",
+    "好耶，我们开始吧~今天要玩点什么游戏呢？",
 )
-from . import cache as _cache_mod
-from . import playback as _playback_mod
+
+# 参考音频 / 文本回退（cfg 未配置时，用项目自带示例；源为 GSV-TTS-Lite examples）
+_SPEAKER_AUDIO = "assets/tts/laffey.mp3"
+_PROMPT_AUDIO = "assets/tts/AnAn.ogg"
+_PROMPT_TEXT = "ちが……ちがう。レイア、貴様は間違っている。"
+
+# 兼容旧接口：本引擎流式直出到声卡、不落盘，缓存恒空
+_wav_cache: dict = {}
+
+
+def evict_tts_cache() -> None:
+    """清理 TTS 磁盘/内存缓存（旧接口：清空 wav 缓存）。"""
+    _wav_cache.clear()
+
+
+def _cleanup_output() -> tuple:
+    """删除 output 目录下旧 TTS 临时 wav，返回 (删除数, 释放字节)。"""
+    project_root = Path(config.cfg.PROJECT_ROOT)
+    out_dir = project_root / "output"
+    files = freed = 0
+    try:
+        if out_dir.is_dir():
+            for path in out_dir.glob("*.wav"):
+                try:
+                    freed += path.stat().st_size
+                    path.unlink()
+                    files += 1
+                except OSError:
+                    pass
+    except Exception:
+        pass
+    return files, freed
 
 
 class TTSEngine(BaseTTSAdapter):
-    """GPT-SoVITS 本地引擎（进程内直连 GSV-TTS-Lite，合成与播放同进程）。
+    """进程内 GSV-TTS-Lite 流式合成引擎（兼容 HTTP 客户端接口）。"""
 
-    对齐 test_basic_infer / test_stream_20runs：TTS 单例 + infer_stream 流式
-    合成；播放层沿用 TTSPlayer（口型/字幕/打断强依赖）。
-    """
+    name = "tts"
 
     def __init__(self) -> None:
-        from ev.utils import config as _config
-
-        self._ref_main = str(
-            getattr(_config.cfg, "GPTSOVITS_REF_AUDIO", "") or ""
-        ).strip()
-        self._ref_extras = str(
-            getattr(_config.cfg, "GPTSOVITS_REF_AUDIOS", "") or ""
-        ).strip()
-        self.ref_text = str(
-            getattr(_config.cfg, "GPTSOVITS_PROMPT_TEXT", "") or ""
-        ).strip()
-
-        self._tts = None        # 本地 GSV-TTS 实例（start() 加载后非空）
+        self._server_url = "local://gsv-tts-lite"  # 兼容 bench 打印
+        self._player = AsyncAudioPlayer()
+        self._subtitle_queue = SubtitlesQueue()
+        self._speak_queue: Queue = Queue(maxsize=50)
+        self._pump_thread: Optional[threading.Thread] = None
+        self._pump_lock = threading.Lock()
+        self._interrupted = threading.Event()
+        self._on_play_done: Optional[Callable] = None
+        self._tts = None      # gsv_tts.TTS 实例（start() 时懒加载）
         self._ready = False
-        self._player = TTSPlayer()
-        self._gen = 0
-        self._interrupted = False
-        self._pending: Optional[asyncio.Queue] = None
-        self._pump_task: Optional[asyncio.Task] = None
-        self._working = False
+        # 参考音频 / 文本（start 时从 cfg 读取，apply_ref 可热更新）
+        self._speaker = ""
+        self._prompt_audio = ""
+        self._prompt_text = ""
+        # 角色专训权重（cfg 配置，None = 官方底模）
+        self._role_gpt: Optional[str] = None
+        self._role_sovits: Optional[str] = None
 
-    # ---------- 参考音频 ----------
-
-    def _ref_params(self) -> Tuple[str, str, str]:
-        """参考参数：(speaker_audio, prompt_audio, prompt_text)。"""
-        main = (self._ref_main or "").strip()
-        return main, main, (self.ref_text or "").strip()
-
-    # ---------- 生命周期 ----------
+    # ─────────────────────────── 生命周期 ───────────────────────────
 
     async def start(self) -> bool:
-        """加载本地 GSV-TTS 模型（未配置参考音频或加载失败时返回 False）。"""
-        if not self._ref_params()[0]:
-            console.warn("TTS：未配置 GPTSOVITS_REF_AUDIO，语音合成关闭")
-            return False
-        self._player.set_loop(asyncio.get_running_loop())
+        """加载本地 GSV 模型（后台线程，约 20s）；成功返回 True。"""
         try:
-            # 模型加载约 20s：to_thread 避免阻塞事件循环
-            # （init_tts_async 是后台任务，期间 speak/drain 由守卫静默处理）
-            self._tts = await asyncio.to_thread(_build_tts)
+            return await asyncio.to_thread(self._load_model)
         except Exception as e:
-            console.warn(f"TTS：本地模型加载失败（{e}），语音将降级为纯字幕")
-            self._tts = None
+            console.warn(f"TTS 模型加载失败：{e}")
             return False
-        self._pending = asyncio.Queue()
-        self._ready = True
-        console.ok("TTS 本地模型已加载（进程内合成）")
-        asyncio.create_task(asyncio.to_thread(_cache_mod.evict_tts_cache))
-        try:
-            import numpy as _np
 
-            sr_warm = 32000
-            self._player._ensure_queue(sr_warm)
-            warmup = _np.zeros(int(0.05 * sr_warm), dtype=_np.float32)
-            self._player._queue.put(warmup.reshape(-1, 1))
-        except Exception:
-            pass
+    def _load_model(self) -> bool:
+        """（后台线程）加载 gsv-tts-lite pip 包并实例化 TTS。"""
+        project_root = Path(config.cfg.PROJECT_ROOT)
+        try:
+            from gsv_tts import TTS  # 解析至 site-packages（gsv-tts-lite>=0.4.7）
+        except ImportError as e:
+            console.warn(f"无法导入 gsv_tts：{e}（请先 pip install gsv-tts-lite）")
+            return False
+
+        models_dir = str(
+            config.cfg.GPTSOVITS_MODELS_DIR or (project_root / "ev" / "tts" / "models")
+        )
+
+        def _resolve_weight(name: str) -> Optional[str]:
+            """解析角色权重 cfg：纯文件名在 models_dir 下查找，含目录的相对路径基于项目根；缺失回退 None（底模）。"""
+            name = (name or "").strip()
+            if not name:
+                return None
+            path = Path(name)
+            if not path.is_absolute():
+                path = (
+                    Path(models_dir) / path if len(path.parts) == 1
+                    else project_root / path
+                )
+            if not path.exists():
+                console.warn(f"GPTSOVITS 角色权重不存在（回退官方底模）：{path}")
+                return None
+            return str(path)
+
+        self._role_gpt = _resolve_weight(config.cfg.GPTSOVITS_ROLE_GPT)
+        self._role_sovits = _resolve_weight(config.cfg.GPTSOVITS_ROLE_SOVITS)
+        ref = (config.cfg.GPTSOVITS_REF_AUDIO or "").strip()
+        self._speaker = ref or str(project_root / _SPEAKER_AUDIO)
+        self._prompt_audio = self._speaker  # 单参考音频：说话人即音色
+        self._prompt_text = (
+            (config.cfg.GPTSOVITS_PROMPT_TEXT or "").strip() or _PROMPT_TEXT
+        )
+
+        self._tts = TTS(
+            use_bert=True,
+            sovits_cache=[_STREAM_CHUNK * 2, _STREAM_CHUNK * 2 + _STREAM_OVERLAP],
+            models_dir=models_dir,
+        )
+        # 每次合成结尾默认会 gc.collect()+torch.cuda.empty_cache()：
+        # 实测每句额外 ~200ms，且会洗掉 CUDA 分配器形状池（多样短句
+        # 首块 p50 由 ~290ms 恶化到 ~1055ms）。运行期改为不清理，
+        # 保留缓存与对象池；stop() 时统一做一次真实清理。
+        self._tts._orig_empty_cache = self._tts._empty_cache
+        self._tts._empty_cache = lambda: None
+        # cuDNN attention 对每个新输入形状需冷编译执行计划（新句子音素长度
+        # 不同 ⇒ 每条新句首块 +~600ms）。decode 路径已被 CUDA Graph 冻结，
+        # 此补丁只影响 eager prefill；换成 mem-efficient 后端冷热同速
+        # （bench_shape_cold 实测：冷首块 719→119ms）。
+        try:
+            from torch.nn.attention import SDPBackend
+            import gsv_tts.GPT_SoVITS.GPT.t2s_model as _t2s_mod
+            _t2s_mod.SDPBACKEND = SDPBackend.EFFICIENT_ATTENTION
+        except Exception as e:
+            console.warn(f"SDPA 后端切换失败（保持默认）：{e}")
+        self._ready = True
+        console.ok(f"TTS 模型加载完成：{models_dir}")
         return True
 
     async def warmup(self) -> None:
-        """预热：跑一句短文本走通完整推理链路（对齐 test_stream_20runs.py）。"""
+        """启动预热：跑一遍完整流式合成链路（产物只走推理、不播放）。"""
         if not self._ready or self._tts is None:
             return
-        speaker_audio, prompt_audio, prompt_text = self._ref_params()
-        if not speaker_audio:
-            return
         try:
-            await asyncio.to_thread(
-                _preheat, self._tts, speaker_audio, prompt_audio, prompt_text)
-            console.dim("[TTS] 本地预热完成（推理链路已就绪）")
+            await asyncio.to_thread(self._warmup_sync)
         except Exception as e:
-            console.dim(f"[TTS] 预热失败（不影响使用）：{e}")
+            console.dim(f"TTS 预热失败（不影响后续合成）：{e}")
+
+    def _warmup_sync(self) -> None:
+        """多样化预热：覆盖常见句长/标点形态，建立 cudnn 规划与分配器形状池。
+
+        只用单一短句预热时，真实对话的多样句子仍会走冷路径
+        （GPT 首 yield 可恶化到 ~600ms/句）。
+        """
+        for _ in range(2):
+            for text in _WARMUP_TEXTS:
+                for _ in self._stream(text):
+                    pass
 
     def preheat(self) -> None:
-        """每轮对话起始预热：仅本地播放链路。"""
-        if not self._ready or self._tts is None or self._interrupted:
+        """每轮对话起始调用：本地进程内推理，链路已由 start/warmup 激活，立即返回。"""
+        return
+
+    # ─────────────────────────── 合成 / 播放 ───────────────────────────
+
+    async def speak(self, text: str, sfx: str = None) -> None:
+        """把一段文本送入合成队列并立即返回（不阻塞 LLM 流）。
+
+        未就绪时静默丢弃：上层 init_tts_async 失败会把 tts 置 None 走纯字幕降级；
+        这里再兜一层（如就绪前的瞬时调用）。
+        """
+        text = (text or "").strip()
+        if not text:
+            return
+        record_spoken(text)  # 回声防护：记录播报文本
+        if self._tts is None or not self._ready:
+            return
+        self._speak_queue.put((text, sfx))
+        self._ensure_pump()
+
+    def _ensure_pump(self) -> None:
+        """确保 pump 线程存在（空闲 0.5s 自动退出，需要时重建）。"""
+        with self._pump_lock:
+            if self._pump_thread is None or not self._pump_thread.is_alive():
+                self._pump_thread = threading.Thread(
+                    target=self._pump, daemon=True, name="TTSPump"
+                )
+                self._pump_thread.start()
+
+    def _pump(self) -> None:
+        """串行消费待合成句子：按入队顺序逐句流式合成并出声。"""
+        _boost_thread_priority()
+        while not self._interrupted.is_set():
+            try:
+                item = self._speak_queue.get(timeout=0.5)
+            except Empty:
+                return  # 空闲 0.5s 退出
+            if item is None:
+                return
+            self._synth_one(item[0], item[1])
+
+    def _stream(self, text: str):
+        """创建一条 Token 级流式合成生成器（infer_stream）。
+
+        配置了 GPTSOVITS_ROLE_GPT/SOVITS 时透传给 infer_stream：gsv-tts-lite
+        首次合成时按需加载进权重缓存（预热阶段即完成），之后命中内存。
+        """
+        tts = self._tts
+        return tts.infer_stream(
+            spk_audio_path=self._speaker,
+            prompt_audio_path=self._prompt_audio,
+            prompt_audio_text=self._prompt_text,
+            text=text,
+            stream_mode="token",
+            stream_chunk=_STREAM_CHUNK,
+            overlap_len=_STREAM_OVERLAP,
+            boost_first_chunk=True,
+            return_subtitles=True,
+            debug=False,
+            gpt_model=self._role_gpt,        # None = 官方底模 s1v3.ckpt
+            sovits_model=self._role_sovits,  # None = s2Gv2ProPlus.pth
+            **_SYNTH_PARAMS,
+        )
+
+    def _synth_one(self, text: str, sfx: str = None) -> None:
+        """（pump 线程）流式合成单句：每块写入 GSV AudioQueue 播放 + 字幕推送。"""
+        tts = self._tts
+        if tts is None:
             return
         try:
-            import numpy as _np
-
-            self._player._ensure_queue(32000)
-            warmup = _np.zeros(int(0.05 * 32000), dtype=_np.float32)
-            self._player._queue.put(warmup.reshape(-1, 1))
-        except Exception:
-            pass
-
-    async def stop(self) -> None:
-        """停止：打断播放/合成并释放本地模型引用。"""
-        self.interrupt()
-        if self._pump_task is not None and not self._pump_task.done():
-            try:
-                await asyncio.wait_for(self._pump_task, timeout=5)
-            except Exception:
-                try:
-                    self._pump_task.cancel()
-                except Exception:
-                    pass
-        self._pump_task = None
-        self._player.close()
-        self._tts = None
-        self._ready = False
+            gen = self._stream(text)
+            sid = self._player.begin_stream(tts.samplerate, text, gen)
+            chunk_idx = 0
+            for audio in gen:
+                if self._interrupted.is_set():
+                    break
+                sr = int(getattr(audio, "samplerate", 0) or tts.samplerate)
+                self._player.emit(audio, sr, text, getattr(audio, "subtitles", None), gen)
+                self._player._emit_block(audio, sr, sid, chunk_idx, gen)
+                chunk_idx += 1
+                subs = getattr(audio, "subtitles", None)
+                if subs:
+                    self._subtitle_queue.add(subs, text)
+        except Exception as e:
+            console.dim(f"TTS 单句合成异常（跳过该句）：{e}")
 
     async def drain(self) -> None:
-        """等待全部已提交句子合成完成 + 全部音频播完。"""
-        while self._working or (
-            self._pending is not None and not self._pending.empty()
-        ):
-            if (
-                self._pending is not None
-                and not self._pending.empty()
-                and (self._pump_task is None or self._pump_task.done())
-            ):
-                self._pump_task = asyncio.create_task(self._pump())
-            await asyncio.sleep(0.05)
-        if self._pump_task is not None and not self._pump_task.done():
+        """等待队列内全部句子合成完成（不等声卡播完，避免 sounddevice 阻塞崩溃）。"""
+        with self._pump_lock:
+            pump = self._pump_thread
+        if pump is not None and pump.is_alive():
+            await asyncio.to_thread(pump.join, 120.0)
+        with self._pump_lock:
+            if self._pump_thread is pump:
+                self._pump_thread = None
+        # 整段说话结束：触发复原回调
+        cb = self._on_play_done
+        if cb is not None:
             try:
-                await asyncio.wait_for(self._pump_task, timeout=300)
+                cb()
             except Exception:
                 pass
-        await self._player.drain()
 
-    # ---------- 对外接口（main.py / stream.py 调用）----------
-
-    def set_on_play_callback(self, cb: Optional[object]) -> None:
-        self._player.set_on_play_callback(cb)
-
-    def set_on_play_done_callback(self, cb: Optional[object]) -> None:
-        self._player.set_on_play_done_callback(cb)
-
-    def set_subtitle_callback(self, cb: Optional[object]) -> None:
-        self._player.set_subtitle_callback(cb)
-
-    def apply_ref(self, audio: str, text: str) -> None:
-        """热更新参考音频/文本（仅更新主参考）。"""
-        self._ref_main = (audio or "").strip()
-        self.ref_text = (text or "").strip()
-
-    def apply_ref_extras(self, extras: str) -> None:
-        """热更新辅助参考音频（多条 | 分隔）。"""
-        self._ref_extras = (extras or "").strip()
+    # ─────────────────────────── 打断 / 关闭 ───────────────────────────
 
     def interrupt(self) -> None:
-        """立即闭嘴：停播 + 放弃当前/待合成 + 丢弃未播字幕。"""
-        self._gen += 1
-        self._interrupted = True
-        if self._pump_task is not None and not self._pump_task.done():
+        """打断当前播放：停合成 + 清空待合成队列 + 清空已入队音频。"""
+        self._interrupted.set()
+        try:
+            while True:
+                self._speak_queue.get_nowait()
+        except Empty:
+            pass
+        tts = self._tts
+        if tts is not None:
             try:
-                self._pump_task.cancel()
+                tts.audio_queue.stop()
             except Exception:
                 pass
-        if self._pending is not None:
-            while True:
-                try:
-                    self._pending.get_nowait()
-                except asyncio.QueueEmpty:
-                    break
-        self._player.interrupt()
+        self._subtitle_queue.flush()
 
     def clear_interrupt(self) -> None:
-        """新一轮输出前复位打断标志。"""
-        self._interrupted = False
-        self._player.clear_interrupt()
+        """复位打断标志（新一轮输出前调用）。"""
+        self._interrupted.clear()
 
-    # ---------- 合成方法转发到 playback.py ----------
+    async def stop(self) -> None:
+        """关闭引擎：打断、等待 pump 退出、清空声卡队列。"""
+        self.interrupt()
+        with self._pump_lock:
+            pump = self._pump_thread
+        if pump is not None and pump.is_alive():
+            try:
+                await asyncio.wait_for(asyncio.to_thread(pump.join, 10.0), timeout=15)
+            except Exception:
+                pass
+        self._subtitle_queue.stop()
+        # 运行期挂起的真实清理（见 _load_model 注释）：退出前归还显存
+        if self._tts is not None:
+            self._tts._empty_cache = self._tts.__dict__.get(
+                "_orig_empty_cache", lambda: None
+            )
+            try:
+                self._tts._orig_empty_cache()
+            except Exception:
+                pass
+        self._ready = False
 
-    async def speak(self, text: str, sfx: str = "") -> None:
-        await _playback_mod.speak(self, text, sfx)
+    # ─────────────────────────── 回调配置 ───────────────────────────
 
-    async def _pump(self) -> None:
-        await _playback_mod._pump(self)
+    def set_on_play_callback(self, cb: Optional[Callable]) -> None:
+        """设置出声回调 on_play(wav, text, dur_s)（口型同步用）。"""
+        self._player.set_on_play_callback(cb)
 
-    async def _synth_remote(self, texts: list, gen: int) -> None:
-        await _playback_mod._synth_remote(self, texts, gen)
+    def set_on_play_done_callback(self, cb: Optional[Callable]) -> None:
+        """设置整段播放结束回调（说话结束复原用）。"""
+        self._on_play_done = cb
 
-    async def _synth_stream(self, text: str, gen: int, sfx: str = "",
-                            _retried: bool = False) -> None:
-        await _playback_mod._synth_stream(self, text, gen, sfx, _retried=_retried)
+    def set_subtitle_callback(self, cb: Optional[Callable]) -> None:
+        """设置字幕推送回调（按字级时间戳逐字推送）。"""
+        self._subtitle_queue.set_subtitle_callback(cb)
 
-    async def _synth_one(self, text: str, gen: int):
-        return await _playback_mod._synth_one(self, text, gen)
+    # ─────────────────────────── 参考音频热更新 ───────────────────────────
+
+    def apply_ref(self, audio: str, text: str) -> None:
+        """热更新主参考音频 / 文本（下一句合成生效）。"""
+        audio = (audio or "").strip()
+        if audio:
+            self._speaker = audio
+            self._prompt_audio = audio
+        text = (text or "").strip()
+        if text:
+            self._prompt_text = text
+
+    def apply_ref_extras(self, extras: str) -> None:
+        """热更新辅助参考音频（多条 | 分隔）。
+
+        当前为最小实现：仅记录备用，多音色融合（spk_audio_path 传 dict）后续再做。
+        """
+        return
+
+
+__all__ = [
+    "TTSEngine",
+    "_STREAM_CHUNK", "_STREAM_OVERLAP", "_SYNTH_PARAMS",
+    "_wav_cache", "_cleanup_output", "evict_tts_cache",
+]

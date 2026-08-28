@@ -10,7 +10,6 @@ plugins:
   builtin:
     # 来自 live_bili
     - echo_llm
-    - tts_edge
     - avatar_xiaoyuanzi_local
     - danmaku_bilibili
     - danmaku_filter
@@ -29,7 +28,7 @@ plugins:
 slots:
   # live_bili 部分
   model: echo-default
-  tts: edge
+  tts: null
   avatar: xiaoyuanzi-local
   input: bilibili-danmaku
   danmaku: bilibili

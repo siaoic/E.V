@@ -1,0 +1,20 @@
+{
+  "name": "mcp-piano",
+  "version": "1.0.0",
+  "description": "MCP server that lets an AI play the Virtual Piano (browser) by itself",
+  "type": "module",
+  "main": "server.js",
+  "bin": { "mcp-piano": "server.js" },
+  "scripts": {
+    "start": "node server.js",
+    "demo": "node demo.js",
+    "test": "node test/test-client.js"
+  },
+  "dependencies": {
+    "@modelcontextprotocol/sdk": "^1.12.1",
+    "@tonejs/midi": "^2.0.28",
+    "ws": "^8.18.0",
+    "zod": "^3.24.1"
+  },
+  "engines": { "node": ">=18" }
+}

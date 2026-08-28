@@ -76,10 +76,10 @@ LLM 对话 → 语音合成 → 数字人形象输出（VTube Studio / 本地桌
 插件 onUserInput（可注入上下文 / 改写 / 拦截）
    │
    v
-LLMBrain.chat_stream（工具调用 → 思考 → 流式产句）
+LLMBrain.chat_stream（工具调用 → 思考 → 流式产句；yield (mode, text)：delta=打字机累加 / final=完整可播段）
    │
    v
-stream.converse：逐句 打印(console.chat) → 字幕(sub.push text) → TTS 排队播放 → 口型
+stream.converse：delta 逐字打印(console.chat, flush) → final 入队 复读检测 → 字幕(sub.push text) → TTS 排队播放 → 口型
    │
    ├─ 用户新输入到达 → TTS interrupt + 取消流 → 回到等待（打断）
    v
@@ -181,7 +181,7 @@ Python 同进程 async 运行时：钩子（onUserInput / onLLMRequest / onLLMRe
 
 - Python 3.10+（`pyproject.toml` 声明，PyInstaller 可打包）
 - LLM：OpenAI 兼容 SDK（zhipuai / deepseek / 任意），多臂老虎机路由可选
-- TTS：GPT-SoVITS HTTP 服务端（`tools/gsv_tts/`，`tts.bat` 启动）
+- TTS：gsv-tts-lite pip 包进程内推理（模型目录 `ev/tts/models/`）
 - 形象：VTube Studio WebSocket（vtuber 模式）/ live2d-py + PySide6（pet 模式）
 - 弹幕：blivedm（`src/danmaku/blivedm/` 内嵌依赖）
 - 记忆：SQLite + numpy 向量检索（无第三方向量库）

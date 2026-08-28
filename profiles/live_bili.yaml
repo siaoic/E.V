@@ -5,7 +5,6 @@ version: 5.0
 plugins:
   builtin:
     - echo_llm
-    - tts_edge
     - avatar_xiaoyuanzi_local
     - danmaku_bilibili
     - danmaku_filter
@@ -17,7 +16,7 @@ plugins:
 
 slots:
   model: echo-default
-  tts: edge
+  tts: null
   avatar: xiaoyuanzi-local
   input: bilibili-danmaku      # 让 danmaku_bilibili 作为 input 源（同时注册到 danmaku + input）
   danmaku: bilibili

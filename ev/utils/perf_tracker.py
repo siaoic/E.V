@@ -13,6 +13,7 @@
         do_something()
 """
 
+import sys
 import time
 from contextlib import contextmanager
 from dataclasses import dataclass
@@ -104,4 +105,10 @@ class PerfTracker:
     def print_report(self) -> None:
         text = self.report()
         if text:
+            # Windows GBK 终端无法打印 emoji ⏱ 等 Unicode 字符，
+            # 用 errors='replace' 兜底避免崩溃（指标照常输出）
+            try:
+                sys.stdout.reconfigure(encoding="utf-8", errors="replace")  # type: ignore[attr-defined]
+            except Exception:
+                pass
             print(text)

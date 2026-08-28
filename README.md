@@ -75,9 +75,8 @@ Python 3.10+（运行时）
 │   ├── blivedm（B 站直播协议）
 │   └── aiohttp + Brotli + pure-protobuf + yarl
 ├── 语音嘴巴
-│   ├── GPT-SoVITS 本地推理（tools/gsv_tts/）
-│   │   ├── transformers / onnxruntime
-│   │   └── fastapi + uvicorn（TTS 服务 / 字幕 SSE）
+│   ├── gsv-tts-lite（pip 包）流式 TTS + 模型权重（ev/tts/models/）
+│   │   └── transformers / onnxruntime
 │   └── 本地 ASR（src/asr/stt.py）
 ├── 身体驱动
 │   ├── VTube Studio WebSocket API（src/vts/）
@@ -126,7 +125,7 @@ E.V/
 
 - **大脑**：基于智谱 AI（OpenAI 兼容 SDK）的流式对话与工具调用，模型路由 + Prompt 自演化（`evolution.py`）
 - **耳朵**：B 站弹幕多房间监听（`blivedm`）+ 本地语音识别（`src/asr/stt.py`），全场景统一抽象为 `InputEvent`
-- **嘴巴**：内置 GPT-SoVITS 本地推理（`tools/gsv_tts/`）+ 流式字幕推送（SSE，`subtitle_server.py`），字幕默认显示 2.5s 后淡出
+- **嘴巴**：gsv-tts-lite（pip 包）进程内流式推理 + 流式字幕推送（SSE，`subtitle_server.py`），字幕默认显示 2.5s 后淡出
 - **身体**：VTube Studio HTTP 插件接口（`src/vts/`），含表情切换、口型同步、动作播放、ARKit 面部驱动
 - **形态**：双形态运行——直播台（控制中心 `ui/control_center.py`）+ 桌宠（`src/pet/pet_app.py`，基于 PySide6 + live2d-py）
 - **记忆**：四层记忆架构——短期上下文（recent_turns）、长期向量记忆（memU）、人格画像（evolution_profile.json）、自演化提示词档案
@@ -164,9 +163,9 @@ pip install -e .
 
 桌宠模式额外依赖放在 `vendor_pet/` 下，仅桌宠启动时会注入 `sys.path`，不影响主环境。
 
-### 2. 准备 GPT-SoVITS 模型
+### 2. 准备 TTS 模型
 
-将训练好的 GPT-SoVITS 模型放入 `tools/gsv_tts/GPT_SoVITS/参考模型/` 目录，并在 `configs/` 中配置模型路径。E.V 默认会按 `tts.engine` 的优先级选择本地 GSV 推理。
+将模型权重放入 `ev/tts/models/`（官方底模 `s1v3.ckpt` + `s2Gv2ProPlus.pth` 首次运行自动下载；角色专训权重通过 `GPTSOVITS_ROLE_GPT/SOVITS` 配置启用）。
 
 ### 3. 启动
 

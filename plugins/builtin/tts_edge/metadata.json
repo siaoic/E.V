@@ -1,7 +1,0 @@
-{
-  "name": "tts_edge",
-  "version": "0.1.0",
-  "description": "Edge TTS 骨架版。注册 SlotName.tts → impl=edge（真实 TTS 调用占位）",
-  "main": "register.py",
-  "tags": ["tts", "skeleton"]
-}

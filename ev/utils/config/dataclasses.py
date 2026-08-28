@@ -150,6 +150,7 @@ class ToolConfig:
     TOOL_GET_WEATHER_ENABLED: bool = True
     TOOL_LOAD_SKILL_ENABLED: bool = True
     TOOL_LOOK_SCREEN_ENABLED: bool = True
+    TOOL_READ_SHEET_ENABLED: bool = True
     TOOL_PLAY_SFX_ENABLED: bool = True
     TOOL_WRITE_DIARY_ENABLED: bool = True
     # ToolRegistry（3.2）：1 走注册表统一门控/分发，0 回退旧直连路径（行为不变）
@@ -197,7 +198,10 @@ class VoiceConfig:
     GPTSOVITS_PROMPT_TEXT: str = ""
     GPTSOVITS_TIMEOUT: float = 120
     GPTSOVITS_MODELS_DIR: str = ""
-    TTS_SERVER_URL: str = "http://127.0.0.1:8000"
+    # 角色专训权重（留空 = 官方底模 s1v3.ckpt + s2Gv2ProPlus.pth）；
+    # 两项需成对填写（GPT ckpt 与 SoVITS pth），相对路径基于项目根解析
+    GPTSOVITS_ROLE_GPT: str = ""
+    GPTSOVITS_ROLE_SOVITS: str = ""
     TTS_OUTPUT_DEVICE: str = ""
     STT_ENABLED: bool = False
     STT_MODEL: str = "FunAudioLLM/SenseVoiceSmall"

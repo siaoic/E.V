@@ -244,9 +244,22 @@ async def _run_arun(profile_name: str, session_dir: str | None = None) -> int:
             print(f"[run][warn] 写入 user_input log 失败: {_e}")
         collected: list[str] = []
         try:
-            async for chunk in brain.chat_stream(line):
-                print(chunk, end="", flush=True)
-                collected.append(chunk)
+            # chat_stream 新协议：delta 直接打印（打字机），final 累加到 collected
+            printed_len = 0
+            async for item in brain.chat_stream(line):
+                if isinstance(item, tuple) and item and item[0] == "delta":
+                    delta = item[1]
+                    if len(delta) > printed_len:
+                        print(delta[printed_len:], end="", flush=True)
+                        printed_len = len(delta)
+                elif isinstance(item, tuple) and item and item[0] == "final":
+                    print(item[1][printed_len:], end="", flush=True)
+                    printed_len = 0
+                    collected.append(item[1])
+                elif isinstance(item, str):
+                    print(item[printed_len:], end="", flush=True)
+                    printed_len = 0
+                    collected.append(item)
             print()
         except Exception as e:
             print(f"[run] 生成异常: {e}")
