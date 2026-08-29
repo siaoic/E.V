@@ -78,6 +78,7 @@
 # TOOLS_ENABLED: true
 # TOOL_GET_CURRENT_TIME_ENABLED: true
 # TOOL_GET_WEATHER_ENABLED: true
+# TOOL_EPIANO_ENABLED: true     # EveryonePiano 钢琴谱搜索 + 五线谱下载（epiano_search / epiano_download）
 # TOOL_LOAD_SKILL_ENABLED: true
 # TOOL_LOOK_SCREEN_ENABLED: true
 # TOOL_PLAY_SFX_ENABLED: true

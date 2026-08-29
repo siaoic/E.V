@@ -13,6 +13,7 @@ import asyncio
 import json
 import os
 import re
+from pathlib import Path
 from typing import Dict, List, Optional
 
 from ev.utils import config as vtuber_config
@@ -262,9 +263,30 @@ class MCPManager:
             # 避免 Python 3.10 的 wait_for 把协程迁到新 task 导致 SDK cancel scope 不匹配
             await transport.start(name)
             self.transports[name] = transport
+            self._open_autostart_url(name, cfg)
         except asyncio.TimeoutError:
             raise EVBaseException(
                 ErrorCode.MCP_SERVER_FAILED, f"服务器 {name} 启动超时（{timeout}s）")
+
+    def _open_autostart_url(self, name: str, cfg: dict) -> None:
+        """服务器启动成功后按 autostart_url 配置自动打开本地页面。
+
+        用于需要浏览器端配合的 MCP（如钢琴：打开 Piano.html 建立
+        WebSocket 桥接后才能发声）。失败仅提示，不影响主程序。
+        """
+        url = cfg.get("autostart_url")
+        if not url:
+            return
+        try:
+            import webbrowser
+            if "://" not in url:
+                path = url if os.path.isabs(url) else os.path.join(
+                    getattr(self, "_config_dir", None) or ".", url)
+                url = Path(path).as_uri()
+            webbrowser.open(url)
+            console.dim(f"🌐 已为 MCP 服务器 {name} 打开页面: {url}")
+        except Exception as e:
+            console.warn(f"⚠️ 自动打开 {name} 页面失败（不影响运行）: {e}")
 
     # ------------------------------------------------------------------
     # 工具调用

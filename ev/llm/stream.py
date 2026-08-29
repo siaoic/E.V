@@ -22,6 +22,8 @@ from ev.kernel.events.models import LLMResponse, SpeakingEvent
 from ev.kernel.output_lock import get_output_owner
 from plugins.builtin.tools.sfx import split_sfx_markers
 from ev.llm.cleaners.sentence import _split_sentences
+from ev.llm.cleaners.content import _clean_sentence
+from ev.llm.utils.content_check import has_content
 from ev.utils.repetition_guard import is_repetition_dominated
 
 
@@ -55,7 +57,12 @@ async def speak_text(text: str,
     逐句播放对应表情/动作（每句话一个情绪，不只看整段）。
     """
     sender = get_output_owner() or "user"
-    spoken = text
+    # P2-2 修复：直通路径（主动发言等）统一清洗——markdown/URL/LaTeX/代码块/
+    # emoji/动作标注全走 _clean_sentence；纯标点/无实质内容（「。。。」、
+    # 纯 emoji）整段拒播，防止引擎拖长音怪叫
+    spoken = _clean_sentence(text or "")
+    if not has_content(spoken):
+        return
     if profanity_filter is not None:
         masked, hit = profanity_filter.censor(spoken)
         if hit and random.random() < profanity_filter_rate:
@@ -138,6 +145,7 @@ async def converse(brain: LLMBrain,
     做规则情绪分类并播放对应表情/动作（不只看整段回复一个情绪）。
     """
     sender = get_output_owner() or "user"
+    _cancelled = False  # P1-2：被打断时跳过记忆提取等收尾副作用
     try:
         full_reply_parts = []
         # 3.13 复读防护：累积已产出文本，复读主导（≥400 字）时中断本轮
@@ -236,12 +244,17 @@ async def converse(brain: LLMBrain,
                 # 让出事件循环：否则 TTS 合成任务永远得不到调度，
                 # 所有句子处理完后 TTS 才能开始合成，看起来像「LLM 发完才 TTS」
                 await asyncio.sleep(0)
+    except asyncio.CancelledError:
+        # P1-2 修复：被打断的轮次不做任何收尾副作用——此时 brain.history
+        # 尾部是上一轮旧回复，配本轮输入提交记忆提取会污染记忆
+        _cancelled = True
+        raise
     except Exception as e:
         console.error(f"LLM 流式产出出错：{e}")
     finally:
         # LLM 全文已生成：立即以后台任务触发记忆提取等回调（与 TTS 播放
         # 并行），LLM 生成远比 TTS 播放快，不必等全部音频播完再存记忆。
-        if on_llm_done is not None and brain.history:
+        if not _cancelled and on_llm_done is not None and brain.history:
             last_reply = brain.history[-1].get("content", "") or ""
             if last_reply:
                 try:
@@ -250,7 +263,7 @@ async def converse(brain: LLMBrain,
                     console.error(f"LLM 完成回调调度失败：{e}")
         # 插件钩子：on_llm_response（AI 回复之后、TTS 播放结束前；钩子内部逐个容错）
         pm = getattr(brain, "plugin_manager", None)
-        if pm is not None and brain.history:
+        if not _cancelled and pm is not None and brain.history:
             last_reply = brain.history[-1].get("content", "") or ""
             if last_reply:
                 await pm.run_llm_response_hooks(LLMResponseEvent(last_reply))

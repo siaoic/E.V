@@ -114,7 +114,8 @@ def drop_advice(key: str) -> bool:
     _save_active_advice([it for it in items if it is not removed])
     # 废弃留档（追加到话术存档，便于回溯为什么这条被主播废弃）
     try:
-        path = os.path.join(config.cfg.DATA_ROOT, "evolution_advice.md")
+        path = os.path.join(config.cfg.DATA_ROOT, "evolution",
+                            "evolution_advice.md")
         os.makedirs(os.path.dirname(path), exist_ok=True)
         stamp = datetime.now().strftime("%Y-%m-%d %H:%M")
         with open(path, "a", encoding="utf-8") as f:
@@ -167,7 +168,8 @@ class AdviceEvolution:
 
         生效建议由 llm_brain 注入系统提示；到期后由复盘回评续期或移除。
         """
-        path = os.path.join(config.cfg.DATA_ROOT, "evolution_advice.md")
+        path = os.path.join(config.cfg.DATA_ROOT, "evolution",
+                            "evolution_advice.md")
         try:
             os.makedirs(os.path.dirname(path), exist_ok=True)
             stamp = datetime.now().strftime("%Y-%m-%d %H:%M")

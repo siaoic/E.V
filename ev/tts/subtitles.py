@@ -97,6 +97,10 @@ class SubtitlesQueue:
                 # 字幕回推失败不影响主链路
                 pass
 
+    def push_text(self, text: str) -> None:
+        """不经时间戳对齐，立即回推一段文字（跳句告警等系统提示用）。"""
+        self._emit(text)
+
     # --------------------------- 入队 ---------------------------
 
     def add(self, subtitles: Optional[List[dict]], text: str) -> None:

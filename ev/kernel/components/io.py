@@ -19,9 +19,16 @@ async def setup(runtime: "RuntimeContext") -> None:
             from ev.asr.stt import STTEngine
             runtime.stt_engine = STTEngine(cfg)
             runtime.stt_engine.start()
-            console.dim(
-                f"语音识别已启用：对着麦克风说话即可输入"
-                f"（{cfg.STT_MODEL}，静音 {cfg.STT_SILENCE_SECONDS:.0f}s 自动切段）")
+            if runtime.stt_engine.check_health():
+                console.dim(
+                    f"语音识别已启用：对着麦克风说话即可输入"
+                    f"（{cfg.STT_MODEL}，静音 {cfg.STT_SILENCE_SECONDS:.0f}s 自动切段）")
+            else:
+                # P2-8 修复：本地 ASR 服务未启动时不装没听见——醒目告警，
+                # 避免说话没反应还每句白等转写超时
+                console.error(
+                    "⚠️ 本地 ASR 服务未响应，语音识别不会工作！"
+                    "请先双击 启动asr.bat（或在 .env 配置 STT_BASE_URL 走云端转写）")
         except Exception as e:
             runtime.stt_engine = None
             console.warn(f"语音识别启动失败（可忽略）：{e}")

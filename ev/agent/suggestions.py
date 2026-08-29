@@ -58,13 +58,15 @@ BLUEPRINTS: dict[str, dict] = {
 
 
 def _pending_path() -> str:
-    """挂起建议存储路径（可写数据根）。"""
-    return os.path.join(config.cfg.DATA_ROOT, "agent_suggestions.json")
+    """挂起建议存储路径（可写数据根 agent/ 子目录）。"""
+    return os.path.join(config.cfg.DATA_ROOT, "agent",
+                        "agent_suggestions.json")
 
 
 def _dismissed_path() -> str:
-    """被锁死 dedup_key 存储路径（可写数据根）。"""
-    return os.path.join(config.cfg.DATA_ROOT, "agent_suggestions_dismissed.json")
+    """被锁死 dedup_key 存储路径（可写数据根 agent/ 子目录）。"""
+    return os.path.join(config.cfg.DATA_ROOT, "agent",
+                        "agent_suggestions_dismissed.json")
 
 
 def _load_pending() -> list[dict]:

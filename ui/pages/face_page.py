@@ -68,7 +68,7 @@ class FacePage:
         """vtuber 模式表情/动作库：读运行时（VtsEmotionActor.scan）写入的
         扫描缓存 data/vts_face_lib.json。绑定名与运行时播放完全一致
         （VTS 可直接播放的表情 / 动画热键）；文件缺失或未扫描返回空。"""
-        path = os.path.join(self.cfg.DATA_ROOT, "vts_face_lib.json")
+        path = os.path.join(self.cfg.DATA_ROOT, "vts", "vts_face_lib.json")
         try:
             with open(path, "r", encoding="utf-8") as f:
                 data = json.load(f)
@@ -101,7 +101,7 @@ class FacePage:
         """vtuber 模式轮询绑定库缓存：运行时扫描/模型切换后自动重建绑定库。
         仅当表情页正在浏览且缓存内容（mtime+size）变化时重建，避免无谓刷新；
         不在表情页时的更新由进入页面时的 _on_page_changed 兜底。"""
-        path = os.path.join(self.cfg.DATA_ROOT, "vts_face_lib.json")
+        path = os.path.join(self.cfg.DATA_ROOT, "vts", "vts_face_lib.json")
         try:
             st = os.stat(path)
             key = (st.st_mtime_ns, st.st_size)

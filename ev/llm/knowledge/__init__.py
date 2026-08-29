@@ -64,6 +64,14 @@ class KnowledgeService:
             # 避免在对话路径上同步向量化（本地 118 段耗时数秒）
             self._recall.preheat_lore()
 
+    def preload(self) -> None:
+        """启动预热入口（A-4 优化）：把首次数据加载挪出对话路径。
+
+        知识数据懒加载（首次 ~1.5s）会拖慢第一轮对话首字；应用启动时
+        后台调用一次，真实首轮对话直接命中进程内缓存。
+        """
+        self._ensure_loaded()
+
     def section(self, user_text: str, *, max_total_chars: int = 1200) -> str:
         """按用户消息返回应注入的知识段；无需注入或不可用时返回空串。"""
         self._ensure_loaded()

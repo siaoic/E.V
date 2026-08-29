@@ -46,6 +46,8 @@ def reload_tool_runtime() -> None:
     命令；主进程调用本函数即可让工具开关 / API Key / MCP_ENABLED 在
     下一轮对话生效（llm_brain._get_tools 每轮实时读取 cfg，无需重启）。
     """
+    # python-dotenv 1.x 默认剥离非空值后的行内注释；空值行的注释会被当值
+    # 读入（见 env_loader.py 顶部说明），.env 中空值字段须注释另起一行
     load_dotenv(os.path.join(_PROJECT_ROOT, ".env"), override=True)
     cfg._load_selected(_TOOL_HOT_FIELDS)
     # yaml 覆盖层（环境变量未设置的字段回落到 config.yaml，保持一致）

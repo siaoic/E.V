@@ -169,7 +169,7 @@ server.tool(
 // ---------- 工具 5：乐谱（多声部） ----------
 server.tool(
   'play_score',
-  '弹奏一首完整乐谱（支持左右手多声部）。两种传法：① score = {tempo: 120, tracks: [{notes: [{note:"C4", beat:0, duration:1}]}]}；② path = 本地 score JSON 文件路径（大谱面推荐，read_sheet_music 的输出）。各声部同时进行。',
+  '弹奏一首完整乐谱（支持左右手多声部）。两种传法：① score = {tempo: 120, tracks: [{notes: [{note:"C4", beat:0, duration:1}]}]}；② path = 本地 score JSON 文件路径（大谱面推荐，read_sheet_music 的输出）。注意：path 仅接受 read_sheet_music 产出的 score JSON 文件——.txt/.mid/.png 等其他文件一律禁止传入本工具（.mid 用 play_midi_file，图片先 read_sheet_music；用户给的 .txt 不是乐谱，直接说明无法弹奏）。各声部同时进行。tempo 必须用真实值：谱面标注的、或联网搜索（bing_search）到的原曲 BPM；谱面无标注且未搜索时不要凭记忆猜。',
   {
     score: z
       .object({
@@ -217,9 +217,9 @@ server.tool(
 // ---------- 工具 6：MIDI 文件 ----------
 server.tool(
   'play_midi_file',
-  '读取本地 .mid 文件并弹奏。path 为文件的绝对路径。',
+  '读取本地 .mid 文件并弹奏。仅支持 .mid/.midi 文件——jpg/png 等乐谱图片不能用本工具（会报文件不存在），图片谱必须先用 read_sheet_music 识谱、再调用 play_score。path 为文件的绝对路径。',
   {
-    path: z.string().describe('本地 .mid 文件的绝对路径'),
+    path: z.string().describe('本地 .mid 文件的绝对路径（乐谱图片不可用本工具）'),
   },
   async ({ path }) => {
     const parsed = loadMidiFile(path);

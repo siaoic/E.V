@@ -8,15 +8,46 @@ ctx 字典传入所需引用，避免闭包把 inner_loop.py 撑大。
 import asyncio
 import copy
 import json
+import re
 import time
 
 from openai import RateLimitError
 
-from ev.utils import console
+from ev.utils import config, console
 from ev.llm.cleaners.api import _clean_messages_for_api
 from ev.llm.client.factory import build_thinking_extra_body
 from ev.llm.client.retry import _parse_retry_after
 from ev.llm.utils.constants import _MAX_429_WAIT
+
+
+class _DrainCancelled(Exception):
+    """子线程流式产出被打断（cancel_event 置位）——仅作静默退出哨兵。"""
+
+
+# 服务端 max_tokens 上限学习缓存（进程内，key = "base_url|model"）：
+# 部分服务（智谱系错误码 1210）限制 max_tokens ∈ [1,1024]，硬编码 2048 会
+# 直接 400 判死（用户端表现「大脑出了点小故障」）。首次 400 时从错误信息
+# 解析上限并钳制重试，之后同服务请求直接带钳制值，省一个必败往返。
+_MT_CAPS: dict = {}
+
+# 错误信息里的上限写法：「限制数值范围[1,1024]」（智谱 1210）
+_MT_CAP_RANGE_RE = re.compile(r"[\[(]\s*\d+\s*,\s*(\d+)\s*[\])]")
+# 英文写法兜底：maximum 1024 / at most 1024 / <= 1024
+_MT_CAP_MAX_RE = re.compile(r"(?:maximum|at most|less than or equal to|<=|≤)\s*(\d+)", re.I)
+
+
+def _learn_max_tokens_cap(err_msg: str) -> int | None:
+    """从 400 错误信息解析服务端 max_tokens 上限；与 max_tokens 无关返回 None。"""
+    if "max_tokens" not in err_msg:
+        return None
+    m = _MT_CAP_RANGE_RE.search(err_msg) or _MT_CAP_MAX_RE.search(err_msg)
+    if not m:
+        return None
+    try:
+        cap = int(m.group(1))
+    except ValueError:
+        return None
+    return cap if cap >= 1 else None
 
 
 def _run_stream_drainer(ctx: dict) -> None:
@@ -43,6 +74,11 @@ def _run_stream_drainer(ctx: dict) -> None:
     full_raw = ctx["full_raw"]
     reasoning_raw = ctx["reasoning_raw"]
     _first_content_ref = ctx["_first_content"]   # list[bool]
+    # P1-1：取消开关（打断时由 cancel_llm_stream 置位），可为 None
+    cancel_event = ctx.get("cancel_event")
+
+    def _cancelled() -> bool:
+        return cancel_event is not None and cancel_event.is_set()
 
     # 这些是 inout，需要从 ctx 取/回写
     extra_body = [None]   # list 包装以便内层函数修改（模拟 nonlocal）
@@ -59,16 +95,20 @@ def _run_stream_drainer(ctx: dict) -> None:
 
     def _create():
         """发起一次带 tools 的流式请求。thinking 字段不被支持时
-        自动降级重试；路由服务整体不可用时回退默认 LLM 服务重试一次。"""
+        自动降级重试；服务端限制 max_tokens 时学习上限钳制重试；
+        路由服务整体不可用时回退默认 LLM 服务重试一次。"""
         client = route_client[0] or self.client
         model = route_model[0] or self.cfg.LLM_MODEL
 
         def _send():
+            # max_tokens 按该服务已学习的上限钳制（无记录时用默认 2048）
+            cap_key = (f"{str(getattr(client, 'base_url', '')).rstrip('/')}"
+                       f"|{model}")
             kwargs = dict(
                 model=model,
                 messages=_clean_messages_for_api(messages),
                 stream=True,
-                max_tokens=2048,
+                max_tokens=min(2048, _MT_CAPS.get(cap_key, 2048)),
                 temperature=0.95,
             )
             if tools:
@@ -77,6 +117,21 @@ def _run_stream_drainer(ctx: dict) -> None:
                 return client.chat.completions.create(
                     **kwargs, extra_body=extra_body[0])
             return client.chat.completions.create(**kwargs)
+
+        def _try_learn_cap(e: Exception) -> bool:
+            """400 报 max_tokens 超限时学习上限；学到新上限返回 True（触发重试）。"""
+            cap = _learn_max_tokens_cap(str(e))
+            if cap is None:
+                return False
+            cap_key = (f"{str(getattr(client, 'base_url', '')).rstrip('/')}"
+                       f"|{model}")
+            old = _MT_CAPS.get(cap_key)
+            if old is not None and old <= cap:
+                return False  # 已按该上限发过仍报错：不是超限问题，勿死循环
+            _MT_CAPS[cap_key] = cap
+            console.warn(
+                f"LLM 服务限制 max_tokens≤{cap}（{model}），已钳制重试")
+            return True
 
         try:
             return _send()
@@ -87,11 +142,17 @@ def _run_stream_drainer(ctx: dict) -> None:
                     or isinstance(e, RateLimitError)
                     or "429" in str(e)):
                 raise
+            # max_tokens 超限（智谱系 400/1210）≠ thinking 不支持：
+            # 学习上限钳制重试，避免误导性降级 + 必败重试
+            if _try_learn_cap(e):
+                return _send()
             console.warn("LLM 服务不支持 thinking 参数，降级为普通模式")
             extra_body[0] = None
             try:
                 return _send()
             except Exception as e2:
+                if _try_learn_cap(e2):
+                    return _send()
                 if isinstance(e2, RateLimitError) or "429" in str(e2):
                     raise
                 # 路由服务整体不可用 → 记录失败并回退默认服务重试
@@ -131,10 +192,14 @@ def _run_stream_drainer(ctx: dict) -> None:
                 delta = chunk.choices[0].delta
                 reasoning = getattr(delta, "reasoning_content", None) or ""
                 if reasoning:
-                    # 思考过程：灰字实时打印 + 累积（DeepSeek 等思考模式
-                    # 要求多轮对话原样回传 reasoning_content，否则 API 400）
+                    # 思考过程：累积（DeepSeek 等思考模式要求多轮对话原样
+                    # 回传 reasoning_content，否则 API 400）。
+                    # 打印仅在 LLM_THINKING 显式开启时：部分模型（GLM-4.5+
+                    # 等）关思考仍会流 reasoning_content，无脑打印会把内部
+                    # 思维链刷进控制台对话区
                     reasoning_raw.append(reasoning)
-                    print(console.paint(reasoning, console.GRAY), end="", flush=True)
+                    if getattr(config.cfg, "LLM_THINKING", False):
+                        print(console.paint(reasoning, console.GRAY), end="", flush=True)
                 content = getattr(delta, "content", None) or ""
                 if content:
                     full_raw.append(content)
@@ -203,7 +268,15 @@ def _run_stream_drainer(ctx: dict) -> None:
                 print(console.paint(
                     f"⏳ LLM 限流(429)，等待 {wait:.0f}s 后自动重试…",
                     console.YELLOW), flush=True)
-                time.sleep(wait)
+                # 分片等待：被打断立即退出，不等满整个限流窗口
+                deadline = time.time() + wait
+                while time.time() < deadline:
+                    if _cancelled():
+                        raise _DrainCancelled()
+                    time.sleep(min(0.2, max(0.0, deadline - time.time())))
+    except _DrainCancelled:
+        # P1-1：被打断——静默退出（finally 仍推 None 哨兵，主协程已取消不消费）
+        return
     except Exception as e:
         # 429 自动重试耗尽 → 中文友好提示；其他错误原样上报
         if isinstance(e, RateLimitError) or "429" in str(e):

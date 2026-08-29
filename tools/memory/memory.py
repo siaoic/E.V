@@ -656,7 +656,7 @@ class MemoryManager:
 
             user: str | None = None
 
-        db_dir = config.cfg.DATA_ROOT
+        db_dir = os.path.join(config.cfg.DATA_ROOT, "memory")
         os.makedirs(db_dir, exist_ok=True)
         db_dsn = f"sqlite:///{os.path.join(db_dir, 'memu.sqlite3')}"
         embedding = EmbeddingConfig(
@@ -1554,7 +1554,8 @@ def _do_export_graph() -> str | None:
     """实际导出图谱快照（debounce worker 与 flush 共用）。"""
     try:
         files, _ = get_manager().graph_data(limit=2000)
-        path = os.path.join(config.cfg.DATA_ROOT, "memory_graph.json")
+        path = os.path.join(config.cfg.DATA_ROOT, "memory",
+                            "memory_graph.json")
         os.makedirs(os.path.dirname(path), exist_ok=True)
         tmp = path + ".tmp"
         with open(tmp, "w", encoding="utf-8") as f:

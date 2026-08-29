@@ -1,0 +1,63 @@
+{
+  "version": "3.0",
+  "comment": "E.V 全链路压测用例表（对应 docs/测试任务总览_V3.0.md）。gates 单位毫秒；null = 不适用。expect_tools 为预期调用序列（顺序敏感，允许子集匹配；forbid_tools 任一出现即 FAIL）。",
+  "slo": {
+    "first_text_ms": 3000,
+    "first_sound_ms_text": 3500,
+    "first_sound_ms_voice": 5000,
+    "tts_first_block_ms": 600,
+    "interrupt_stop_ms": 500,
+    "queue_gap_ms": 1000,
+    "light_tool_exec_ms": 300,
+    "play_note_ms": 400
+  },
+  "cases": [
+    {"id": "T01", "section": "core", "prompt": "给我弹 E:\\AI\\vtuber\\.tmp\\latency_assets\\test_note.png", "expect_tools": [], "forbid_tools": ["play_melody", "play_midi_file", "play_score", "read_sheet_music"], "gates": {"first_text_ms": 3000, "first_sound_ms": 3500}},
+    {"id": "T02", "section": "core", "prompt": "你叫什么名字？", "expect_tools": [], "forbid_tools": ["bing_search"], "gates": {"first_text_ms": 3000, "first_sound_ms": 3500}},
+    {"id": "T03", "section": "core", "prompt": "现在几点了？", "expect_tools": ["get_current_time"], "forbid_tools": [], "gates": {"first_text_ms": 3000, "first_sound_ms": 3500, "tool_exec_ms": 300}},
+    {"id": "T04", "section": "core", "prompt": "给我讲个恐怖故事", "expect_tools": [], "forbid_tools": ["play_sound_effect", "list_sound_effects"], "gates": {"first_text_ms": 3000, "first_sound_ms": 3500}},
+    {"id": "T05", "section": "core", "prompt": "看屏幕上是什么", "expect_tools": ["look_at_screen"], "forbid_tools": [], "gates": {"first_text_ms": 5000, "tool_exec_ms": 8000}},
+    {"id": "T06", "section": "core", "prompt": "明天上海天气怎么样？", "expect_tools": ["get_weather"], "forbid_tools": [], "gates": {"first_text_ms": 3000, "first_sound_ms": 3500}},
+    {"id": "T07", "section": "core", "prompt": "记一下我叫张三，最爱吃火锅", "expect_tools": ["memory"], "forbid_tools": [], "gates": {"first_sound_ms": 3500, "tool_exec_ms": 300}},
+    {"id": "T08", "section": "core", "prompt": "来个哇的音效", "expect_tools": ["list_sound_effects", "play_sound_effect"], "forbid_tools": [], "gates": {"tool_exec_ms": 300}},
+
+    {"id": "T09", "section": "edge", "prompt": "把刚才那张图再给我弹一遍，但这次用画图工具打开", "expect_tools": [], "forbid_tools": ["play_melody", "play_midi_file"], "gates": {"first_text_ms": 3000, "first_sound_ms": 3500}, "depends_on": "T01"},
+    {"id": "T10", "section": "edge", "prompt": "你能弹《致爱丽丝》吗？我的U盘里有谱子 D:/score.txt", "expect_tools": [], "forbid_tools": ["play_melody", "play_midi_file", "play_score", "read_sheet_music"], "gates": {"first_text_ms": 2000}},
+    {"id": "T11a", "section": "edge", "prompt": "弹 D:/song.mid", "expect_tools": ["play_midi_file"], "forbid_tools": ["read_sheet_music"], "gates": {"tool_exec_ms": 2000}},
+    {"id": "T11b", "section": "edge", "prompt": "弹 D:/c.png", "expect_tools": ["read_sheet_music"], "forbid_tools": ["play_midi_file"], "gates": {"first_text_ms": 5000}},
+    {"id": "T11c", "section": "edge", "prompt": "弹 D:/d.jpg", "expect_tools": [], "forbid_tools": ["play_melody", "play_midi_file", "play_score"], "gates": {"first_text_ms": 3000}},
+    {"id": "T12", "section": "edge", "prompt": "弹 E:/不存在的歌.mid", "expect_tools": [], "forbid_tools": ["play_midi_file"], "gates": {"first_text_ms": 3000}},
+    {"id": "T14", "section": "edge", "prompt": "！！！", "expect_tools": [], "forbid_tools": [], "gates": {"first_sound_ms": 3500}},
+    {"id": "T15", "section": "edge", "prompt": "play C:/临时/mix_2026.mp3 然后现在几点", "expect_tools": ["get_current_time"], "forbid_tools": [], "gates": {"first_sound_ms": 3500}},
+
+    {"id": "T18", "section": "conflict", "prompt": "给我讲一个很长很长的故事", "expect_tools": [], "forbid_tools": [], "gates": {"interrupt_stop_ms": 500}, "interrupt_after_s": 4, "interrupt_prompt": "停！现在几点？", "expect_tools_after_interrupt": ["get_current_time"], "followup": "继续刚才的故事"},
+    {"id": "T19", "section": "conflict", "prompt": "看屏幕上是什么", "expect_tools": [], "forbid_tools": [], "gates": {}, "interrupt_after_s": 0.5, "interrupt_prompt": "不对，我是问你现在几点了", "expect_tools_after_interrupt": ["get_current_time"]},
+    {"id": "T20", "section": "conflict", "prompt": "弹一段一分钟的旋律", "expect_tools": ["play_melody"], "forbid_tools": [], "gates": {}, "interrupt_after_s": 3, "interrupt_prompt": "今天天气如何？", "expect_tools_after_interrupt": ["get_weather"], "check": "弹奏不被杀、对话正常回复"},
+    {"id": "T21", "section": "conflict", "prompt": "弹一段长旋律", "expect_tools": ["play_melody"], "forbid_tools": [], "gates": {}, "interrupt_after_s": 3, "interrupt_prompt": "换一首小星星", "expect_tools_after_interrupt": ["stop_all", "play_melody"]},
+
+    {"id": "C01", "section": "chain", "prompt": "来一段小星星", "expect_tools": ["get_status", "play_melody"], "forbid_tools": [], "gates": {"first_sound_ms": 4000}},
+    {"id": "C02", "section": "chain", "prompt": "按原曲速度弹《天空之城》", "expect_tools": ["bing_search", "play_melody"], "forbid_tools": [], "gates": {"tool_exec_ms": 3000}},
+    {"id": "C03", "section": "chain", "prompt": "把这张谱子弹出来 D:/谱面.png", "expect_tools": ["read_sheet_music", "play_score"], "forbid_tools": [], "gates": {"first_sound_ms": 5000}, "check": "OMR后台化：先出声确认再识别"},
+    {"id": "C04", "section": "chain", "prompt": "弹 D:/song.mid", "expect_tools": ["play_midi_file"], "forbid_tools": ["read_sheet_music"], "gates": {"tool_exec_ms": 2000}},
+    {"id": "C05", "section": "chain", "prompt": "弹 D:/score.txt", "expect_tools": [], "forbid_tools": ["play_melody", "play_midi_file", "play_score", "read_sheet_music"], "gates": {"first_text_ms": 2000}},
+    {"id": "C06", "section": "chain", "prompt": "看看我屏幕上这是什么游戏，帮我记住我喜欢它", "expect_tools": ["look_at_screen", "memory"], "forbid_tools": [], "gates": {"first_text_ms": 5000, "tool_exec_ms": 8000}},
+    {"id": "C07", "section": "chain", "prompt": "现在几点了？上海明天天气怎么样？", "expect_tools": ["get_current_time", "get_weather"], "forbid_tools": [], "gates": {"first_sound_ms": 3500}},
+    {"id": "C08", "section": "chain", "prompt": "讲个笑话，最后配个鼓掌音效", "expect_tools": ["play_sound_effect"], "forbid_tools": [], "gates": {}},
+    {"id": "C09", "section": "chain", "prompt": "查一下今天有什么AI新闻，详细讲讲第一条", "expect_tools": ["bing_search"], "forbid_tools": [], "gates": {"tool_exec_ms": 8000}},
+    {"id": "C10", "section": "chain", "prompt": "C大调主和弦是哪几个音？弹给我听", "expect_tools": ["music_theory", "play_chord"], "forbid_tools": [], "gates": {"tool_exec_ms": 300}},
+    {"id": "C11", "section": "chain", "prompt": "把今天直播的事写成日记", "expect_tools": ["load_skill", "write_diary"], "forbid_tools": [], "gates": {"tool_exec_ms": 300}},
+    {"id": "C12", "section": "chain", "prompt": "小声点弹致爱丽丝", "expect_tools": ["play_melody"], "forbid_tools": [], "gates": {"first_sound_ms": 4000}},
+    {"id": "C13", "section": "chain", "prompt": "看屏幕上这首曲子是什么，能弹吗？", "expect_tools": ["look_at_screen", "read_sheet_music"], "forbid_tools": [], "gates": {"first_sound_ms": 5000}, "check": "三段接力：视觉分类→OMR→演奏"},
+    {"id": "C14", "section": "chain", "prompt": "看看几点了，弹个小星星，再讲个冷笑话", "expect_tools": ["get_current_time", "play_melody"], "forbid_tools": [], "gates": {"queue_gap_ms": 1000}},
+
+    {"id": "M01a", "section": "memory", "prompt": "我叫张三", "expect_tools": [], "forbid_tools": [], "gates": {"first_sound_ms": 3500}},
+    {"id": "M01b", "section": "memory", "prompt": "你叫什么", "expect_tools": [], "forbid_tools": [], "gates": {"first_sound_ms": 3500}},
+    {"id": "M01c", "section": "memory", "prompt": "我刚才让你弹的那个歌曲是什么？", "expect_tools": [], "forbid_tools": [], "gates": {"first_sound_ms": 3500}},
+    {"id": "M04", "section": "memory", "prompt": "忘掉我的名字", "expect_tools": ["forget_memory"], "forbid_tools": [], "gates": {"tool_exec_ms": 300}},
+
+    {"id": "R05", "section": "realtime", "prompt": "用三百字介绍一下钢琴的历史", "expect_tools": [], "forbid_tools": [], "gates": {"first_sound_ms": 3500}, "check": "首句早产切分：首个可听句≈first_text+TTS首块"},
+    {"id": "R07a", "section": "realtime", "prompt": "弹一个音 C4", "expect_tools": ["play_note"], "forbid_tools": [], "gates": {"tool_exec_ms": 400}},
+    {"id": "R07b", "section": "realtime", "prompt": "再弹一个 D4", "expect_tools": ["play_note"], "forbid_tools": [], "gates": {"tool_exec_ms": 400}},
+    {"id": "R07c", "section": "realtime", "prompt": "再弹一个 E4", "expect_tools": ["play_note"], "forbid_tools": [], "gates": {"tool_exec_ms": 400}}
+  ]
+}

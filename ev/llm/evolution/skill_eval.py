@@ -24,12 +24,13 @@ from datetime import datetime
 
 from openai import AsyncOpenAI
 
-from ev.llm.client.factory import get_async_openai_client
+from ev.llm.client.factory import build_thinking_extra_body, get_async_openai_client
 from ev.llm.utils.jsonutil import parse_json_array
 from ev.utils import config, console
 
 # 评估结果存档（追加写，供用户审阅每次评估的对比数据）
-_EVAL_LOG_PATH = os.path.join(config.cfg.DATA_ROOT, "evolution_evals.jsonl")
+_EVAL_LOG_PATH = os.path.join(config.cfg.DATA_ROOT, "evolution",
+                              "evolution_evals.jsonl")
 
 # 生成测试用例的系统提示：要求输出 task + expected_keywords 的 JSON 数组
 _GENERATE_CASES_SYSTEM = (
@@ -108,7 +109,7 @@ class SkillEvaluator:
                     ],
                     temperature=0.2,
                     max_tokens=max_tokens,
-                    extra_body={"thinking": {"type": "disabled"}},
+                    extra_body=build_thinking_extra_body(False),
                 ),
                 timeout=60.0,
             )

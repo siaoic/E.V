@@ -115,6 +115,11 @@ class TTSEngine(BaseTTSAdapter):
         self._pump_thread: Optional[threading.Thread] = None
         self._pump_lock = threading.Lock()
         self._interrupted = threading.Event()
+        # P2-4 修复：合成代次号——interrupt 时 +1 作废所有在跑合成循环，
+        # 旧句不再因新轮 clear_interrupt 复位标志而「幽灵复播」
+        self._session = 0
+        # P1-7：连续跳句计数（成功合成一句即清零）
+        self._skip_streak = 0
         self._on_play_done: Optional[Callable] = None
         self._tts = None      # gsv_tts.TTS 实例（start() 时懒加载）
         self._ready = False
@@ -144,6 +149,13 @@ class TTSEngine(BaseTTSAdapter):
         except ImportError as e:
             console.warn(f"无法导入 gsv_tts：{e}（请先 pip install gsv-tts-lite）")
             return False
+
+        # GSV 库 import 时对 root logger 执行 basicConfig(level=INFO)，其推理
+        # 过程用 logging.info 刷屏（Starting Stream inference / Using GPT model
+        # 等，%(filename)s 格式显示为 TTS.py/Config.py）。主程序输出全走
+        # console 不受影响，这里把 root 压到 WARNING 一次性静音库内 INFO
+        import logging
+        logging.getLogger().setLevel(logging.WARNING)
 
         models_dir = str(
             config.cfg.GPTSOVITS_MODELS_DIR or (project_root / "ev" / "tts" / "models")
@@ -289,12 +301,15 @@ class TTSEngine(BaseTTSAdapter):
         tts = self._tts
         if tts is None:
             return
+        # P2-4：快照代次号——被打断后 session 变化，本循环立即作废退出，
+        # 不再依赖 _interrupted 标志（新轮 clear 会复位它导致旧句复播）
+        session = self._session
         try:
             gen = self._stream(text)
             sid = self._player.begin_stream(tts.samplerate, text, gen)
             chunk_idx = 0
             for audio in gen:
-                if self._interrupted.is_set():
+                if self._interrupted.is_set() or self._session != session:
                     break
                 sr = int(getattr(audio, "samplerate", 0) or tts.samplerate)
                 self._player.emit(audio, sr, text, getattr(audio, "subtitles", None), gen)
@@ -303,11 +318,31 @@ class TTSEngine(BaseTTSAdapter):
                 subs = getattr(audio, "subtitles", None)
                 if subs:
                     self._subtitle_queue.add(subs, text)
+            else:
+                self._skip_streak = 0  # 完整合成成功：清零连续跳句计数
         except Exception as e:
-            console.dim(f"TTS 单句合成异常（跳过该句）：{e}")
+            # P1-7 修复：跳句必须醒目告警（原 console.dim 一闪而过，OOM 也静默）
+            self._skip_streak += 1
+            streak = self._skip_streak
+            if streak >= 3:
+                console.error(
+                    f"⚠️ TTS 已连续 {streak} 句合成失败！本句跳过：{e}\n"
+                    "  请检查 GPU 显存 / gsv-tts-lite 服务状态；"
+                    "持续失败将导致直播全程无声")
+                try:
+                    self._subtitle_queue.push_text("（抱歉，我的语音连续出了点问题…）")
+                except Exception:
+                    pass
+            else:
+                console.warn(f"TTS 单句合成异常（跳过该句）：{e}")
 
     async def drain(self) -> None:
-        """等待队列内全部句子合成完成（不等声卡播完，避免 sounddevice 阻塞崩溃）。"""
+        """等待队列内全部句子合成完成，并等声卡把已入队音频播完。
+
+        P1-6 修复：原实现只等合成不等播放——音频还在声卡队列里时
+        字幕/状态已提前收尾（「无声剧」）。改用 gsv 原生 audio_queue.wait()
+        （threading.Event，不触碰 sounddevice），并加 120s 超时兜底。
+        """
         with self._pump_lock:
             pump = self._pump_thread
         if pump is not None and pump.is_alive():
@@ -315,6 +350,16 @@ class TTSEngine(BaseTTSAdapter):
         with self._pump_lock:
             if self._pump_thread is pump:
                 self._pump_thread = None
+        # 等声卡播完（打断后 stop() 已置位 finished 事件，wait 立即返回）
+        tts = self._tts
+        if tts is not None and not self._interrupted.is_set():
+            aq = getattr(tts, "audio_queue", None)
+            if aq is not None:
+                try:
+                    await asyncio.wait_for(
+                        asyncio.to_thread(aq.wait), timeout=120.0)
+                except Exception:
+                    pass
         # 整段说话结束：触发复原回调
         cb = self._on_play_done
         if cb is not None:
@@ -327,7 +372,11 @@ class TTSEngine(BaseTTSAdapter):
 
     def interrupt(self) -> None:
         """打断当前播放：停合成 + 清空待合成队列 + 清空已入队音频。"""
+        # P2-4：先作废所有在跑合成循环（session +1），再设标志——
+        # 保证任何在块间检查点上的旧句合成都会退出，不复播
+        self._session += 1
         self._interrupted.set()
+        self._skip_streak = 0
         try:
             while True:
                 self._speak_queue.get_nowait()

@@ -27,7 +27,11 @@ def _find_sentence_end_from(text: str, start: int) -> int:
 
 # 停顿边界（逗号/顿号）：优先级低于句末标点。流式切段（llm_brain）在
 # 无句末标点时按停顿点切分长句，配调用方的最短段长阈值防「啊，嗯，」被单切。
-_PAUSE_ENDS = "，、,"
+# 停顿边界（逗号/顿号/分号）：遇号即切（2026-08-29 实时性优化：实测 glm-5.3
+# 吞吐仅 2~4 字/s，原「攒 4 字再切」把首声拖慢 1~2s；GSV 对短段合成实测可用
+# —— bench varied 含 4 字段"女学生。"首块 265ms 正常）。次要代价：极短段
+# （"啊，"）单独合成韵律略生硬，换取首声提前。
+_PAUSE_ENDS = "，、,；;"
 
 
 def _find_pause_end_from(text: str, start: int) -> int:

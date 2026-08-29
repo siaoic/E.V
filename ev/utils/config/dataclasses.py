@@ -153,6 +153,7 @@ class ToolConfig:
     TOOL_READ_SHEET_ENABLED: bool = True
     TOOL_PLAY_SFX_ENABLED: bool = True
     TOOL_WRITE_DIARY_ENABLED: bool = True
+    TOOL_EPIANO_ENABLED: bool = True
     # ToolRegistry（3.2）：1 走注册表统一门控/分发，0 回退旧直连路径（行为不变）
     TOOL_REGISTRY: bool = True
     MCP_ENABLED: bool = False
@@ -203,6 +204,10 @@ class VoiceConfig:
     GPTSOVITS_ROLE_GPT: str = ""
     GPTSOVITS_ROLE_SOVITS: str = ""
     TTS_OUTPUT_DEVICE: str = ""
+    # 口型同步模式：builtin = 内置 RMS 口型注入（默认）；
+    # vts_audio = TTS 音频经 TTS_OUTPUT_DEVICE（虚拟声卡）输出，
+    # 嘴部交给 VTube Studio 自带音频口型同步，本程序停用嘴部注入
+    LIPSYNC_MODE: str = "builtin"
     STT_ENABLED: bool = False
     STT_MODEL: str = "FunAudioLLM/SenseVoiceSmall"
     STT_LOCAL_MODEL_PATH: str = ""

@@ -60,3 +60,23 @@ def build_thinking_extra_body(enabled: bool) -> dict:
     降级为 extra_body=None 重试（llm_brain 已有该兜底路径）。
     """
     return {"thinking": {"type": "enabled" if enabled else "disabled"}}
+
+
+# D-7 优化：服务商 thinking 字段支持记忆（进程内）。首次探测到不支持
+# （降级重试路径）后按「base_url|model」记住，后续调用直接省略该字段，
+# 不再每次都白打一发必败请求（SiliconFlow 等不支持的服务每次省一个往返）。
+_thinking_unsupported: "set[str]" = set()
+
+
+def _thinking_key(base_url: str, model: str) -> str:
+    return f"{(base_url or '').strip().rstrip('/')}|{(model or '').strip()}"
+
+
+def thinking_is_supported(base_url: str, model: str) -> bool:
+    """该 (服务, 模型) 组合是否已知支持 thinking 字段（未知视为支持）。"""
+    return _thinking_key(base_url, model) not in _thinking_unsupported
+
+
+def mark_thinking_unsupported(base_url: str, model: str) -> None:
+    """探测到服务拒收 thinking 字段后调用（降级路径里记一次即可）。"""
+    _thinking_unsupported.add(_thinking_key(base_url, model))

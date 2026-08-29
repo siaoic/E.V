@@ -16,6 +16,7 @@ import time
 from pathlib import Path
 from typing import Any
 
+from ev.llm.client.factory import build_thinking_extra_body
 from ev.llm.utils.jsonutil import parse_json_object
 from ev.utils import console
 
@@ -128,7 +129,8 @@ async def call_llm_json(
                 try:
                     resp = await asyncio.wait_for(
                         client.chat.completions.create(
-                            **kwargs, extra_body={"thinking": {"type": "disabled"}}),
+                            **kwargs,
+                            extra_body=build_thinking_extra_body(False)),
                         timeout=timeout,
                     )
                 except Exception:

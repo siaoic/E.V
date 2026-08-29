@@ -22,10 +22,10 @@ from .prompts import CFG
 _PROFILE_STORE = JsonStore(
     CFG.profile_path, label="观众画像", max_items=CFG.profile_max)
 
-# 画像修正历史（data/evolution_profile_history.jsonl）：被 replace/remove 的
-# 旧事实可回溯（5.7，对标 memory_tool 的 replace/remove 语义，不丢失数据）
+# 画像修正历史（evolution/evolution_profile_history.jsonl）：被 replace/remove
+# 的旧事实可回溯（5.7，对标 memory_tool 的 replace/remove 语义，不丢失数据）
 _PROFILE_HISTORY_PATH = os.path.join(
-    config.cfg.DATA_ROOT, "evolution_profile_history.jsonl")
+    config.cfg.DATA_ROOT, "evolution", "evolution_profile_history.jsonl")
 
 
 def _load_profile() -> list[dict]:

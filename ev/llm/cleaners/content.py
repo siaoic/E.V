@@ -35,6 +35,25 @@ _KAOMOJI_RE = re.compile(
 # 打印即崩（UnicodeEncodeError），且 GPT-SoVITS 合成时可能静默丢字。
 _ZERO_WIDTH_RE = re.compile(r"[\u200b-\u200f\u202a-\u202e\u2060-\u206f\ufeff\ufff9-\ufffb]")
 
+# ---- P2-1：Markdown / LaTeX / URL 清洗规则 ----
+# 逐字符拼读反引号/星号、念出整条网址是 TTS 直播事故高发区；
+# 围栏代码块与 LaTeX 公式对语音毫无意义，整体删除。
+_FENCED_CODE_RE = re.compile(r"```[\s\S]*?```|~~~[\s\S]*?~~~")      # 围栏代码块
+_MD_IMAGE_RE = re.compile(r"!\[[^\]]*\]\([^)]*\)")                  # 图片：整体删
+_MD_LINK_RE = re.compile(r"\[([^\]]+)\]\([^)]*\)")                  # 链接：只留文字
+_LATEX_DISPLAY_RE = re.compile(r"\$\$[\s\S]+?\$\$|\\\[[\s\S]+?\\\]")  # 块级公式
+_LATEX_INLINE_RE = re.compile(                                      # 行内公式 $...$ \(...\)
+    r"\$(?!\s)[^$\n]+?\$(?!\d)|\\\([\s\S]+?\\\)")
+_MD_HEADING_RE = re.compile(r"(?m)^[ \t]{0,3}#{1,6}[ \t]+")         # 标题符号
+_MD_QUOTE_RE = re.compile(r"(?m)^[ \t]{0,3}>[ \t]?")                # 引用符
+_MD_LIST_RE = re.compile(r"(?m)^[ \t]{0,6}(?:[-*+]|\d{1,3}[.、)])[ \t]+")  # 列表符
+_MD_BOLD_RE = re.compile(r"\*\*([^*\n]+?)\*\*|__([^_\n]+?)__")      # 粗体：留文字
+_MD_ITALIC_RE = re.compile(r"(?<![*\w])\*([^*\n]+?)\*(?!\*)|(?<![_\w])_([^_\n]+?)_(?![_\w])")  # 斜体
+_MD_STRIKE_RE = re.compile(r"~~([^~\n]+?)~~")                       # 删除线
+_INLINE_CODE_RE = re.compile(r"`([^`\n]+)`")                        # 行内代码：留内容
+_BARE_URL_RE = re.compile(                                          # 裸 URL →「链接」
+    r"(?:https?://|www\.)[^\s<>（）()「」『』，。；、！？·'\"]+", re.IGNORECASE)
+
 # Emoji 过滤：匹配主流 Unicode emoji 区域（含 ZWJ 序列、肤色修饰符等）
 _EMOJI_RE = re.compile(
     "["
@@ -86,8 +105,30 @@ def _remove_tool_calls_from_content(content: str) -> str:
     return _TOOL_CALL_TEXT_RE.sub("", content).strip()
 
 
+def _strip_markdown(text: str) -> str:
+    """移除/简化 Markdown 与 URL/LaTeX：代码块与公式整体删除，
+    链接只留文字，裸 URL 换成「链接」，标题/列表/强调只去符号。"""
+    if not text:
+        return text
+    text = _FENCED_CODE_RE.sub(" ", text)
+    text = _MD_IMAGE_RE.sub(" ", text)
+    text = _MD_LINK_RE.sub(r"\1", text)
+    text = _LATEX_DISPLAY_RE.sub(" ", text)
+    text = _LATEX_INLINE_RE.sub(" ", text)
+    text = _MD_HEADING_RE.sub("", text)
+    text = _MD_QUOTE_RE.sub("", text)
+    text = _MD_LIST_RE.sub("", text)
+    text = _MD_BOLD_RE.sub(lambda m: m.group(1) or m.group(2) or "", text)
+    text = _MD_ITALIC_RE.sub(lambda m: m.group(1) or m.group(2) or "", text)
+    text = _MD_STRIKE_RE.sub(r"\1", text)
+    text = _INLINE_CODE_RE.sub(r"\1", text)
+    text = _BARE_URL_RE.sub("链接", text)
+    return text
+
+
 def _clean_sentence(sentence: str) -> str:
-    """纯文本清洗（无副作用）：记忆标签 / 动作标注 / HTML / 工具文本 / 颜文字 / emoji。
+    """纯文本清洗（无副作用）：记忆标签 / 思考块 / markdown / URL / LaTeX /
+    代码块 / 动作标注 / HTML / 工具文本 / 颜文字 / emoji。
 
     关键：绝不 strip 首尾空白！句子按软边界（空格）切分时，
     分界空格在 chunk 尾部；按硬边界（标点）切分时在下一 chunk 头部。
@@ -100,6 +141,7 @@ def _clean_sentence(sentence: str) -> str:
     sentence = _filter_thinking_content(sentence)
     sentence = _ZERO_WIDTH_RE.sub("", sentence)
     sentence = _ACTION_ANNOT_RE.sub(" ", sentence)
+    sentence = _strip_markdown(sentence)
     sentence = _HTML_TAG_RE.sub("", sentence)
     sentence = _TOOL_CALL_TEXT_RE.sub(" ", sentence)
     sentence = _KAOMOJI_RE.sub(" ", sentence)

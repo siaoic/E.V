@@ -24,8 +24,9 @@ from typing import Any, Optional
 
 from ev.utils import config, console
 
-# 记账文件（可写数据根）：JSONL 追加写，一条一行
-_USAGE_PATH = os.path.join(config.cfg.DATA_ROOT, "aux_usage.jsonl")
+# 记账文件（可写数据根 evolution/ 子目录）：JSONL 追加写，一条一行
+_USAGE_PATH = os.path.join(config.cfg.DATA_ROOT, "evolution",
+                           "aux_usage.jsonl")
 
 # 已由主链路/evolution 记账的任务：此处再记会重复，跳过
 _EXCLUDED_TASKS = frozenset({
@@ -92,7 +93,7 @@ async def call_llm(
         console.dim(f"[辅助LLM] 任务 {task} 无可用模型（LLM_MODEL 未配置）")
         return None, {"task": task, "model": "", "latency_ms": 0}
 
-    from ev.llm.client.factory import get_async_openai_client
+    from ev.llm.client.factory import build_thinking_extra_body, get_async_openai_client
 
     start = time.time()
     client = get_async_openai_client(
@@ -100,19 +101,28 @@ async def call_llm(
         base_url=config.cfg.LLM_BASE_URL,
         timeout=timeout,
     )
+    kwargs = dict(
+        model=used_model,
+        messages=_normalize_messages(system, messages),
+        temperature=temperature,
+        max_tokens=max_tokens,
+    )
     try:
+        # 显式关思考：辅助调用是机器消费的短任务（JSON/判决），而 GLM 系
+        # 默认强制思考——不传开关会白耗推理 token 与首字延迟
         resp = await asyncio.wait_for(
             client.chat.completions.create(
-                model=used_model,
-                messages=_normalize_messages(system, messages),
-                temperature=temperature,
-                max_tokens=max_tokens,
-            ),
+                **kwargs, extra_body=build_thinking_extra_body(False)),
             timeout=timeout,
         )
-    except Exception as e:
-        console.warn(f"[辅助LLM] 任务 {task} 调用失败：{e}")
-        return None, {"task": task, "model": used_model, "latency_ms": 0}
+    except Exception:
+        # 服务不支持 thinking 字段（400 等）→ 降级普通模式重试一次
+        try:
+            resp = await asyncio.wait_for(
+                client.chat.completions.create(**kwargs), timeout=timeout)
+        except Exception as e:
+            console.warn(f"[辅助LLM] 任务 {task} 调用失败：{e}")
+            return None, {"task": task, "model": used_model, "latency_ms": 0}
 
     usage = getattr(resp, "usage", None)
     latency_ms = int((time.time() - start) * 1000)

@@ -96,12 +96,26 @@ class Application:
 
     async def _main_loop(self, runtime, input_handler, chat_handler) -> None:
         """主循环：等待输入 → 对话（无命令交互，Ctrl+C / EOF 退出）。"""
-        while True:
+        _quit = False  # /quit 命令置位（内层 break 只回外层等输入，需信号传外层）
+        while not _quit:
             try:
                 user_text = await input_handler.wait_input(show_prompt=True)
-            except (EOFError, KeyboardInterrupt):
+            except KeyboardInterrupt:
                 print()
                 break
+            except EOFError:
+                # stdin 断开（控制中心窗口关闭 / 终端结束 → QProcess 管道断裂）：
+                # 主程序由控制中心 QProcess 启动时 stdin 是管道，父进程退出
+                # 必然 EOF。此前直接 break 会连带终止直播/桌宠（"自动关闭"
+                # bug）——改为进入守护模式：表情/弹幕/主动对话/后台委派任务
+                # 继续运行，Ctrl+C 退出，或控制中心重新启动后发 /quit。
+                print()
+                console.dim("[守护模式] 输入通道已断开（控制中心/终端已关闭），"
+                            "主程序继续运行：Ctrl+C 退出，或 /quit 命令退出")
+                try:
+                    await asyncio.Event().wait()  # 永久挂起；事件循环继续驱动其他任务
+                except KeyboardInterrupt:
+                    break
             # _pending_stdin_fut 的清理在 _wait_input 内部完成：
             # 键盘触发时监听已消费置 None；语音触发时保留挂起的监听
             # 供 _interruptible_converse 复用（此处无条件置 None 会泄漏
@@ -109,6 +123,12 @@ class Application:
             while user_text:
                 user_text = user_text.strip()
                 if not user_text:
+                    break
+                # /quit：优雅退出（归档记忆后走 finally 清理）。控制中心
+                # 「停止」按钮向 stdin 写 /quit（此前无处理会被当聊天文本
+                # 发给 AI，停止按钮形同虚设）；守护模式下这也是主要退出通道
+                if user_text == "/quit":
+                    _quit = True
                     break
                 # 5.8 主播即时命令：!advice drop（话术即时负反馈），增量不影响普通对话
                 if user_text.startswith("!advice"):

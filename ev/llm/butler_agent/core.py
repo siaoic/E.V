@@ -22,6 +22,8 @@ from openai import AsyncOpenAI
 from ev.llm.client.factory import (
     build_thinking_extra_body,
     get_async_openai_client,
+    mark_thinking_unsupported,
+    thinking_is_supported,
 )
 from ev.llm.utils.jsonutil import parse_json_array
 from ev.utils import config, console
@@ -66,25 +68,36 @@ class ButlerAgent:
         return self._client
 
     async def _complete(self, messages: list[dict], temperature: float):
-        """调用管家模型：默认关闭思考（提取要干净 JSON，不被推理文本污染）；
-        服务不支持 thinking 参数时降级重试；失败返回 None 由调用方静默跳过。
+        """调用管家模型：默认关闭思考（提取要干净 JSON，不被推理文本污染）。
+
+        D-7 优化：thinking 支持记忆（factory 共享，进程内）——已知不支持
+        的 (服务, 模型) 直接省略 extra_body，不再每次都打一发必败请求
+        等 400 再降级；未知服务仍首次探测，降级时记住结果。
+        失败返回 None 由调用方静默跳过。
         """
         client = self._ensure_client()
         if client is None:
             return None
+        base_url = config.cfg.BUTLER_BASE_URL or config.cfg.LLM_BASE_URL
+        use_thinking = thinking_is_supported(base_url, self._model)
         try:
             try:
+                kwargs: dict = dict(
+                    model=self._model,
+                    messages=messages,
+                    temperature=temperature,
+                )
+                if use_thinking:
+                    kwargs["extra_body"] = build_thinking_extra_body(False)
                 return await asyncio.wait_for(
-                    client.chat.completions.create(
-                        model=self._model,
-                        messages=messages,
-                        temperature=temperature,
-                        extra_body=build_thinking_extra_body(False),
-                    ),
+                    client.chat.completions.create(**kwargs),
                     timeout=45.0,
                 )
-            except Exception:
+            except Exception as e:
+                if not use_thinking or "429" in str(e):
+                    raise  # 已降级过 / 限流不是 thinking 字段问题，不重复降级
                 console.dim("[ButlerAgent] 服务不支持 thinking 参数，降级为普通模式")
+                mark_thinking_unsupported(base_url, self._model)
                 return await asyncio.wait_for(
                     client.chat.completions.create(
                         model=self._model, messages=messages, temperature=temperature
@@ -202,29 +215,45 @@ class ButlerAgent:
         for base_url, api_key, model in candidates:
             client = get_async_openai_client(
                 api_key=api_key, base_url=base_url, timeout=60.0)
-            try:
-                resp = await asyncio.wait_for(
-                    client.chat.completions.create(
-                        model=model,
-                        messages=[
+            use_thinking = thinking_is_supported(base_url, model)
+            kwargs: dict = dict(
+                model=model,
+                messages=[
+                    {
+                        "role": "user",
+                        "content": [
+                            {"type": "text", "text": prompt},
                             {
-                                "role": "user",
-                                "content": [
-                                    {"type": "text", "text": prompt},
-                                    {
-                                        "type": "image_url",
-                                        "image_url": {
-                                            "url": f"data:image/jpeg;base64,{image_b64}"
-                                        },
-                                    },
-                                ],
-                            }
+                                "type": "image_url",
+                                "image_url": {
+                                    "url": f"data:image/jpeg;base64,{image_b64}"
+                                },
+                            },
                         ],
-                        max_tokens=max_tokens,
-                        temperature=0.4,
-                    ),
-                    timeout=60.0,
-                )
+                    }
+                ],
+                max_tokens=max_tokens,
+                temperature=0.4,
+            )
+            if use_thinking:
+                kwargs["extra_body"] = build_thinking_extra_body(False)
+            try:
+                try:
+                    resp = await asyncio.wait_for(
+                        client.chat.completions.create(**kwargs),
+                        timeout=60.0,
+                    )
+                except Exception as e:
+                    if not use_thinking or "429" in str(e):
+                        raise  # 已降级过 / 限流不是 thinking 字段问题
+                    console.dim(
+                        "[ButlerAgent] 视觉服务不支持 thinking 参数，降级为普通模式")
+                    mark_thinking_unsupported(base_url, model)
+                    kwargs.pop("extra_body", None)
+                    resp = await asyncio.wait_for(
+                        client.chat.completions.create(**kwargs),
+                        timeout=60.0,
+                    )
             except Exception as e:
                 console.warn(
                     f"[ButlerAgent] 视觉模型 {model} 调用失败，尝试下一候选：{e}")

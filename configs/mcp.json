@@ -10,7 +10,8 @@
             "command": "node",
             "args": ["e:/AI/vtuber/plugins/third_party/piano/mcp-piano/server.js"],
             "timeout": 60,
-            "description": "虚拟钢琴：get_status（查看连接状态）、play_note（单音）、play_chord（和弦）、play_melody（旋律）、play_score（多声部乐谱）、play_midi_file（播放本地 .mid）、stop_all（停止）、set_volume（音量）、set_sustain（延音踏板）。需在浏览器打开 Piano/Piano.html 建立桥接后才能发声。"
+            "autostart_url": "http://127.0.0.1:7788/",
+            "description": "虚拟钢琴：get_status（查看连接状态）、play_note（单音）、play_chord（和弦）、play_melody（旋律）、play_score（多声部乐谱）、play_midi_file（播放本地 .mid）、stop_all（停止）、set_volume（音量）、set_sustain（延音踏板）。启动时自动打开 Piano.html 建立 WebSocket 桥接。"
         }
     }
 }

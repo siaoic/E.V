@@ -28,6 +28,14 @@ if __name__ == "__main__":
             _s.reconfigure(encoding="utf-8", errors="replace", line_buffering=True)
         except Exception:
             pass
+    # stdin 同步 UTF-8：控制中心 _send_text 以 UTF-8 写入子进程 stdin，而管道下
+    # Python 默认按 locale(gbk)+surrogateescape 解码 → 中文全部损坏（实测模型
+    # 收到「你叫\udc80么名字？」）。交互控制台走 WinConsoleIO（UTF-16 API），
+    # 不经过这里，手打输入不受影响。
+    try:
+        sys.stdin.reconfigure(encoding="utf-8", errors="replace")
+    except Exception:
+        pass
 
     if config.cfg.RUN_MODE == "pet":
         # 桌宠依赖（live2d-py / PySide6）装在项目内 vendor_pet/，

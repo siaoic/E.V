@@ -67,13 +67,17 @@ class FaceDriver:
     """后台常驻注入循环：口型同步 + 自动眨眼 + 动作文件基线。"""
 
     def __init__(self, vts: VTSController,
-                 profile: Optional[ModelProfile] = None) -> None:
+                 profile: Optional[ModelProfile] = None,
+                 lipsync_enabled: bool = True) -> None:
         self.vts = vts
         self.profile = profile or ModelProfile()
         self._task: Optional[asyncio.Task] = None
         self._params: Dict[str, float] = {}
 
         # —— 口型同步 ——
+        # False = 停用内置口型注入（LIPSYNC_MODE=vts_audio：嘴部交给
+        # VTube Studio 自带音频口型同步，TTS 音频经虚拟声卡供其分析）
+        self._lipsync_enabled = lipsync_enabled
         self._mouth_gain: float = self.profile.mouth_gain
         self._speaking_until: float = 0.0
         # 张嘴参数：优先模型探测结果；探测失败回退全候选（VTS 跳过不支持的）
@@ -177,8 +181,12 @@ class FaceDriver:
         """
         self._speaking_until = time.time() + max(0.5, duration)
 
-    def load_speech_curve(self, wav_path: str) -> bool:
+    def load_speech_curve(self, audio, sr: int = None) -> bool:
         """由 TTS 播放回调调用：加载 RMS 曲线覆盖当前说话会话的口型。
+
+        audio 支持两种形态（P0-3 修复后回调直接传已解码 ndarray）：
+        - ndarray：已解码音频样本（配合 sr），不落盘、无 ffmpeg 依赖；
+        - str：音频文件路径（兼容旧调用）。
 
         同时根据曲线实际时长更新 _speaking_until，确保口型同步
         与音频播放时长一致（含 0.3s 自然衰减缓冲）。
@@ -187,7 +195,7 @@ class FaceDriver:
             True = 曲线加载成功（口型随曲线运动）；
             False = 分析失败（调用方应改用 start_speaking(dur) 回退节拍口型）。
         """
-        curve, dur_ms, frame_ms = compute_rms_curve(wav_path)
+        curve, dur_ms, frame_ms = compute_rms_curve(audio, sr=sr)
         if curve is not None:
             self._rms_curve = curve
             self._rms_duration_ms = dur_ms
@@ -259,7 +267,9 @@ class FaceDriver:
 
                 # ---------- 2) 口型同步 ----------
                 now = time.time()
-                if now < self._speaking_until:
+                if not self._lipsync_enabled:
+                    pass  # 嘴部由 VTS 自带音频口型接管，本循环不注入嘴部参数
+                elif now < self._speaking_until:
                     # —— 说话中：先求目标开合度 ——
                     if self._rms_curve is not None:
                         # 使用 RMS 曲线：真正动态口型

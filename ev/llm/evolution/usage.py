@@ -15,8 +15,9 @@ import time
 
 from ev.utils import config
 
-# 记账文件（可写数据根）：JSONL 追加写，一条一行
-_USAGE_PATH = os.path.join(config.cfg.DATA_ROOT, "evolution_usage.jsonl")
+# 记账文件（可写数据根 evolution/ 子目录）：JSONL 追加写，一条一行
+_USAGE_PATH = os.path.join(config.cfg.DATA_ROOT, "evolution",
+                           "evolution_usage.jsonl")
 
 
 def record_usage(task: str, model: str, prompt_tokens: int,

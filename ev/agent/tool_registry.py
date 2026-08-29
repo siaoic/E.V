@@ -198,9 +198,12 @@ class ToolRegistry:
         handler: Callable[..., Any],
         check_fn: Optional[Callable[[], bool]] = None,
         override: bool = False,
+        timeout: float = 10.0,
     ) -> bool:
         """注册一个工具；跨 toolset 重名默认拒绝，override=True 显式许可。
 
+        timeout：参考超时（秒），与 register_tool 对齐——tool_pipeline /
+        Agent 循环据此对长耗时工具放宽「平铺统一超时」。
         返回是否注册成功（重名被拒时返回 False 并告警）。
         """
         with self._lock:
@@ -221,6 +224,7 @@ class ToolRegistry:
                 check_fn=check_fn,
                 generation=self._generation,
                 validator=_build_validator(schema),
+                timeout=timeout,
             )
             self._generation += 1
             return True
@@ -465,6 +469,33 @@ def _looks_like_json(text: str) -> bool:
 
 # 进程内单例（模块级，对标 Hermes registry = ToolRegistry()）
 tool_registry = ToolRegistry()
+
+
+def resolve_tool_timeout(name: str, default: float = 10.0) -> float:
+    """查工具注册的参考超时（秒）：统一注册表 → 插件目录 → default。
+
+    tool_pipeline 与 Agent 循环用它把「平铺统一超时」升级为「按工具注册
+    超时」：长耗时工具（如 read_sheet_music 注册 1500s）不再被 10s/60s
+    一刀切掐断（此前表现为「首次识谱必超时 → 重试才成功」——首次调用
+    正赶上 OMR daemon 冷启动）。两处都查不到时返回 default，行为不变。
+    """
+    best = 0.0
+    try:
+        entry = tool_registry.get_entry(name)
+        if entry is not None and entry.timeout:
+            best = max(best, float(entry.timeout))
+    except Exception:
+        pass
+    try:
+        # 惰性导入防循环依赖（plugins.builtin.tools 顶层 import 本模块）
+        from plugins.builtin.tools import _load_tool_catalog, _TOOL_CATALOG
+        _load_tool_catalog()
+        item = _TOOL_CATALOG.get(name)
+        if item is not None:
+            best = max(best, float(item.get("timeout") or 0))
+    except Exception:
+        pass
+    return best if best > 0 else float(default)
 
 
 class ToolContext:

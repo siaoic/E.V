@@ -28,7 +28,8 @@ from ev.utils import config, console
 # 技能使用统计持久化文件：record_usage 记录 load 次数与最近使用时间，
 # 复盘时注入进化引擎，让技能修补/清理有真实使用数据支撑（对标 hermes 的
 # skill usage counters——但 hermes 明确 use=0 不作为归档依据，这里同样只供参考）
-_USAGE_PATH = os.path.join(config.cfg.DATA_ROOT, "skill_usage.json")
+_USAGE_PATH = os.path.join(config.cfg.DATA_ROOT, "evolution",
+                           "skill_usage.json")
 
 # 5.2 技能生命周期状态机（对标 hermes tools/skill_usage.py）：
 # - active→stale 30 天未活动；stale→archived 90 天未活动（与 curator.py 阈值对齐）

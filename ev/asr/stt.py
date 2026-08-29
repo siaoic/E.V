@@ -18,6 +18,7 @@ Bearer 认证）
 import asyncio
 import os
 import queue
+import re
 import tempfile
 import threading
 import time
@@ -27,6 +28,7 @@ import numpy as np
 
 from ev.utils import console
 from ev.adapter.input import BaseInputAdapter
+from ev.llm.utils.content_check import has_content  # P1-4：实质内容过滤
 from ev.tts.echo import is_echo_of_recent  # 3.14：回声防护（识别结果与播报文本比对）
 
 # 录音参数（与 STT_SILENCE_SECONDS 等 .env 配置区分：这些是硬件级常量）
@@ -36,7 +38,9 @@ DTYPE = "int16"
 BLOCK_SECONDS = 0.1          # 每块 100ms（sounddevice 采集粒度，仅用于硬件回调）
 BLOCK_SIZE = int(SAMPLE_RATE * BLOCK_SECONDS)  # 1600 样本
 _MIN_SPEECH_SECONDS = 0.5    # 最短有效语音：低于此长度视为环境杂音，不提交
-_EMPTY_RMS = 1.0             # 转写前忽略的能量下限（防纯静音段上传）
+# P2-9：能量下限兜底默认值（int16 量纲；实际取 cfg.STT_LEVEL_THRESHOLD）
+_DEFAULT_LEVEL_THRESHOLD = 500.0
+
 
 # =============================================================================
 # FunASR 官方 demo 原文（严格按此模式调用，禁止修改调用形态）
@@ -107,6 +111,20 @@ def _rms(audio: np.ndarray) -> float:
     return float(np.sqrt(np.mean(np.square(audio.astype(np.float64)))))
 
 
+# P2-9：无意义词黑名单——识别结果规范化后整句命中才丢弃（不做子串匹配，
+# 防误伤正常语句）。含常见语气词与 SenseVoice 幻觉开场白。
+_MEANINGLESS_WORDS = frozenset({
+    "嗯", "啊", "呃", "哦", "噢", "喔", "唉", "哎", "诶", "咳", "嘿",
+    "嗯嗯", "啊啊", "啊啊啊", "嗯啊", "啊嗯", "那个", "这个", "就是",
+    "谢谢观看", "谢谢收看", "感谢观看", "请不吝点赞", "下期再见",
+})
+
+
+def _norm_word(text: str) -> str:
+    """去标点/符号/空白并小写化（黑名单整句比对用）。"""
+    return re.sub(r"[\W_]+", "", text or "", flags=re.UNICODE).lower()
+
+
 class STTEngine(BaseInputAdapter):
     """麦克风监听 + 语音识别引擎。
 
@@ -122,6 +140,7 @@ class STTEngine(BaseInputAdapter):
     """
 
     def __init__(self, cfg) -> None:
+        self.cfg = cfg  # P0-1 修复：_deliver 回声防护等需读配置，缺失会抛 AttributeError
         # 转写 API 地址：STT_BASE_URL 填了 = 走该 API（整段上传转写）；
         # 留空 = 走本地流式 ASR 服务（asr.bat，STT_SERVER_URL）。
         # 不再区分 STT_ENGINE 开关——URL 填了就按它来。
@@ -177,6 +196,15 @@ class STTEngine(BaseInputAdapter):
         self._streamer: "threading.Thread | None" = None
         self._feed_buf: "list[np.ndarray]" = []
         self._feed_acc_len: int = 0
+        # P1-3：段间合并观察窗——VAD 判停后静置 merge_window 秒再提交，
+        # 窗内再次开口并回同一句（中文口语 0.6~0.8s 停顿常见，避免一句话
+        # 拆成两轮回复 / STT_MAX_SECONDS 强切的后半段变成新输入）
+        self.merge_window = float(
+            getattr(cfg, "STT_MERGE_WINDOW", None) or 0.45)
+        # P2-9：能量阈值真实接线（int16 量纲，语音 RMS 数百）——原固定
+        # _EMPTY_RMS=1.0 等于没过滤，电视音/旁人说话均触发整轮 LLM
+        self.level_threshold = float(
+            getattr(cfg, "STT_LEVEL_THRESHOLD", None) or 500.0)
 
     # ---------- 生命周期 ----------
 
@@ -253,6 +281,22 @@ class STTEngine(BaseInputAdapter):
         except Exception as e:
             console.dim(f"[STT] 预热失败（不影响使用）：{e}")
 
+    def check_health(self) -> bool:
+        """P2-8 修复：启动时探测本地 ASR 服务健康状态（云端引擎恒可用）。
+
+        忘开 启动asr.bat 时横幅不再无条件显示「已启用」，主循环据此
+        醒目告警，避免说话没反应还每句白等 10s 超时。
+        """
+        if self.engine != "local":
+            return True
+        try:
+            import requests
+
+            resp = requests.get(f"{self.server_url}/health", timeout=3)
+            return resp.ok
+        except Exception:
+            return False
+
     def stop(self) -> None:
         """停止监听/处理/流式线程（转写中的线程自然结束）。"""
         self._stop_event.set()
@@ -285,6 +329,16 @@ class STTEngine(BaseInputAdapter):
         """主循环线程内：把识别文本+说话时长交付给等待中的 future（FIFO）。"""
         text = (text or "").strip()
         if not text:
+            return
+        # P1-4 修复：实质内容过滤——纯标点/符号/空白（ASR 幻觉，如拖长音
+        # "嗯…"、"啊…"）不投递，避免触发一轮空回复
+        if not has_content(text):
+            console.dim(f"[STT] 丢弃无实质内容识别结果：{text!r}")
+            return
+        # P2-9 修复：无意义词黑名单——语气词/ASR 幻觉口头禅不投递，
+        # 避免「嗯」触发一轮郑重其事的空回复
+        if _norm_word(text) in _MEANINGLESS_WORDS:
+            console.dim(f"[STT] 丢弃无意义识别结果：{text!r}")
             return
         # 3.14 回声防护：识别结果与最近播报文本高度相似 → 判为扬声器漏音
         # （打断瞬间被自己声音触发 STT 的回环），直接丢弃不投递
@@ -396,6 +450,8 @@ class STTEngine(BaseInputAdapter):
         seg_start_ms = 0          # 当前语音段开始时刻（VAD 毫秒，段内递增更新）
         vad_buf: "list[np.ndarray]" = []  # 凑 vad_chunk_stride 喂 VAD 的块缓冲
         vad_acc_len = 0           # vad_buf 已累积的样本数
+        hold_deadline = 0.0       # P1-3：合并观察窗到期时刻（time.monotonic）
+        hold_end_ms = 0           # P1-3：观察窗对应语音段的 VAD 结束时刻
 
         while not self._stop_event.is_set():
             try:
@@ -407,6 +463,13 @@ class STTEngine(BaseInputAdapter):
                     if silent_run >= silence_blocks:
                         self._commit(buf, len(buf) * BLOCK_SECONDS)
                         buf, state, silent_run, seg_start_ms = [], "silent", 0, 0
+                elif state == "hold" and time.monotonic() >= hold_deadline:
+                    self._commit(
+                        buf, max(0.0, (hold_end_ms - seg_start_ms) / 1000.0))
+                    buf, state, silent_run, seg_start_ms = [], "silent", 0, 0
+                    if self.engine == "local":
+                        self._feed_buf = []
+                        self._feed_acc_len = 0
                 continue
 
             if state == "speaking":
@@ -431,6 +494,14 @@ class STTEngine(BaseInputAdapter):
             audio = np.concatenate(vad_buf)
             events = self._vad_events(audio)
             for beg, end in events:
+                if beg >= 0 and state == "hold":
+                    # P1-3：观察窗内再次开口——合并回同一句（保留此前缓冲
+                    # 与流式 feed 进度，不丢上文），回到 speaking 继续积累
+                    state = "speaking"
+                    buf.append(audio)
+                    if self.engine == "local":
+                        self._feed_buf.append(audio)
+                        self._feed_acc_len += len(audio)
                 if beg >= 0 and state == "silent":
                     # 语音开始（含 [beg,-1] 与完整段 [beg,end] 的开始）：
                     # 段缓冲重设为当前块（丢弃此前静音），记录开始时刻
@@ -441,13 +512,21 @@ class STTEngine(BaseInputAdapter):
                         self._feed_buf = [audio]
                         self._feed_acc_len = len(audio)
                 if end >= 0 and state == "speaking":
-                    # 语音结束（含 [-1,end] 与完整段 [beg,end] 的结束）：
+                    # P1-3 修复：VAD 判停不立即提交，进入合并观察窗——
+                    # 窗内再开口合并回同一句，静置到期才真正 _commit。
                     # 时长用 VAD 真实起止时刻（不含尾部静音）
-                    self._commit(buf, max(0.0, (end - seg_start_ms) / 1000.0))
-                    buf, state, silent_run, seg_start_ms = [], "silent", 0, 0
-                    if self.engine == "local":
-                        self._feed_buf = []
-                        self._feed_acc_len = 0
+                    state = "hold"
+                    hold_end_ms = end
+                    hold_deadline = time.monotonic() + self.merge_window
+                    silent_run = 0
+            # P1-3：观察窗到期（说话人真停了）——提交整句
+            if state == "hold" and time.monotonic() >= hold_deadline:
+                self._commit(
+                    buf, max(0.0, (hold_end_ms - seg_start_ms) / 1000.0))
+                buf, state, silent_run, seg_start_ms = [], "silent", 0, 0
+                if self.engine == "local":
+                    self._feed_buf = []
+                    self._feed_acc_len = 0
             vad_buf = []
             vad_acc_len = 0
 
@@ -463,7 +542,7 @@ class STTEngine(BaseInputAdapter):
         audio = np.concatenate(buf) if len(buf) > 1 else buf[0]
         if audio.size < int(SAMPLE_RATE * _MIN_SPEECH_SECONDS):
             return
-        if _rms(audio) < _EMPTY_RMS:
+        if _rms(audio) < self.level_threshold:
             return
         if self.engine == "local":
             # 流式：说话中已 feed 的块无需重复提交，残余块随 end 收尾，

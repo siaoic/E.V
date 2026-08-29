@@ -99,8 +99,16 @@ async def setup(runtime: "RuntimeContext") -> None:
             cfg.MOUTH_PARAMETER = profile.mouth_param
             cfg.MOUTH_GAIN = profile.mouth_gain
 
-        runtime.face = FaceDriver(runtime.vts, profile)
+        # 口型模式：vts_audio = TTS 音频走虚拟声卡，VTS 自带音频口型
+        # 接管嘴部，本程序停用嘴部注入（保留眨眼/动作），避免双源打架
+        lipsync_builtin = (getattr(cfg, "LIPSYNC_MODE", "") or "builtin") != "vts_audio"
+        runtime.face = FaceDriver(runtime.vts, profile,
+                                  lipsync_enabled=lipsync_builtin)
         runtime.face.start()
+        if not lipsync_builtin:
+            console.ok(f"口型同步：VTS 自带音频口型接管"
+                       f"（TTS 输出设备："
+                       f"{getattr(cfg, 'TTS_OUTPUT_DEVICE', '') or '系统默认'}）")
         if cfg.MOTION_PATH:
             runtime.face.set_motion(cfg.MOTION_PATH)
         elif cfg.VTS_IDLE_TAKEOVER and profile.idle_motion:

@@ -230,6 +230,7 @@ class SubtitleServer:
             else:
                 console.warn(f"字幕字体 {name} 不存在：{path}")
         _SubtitleHandler.broker = self._broker
+        _SubtitleHandler.server = self
 
         # 尝试绑定：默认端口 +1 递增，最多试 16 次
         last_err = None

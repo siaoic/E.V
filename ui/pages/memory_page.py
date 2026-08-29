@@ -19,8 +19,10 @@ from ui.pages.plugins_page import _clear_layout
 from ui.widgets.role_card import _RoleCard
 
 # 主程序导出的图谱快照（跨进程 ChromaDB HNSW 索引读不到向量，改走文件）
-_GRAPH_EXPORT_FILE = os.path.join(
-    config.cfg.DATA_ROOT, "memory_graph.json")
+def _graph_export_file() -> str:
+    """图谱快照路径（惰性求值：主程序启动会把旧版平铺文件迁入
+    memory/ 子目录，每次读取取最新 DATA_ROOT）。"""
+    return os.path.join(config.cfg.DATA_ROOT, "memory", "memory_graph.json")
 
 # 角色卡片网格列数（对齐预览页 .role-grid: repeat(3, 1fr)）
 _ROLE_GRID_COLS = 3
@@ -33,7 +35,7 @@ _ROLE_PREVIEW_MAX_CHARS = 60
 def _load_graph_export():
     """读主程序导出的图谱快照 files；文件缺失/损坏返回 None。"""
     try:
-        with open(_GRAPH_EXPORT_FILE, "r", encoding="utf-8") as f:
+        with open(_graph_export_file(), "r", encoding="utf-8") as f:
             data = json.load(f)
         files = data.get("files")
         if files is None:

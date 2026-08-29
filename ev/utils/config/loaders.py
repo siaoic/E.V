@@ -55,7 +55,7 @@ _MEMORY_LOADERS = {
     # 会话历史库派生路径走 _data_root()（可写数据根单源），避免默认表达式重复
     "HISTORY_DB_PATH": lambda: (
         os.getenv("HISTORY_DB_PATH")
-        or os.path.join(_data_root(), "history.db")),
+        or os.path.join(_data_root(), "memory", "history.db")),
     "MEMORY_CURATOR_ENABLED": lambda: _get_bool("MEMORY_CURATOR_ENABLED", True),
     "MEMORY_CURATOR_INTERVAL": lambda: int(os.getenv("MEMORY_CURATOR_INTERVAL") or "10"),
     "MEMORY_GATE_TIMEOUT": lambda: float(os.getenv("MEMORY_GATE_TIMEOUT") or "8.0"),
@@ -119,6 +119,7 @@ _TOOL_LOADERS = {
     "TOOL_READ_SHEET_ENABLED": lambda: _get_bool("TOOL_READ_SHEET_ENABLED", True),
     "TOOL_PLAY_SFX_ENABLED": lambda: _get_bool("TOOL_PLAY_SFX_ENABLED", True),
     "TOOL_WRITE_DIARY_ENABLED": lambda: _get_bool("TOOL_WRITE_DIARY_ENABLED", True),
+    "TOOL_EPIANO_ENABLED": lambda: _get_bool("TOOL_EPIANO_ENABLED", True),
     "TOOL_REGISTRY": lambda: _get_bool("TOOL_REGISTRY", True),
     "MCP_ENABLED": lambda: _get_bool("MCP_ENABLED", False),
     "MCP_CONFIG_PATH": lambda: os.getenv("MCP_CONFIG_PATH") or (
@@ -158,6 +159,7 @@ _VOICE_LOADERS = {
     "GPTSOVITS_ROLE_GPT": lambda: os.getenv("GPTSOVITS_ROLE_GPT", ""),
     "GPTSOVITS_ROLE_SOVITS": lambda: os.getenv("GPTSOVITS_ROLE_SOVITS", ""),
     "TTS_OUTPUT_DEVICE": lambda: os.getenv("TTS_OUTPUT_DEVICE", ""),
+    "LIPSYNC_MODE": lambda: (os.getenv("LIPSYNC_MODE") or "builtin").strip(),
     "STT_ENABLED": lambda: _get_bool("STT_ENABLED", False),
     "STT_MODEL": lambda: os.getenv("STT_MODEL") or "FunAudioLLM/SenseVoiceSmall",
     "STT_LOCAL_MODEL_PATH": lambda: os.getenv("STT_LOCAL_MODEL_PATH") or "",
@@ -244,7 +246,7 @@ _PATHS_LOADERS = {
     # 可写数据根：默认 <PROJECT_ROOT>/data，可用 E_V_DATA_DIR 重定向到
     # 独立目录（便携版把用户数据放 U 盘等）；内置资源仍走 PROJECT_ROOT
     "DATA_ROOT": _data_root,
-    "TOKEN_FILE": lambda: os.path.join(_data_root(), "vts_token.json"),
+    "TOKEN_FILE": lambda: os.path.join(_data_root(), "vts", "vts_token.json"),
     "CONFIG_YAML_PATH": lambda: os.getenv("CONFIG_YAML_PATH") or os.path.join(
         _PROJECT_ROOT, "configs", "config.yaml"),
 }
@@ -289,6 +291,7 @@ _TOOL_HOT_FIELDS = (
     "TOOL_LOAD_SKILL_ENABLED", "TOOL_LOOK_SCREEN_ENABLED",
     "TOOL_READ_SHEET_ENABLED",
     "TOOL_PLAY_SFX_ENABLED",
+    "TOOL_EPIANO_ENABLED",
     "EVOLUTION_ENABLED", "EVOLUTION_MIN_INTERVAL", "EVOLUTION_MIN_TURNS",
     "EVOLUTION_EVAL_ENABLED", "EVOLUTION_EVAL_CASES",
     "EVOLUTION_PROMPT_EVO_ENABLED", "EVOLUTION_PROMPT_EVO_INTERVAL",

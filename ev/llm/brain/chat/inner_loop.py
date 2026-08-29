@@ -6,6 +6,8 @@
 """
 
 import asyncio
+import json
+import threading
 import time
 from concurrent.futures import ThreadPoolExecutor
 from typing import AsyncGenerator, List, Optional
@@ -24,6 +26,7 @@ from ev.llm.cleaners.sentence import (
     _find_sentence_end_from,
     _split_sentences,
 )
+from ev.llm.utils.content_check import has_content
 from ev.llm.client.factory import (
     build_thinking_extra_body,
 )
@@ -34,25 +37,27 @@ from ev.llm.utils.constants import (
 )
 from ev.llm.tools.executor import _execute_tool_call, _execute_tool_calls
 from ev.llm.tools.formatter import _format_tool_calls
-from ev.llm.tools.parser import _parse_qwen_tool_calls
+from ev.llm.tools.parser import _parse_qwen_tool_calls, _recover_tool_args
 from ev.llm.utils.content_check import has_content
 from ev.utils.perf_tracker import PerfTracker
 
 from .inner_tail import _chat_stream_tail
 
 # 记忆召回硬超时（秒）：超时熔断跳过注入，保障首字延迟不被检索拖垮
-_MEMORY_RECALL_TIMEOUT = 1.5
+# （B 优化：实测快路径 0ms，熔断只在检索服务异常时触发、此时注入价值
+# 本来就低，故 1.5s 收紧到 0.8s）
+_MEMORY_RECALL_TIMEOUT = 0.8
 
 # 段落早产切分（压 TTS 首句延迟，让「从 LLM 第一个字开始合成」落地）：
 # LLM 流式产字不等句末，尽早切出可合成段交 TTS（首块 ~200ms 即出声）——
 # - 句末标点（。！？…）必切（原有行为，最自然边界）；
-# - 停顿标点（逗号/顿号）且当前段 ≥ _PAUSE_SEGMENT_MIN_CHARS 字时切：
-#   逗号是中文自然停顿点，切成独立段合成播放不显突兀；
+# - 停顿标点（逗号/顿号/分号）遇号即切（_PAUSE_SEGMENT_MIN_CHARS=0）：
+#   停顿点是中文自然边界，切成独立段合成播放不显突兀；
 # - 首段早产：首个可合成段攒够 _FIRST_SEGMENT_MIN_CHARS 字就硬切（LLM 还在
 #   继续吐），不等待整句生成完；
 # - 无标点超长段（≥ _MAX_SEGMENT_CHARS）强制切，防播放头被长句拖住。
 _FIRST_SEGMENT_MIN_CHARS = 6    # 首段早产字数（太小 GSV 短文本合成不稳）
-_PAUSE_SEGMENT_MIN_CHARS = 4    # 停顿标点切段的最短段长（防"啊，嗯，"被单切）
+_PAUSE_SEGMENT_MIN_CHARS = 0    # 停顿标点最短段长：0 = 遇号即切（2026-08-29，见 sentence.py 注）
 _MAX_SEGMENT_CHARS = 30         # 无标点强制切段上限
 
 # 独立 LLM 流式线程池：与全局默认线程池隔离，避免高并发下工具/Web 服务
@@ -98,7 +103,23 @@ async def _run_chat_stream_inner(
             你可以调用函数工具完成实际任务（联网搜索、抓取网页、查询时间天气、
             加载技能、读写记忆等）。当用户问需要实时/最新信息、新闻、资料、
             事实核查的问题时，必须先调用下方列出的搜索/抓取网页工具获取真实
-            结果再回答，不要说自己无法联网搜索——工具列表已提供给你。"""
+            结果再回答，不要说自己无法联网搜索——工具列表已提供给你。
+
+            ### 工具执行纪律（对话质量红线）\n
+            - 工具调用与结果属于内部执行细节：禁止向用户复述工具名、文件路径、
+              JSON、统计数字等技术细节，禁止逐轮播报内部状态（如「超时了」「重试
+              中」「后台没有任务」「正在调用XX工具」）。
+            - 工具失败/超时时最多一句带过（如「稍等，我再试试」），随后直接重试
+              或换工具；拿到结果后直接给面向用户的结论，不要输出执行报告。
+            - 对话里只说观众想听的话：结论、感受、下一步建议。
+
+            ### 弹琴专用规则\n
+            - 乐谱图片（jpg/png）一律先 read_sheet_music 识谱，再按其返回的
+              score_path 调 play_score 弹奏；play_midi_file 只用于 .mid 文件。
+            - 路径/文件名原样传给工具参数（相对路径工具会按工作目录解析），
+              禁止自行补目录或改写路径。
+            - 「再弹一遍/再放一次」时，直接用对话里最近一次的 score_path 调
+              play_score，无需重新识谱。"""
         )
         from plugins.builtin.tools import render_tool_guide
         tool_guide = render_tool_guide(tools)
@@ -108,8 +129,13 @@ async def _run_chat_stream_inner(
         if mcp_desc:
             tool_block += "\n\n### 可用的联网服务器\n" + mcp_desc
         sections.append((True, tool_block))
+    # B 优化：记忆召回先行发起——召回走网络/向量检索最耗时，先建任务
+    # 让它与下方知识/画像等本地检索段并行执行，末尾再 await 汇合
+    mem_task = None
+    if self.cfg.MEMORY_ENABLED:
+        mem_task = asyncio.ensure_future(memory.retrieve(user_text))
     # 3. 知识库（volatile）：信号闸门命中才追加权威设定段（防幻觉；
-    #    闲聊/无关消息返回空串不注入，省 Token）。数据懒加载，进程内缓存一次。
+    #    闲聊/无关消息返回空串不注入，省 Token）。数据启动预热，进程内缓存。
     knowledge_section = self._knowledge_section(user_text)
     if knowledge_section:
         sections.append((False, knowledge_section))
@@ -119,14 +145,16 @@ async def _run_chat_stream_inner(
         sections.append((True, curated_section))
     # 5. 记忆召回（volatile）：记忆使用说明 + 本轮检索结果。写入完全交给
     #    管家模型（ButlerAgent 每轮从对话提取，参照 <memory> 标签）
-    if self.cfg.MEMORY_ENABLED:
+    if mem_task is not None:
         mem_block = memory.STANDING_INSTRUCTION
         try:
-            # 硬超时熔断：召回超过 1.5s 直接跳过注入，优先保障响应速度
+            # 硬超时熔断：召回超时直接跳过注入，优先保障响应速度
             mem_ctx = await asyncio.wait_for(
-                memory.retrieve(user_text), timeout=_MEMORY_RECALL_TIMEOUT)
+                mem_task, timeout=_MEMORY_RECALL_TIMEOUT)
         except asyncio.TimeoutError:
-            console.warn("[记忆检索] 召回超时（>1.5s），熔断跳过本次注入")
+            console.warn(
+                f"[记忆检索] 召回超时（>{_MEMORY_RECALL_TIMEOUT}s），"
+                "熔断跳过本次注入")
             mem_ctx = ""
         if mem_ctx:
             mem_block += (
@@ -266,6 +294,10 @@ async def _run_chat_stream_inner(
         # ctx 中的可变容器（list/dict）子线程直接读写；路由回退会通过 ctx 写回。
         from .stream_drainer import _run_stream_drainer
         _first_content_ref = [_first_content]   # list 包装以便子线程修改首字标记
+        # P1-1：本轮取消开关——打断/协程被取消时由 cancel_llm_stream() 设置，
+        # 子线程 drainer 在 chunk 间检查点立即断开 HTTP 流退出
+        cancel_event = threading.Event()
+        self._drain_cancel = cancel_event
         ctx = dict(
             messages=messages, tools=tools, self=self,
             route_name=route_name, route_client=route_client,
@@ -273,6 +305,7 @@ async def _run_chat_stream_inner(
             loop=loop, q=q, tool_calls_acc=tool_calls_acc, full_raw=full_raw,
             reasoning_raw=reasoning_raw,
             _first_content=_first_content_ref, tracker=tracker,
+            cancel_event=cancel_event,
         )
         bg_task = loop.run_in_executor(_LLM_POOL, _run_stream_drainer, ctx)
 
@@ -321,12 +354,17 @@ async def _run_chat_stream_inner(
                 await bg_task
                 tracker.end("总生成", f"{sentence_count} 句（出错中断）")
                 tracker.print_report()
+                # P0-2 修复：不再静默失败——yield final 让下游走 TTS+字幕，
+                # 观众至少能听到「出故障了」而不是无限沉默
+                yield ("final", "抱歉，我的大脑刚才出了点小故障，请稍后再问我一次吧。")
                 return
             if isinstance(item, str) and item.startswith("__RATELIMIT__::"):
                 console.warn(item[len("__RATELIMIT__::"):])
                 await bg_task
                 tracker.end("总生成", f"{sentence_count} 句（限流）")
                 tracker.print_report()
+                # P0-2 修复：限流同样语音+字幕告知（429 最长静默可达 1 分钟+）
+                yield ("final", "哎呀，我这边请求太频繁被限流了，请等我一会儿再聊。")
                 return
             buffer += item
 
@@ -403,6 +441,45 @@ async def _run_chat_stream_inner(
             iteration += 1
             tool_call_total += len(tool_calls)
             console.accent(f"===== 🔧 第 {iteration} 轮工具调用 =====")
+
+            # 空参数恢复兜底：glm-5.3-flash 等强制思考模型经中转可能输出
+            # name 齐全但 arguments 为空的 tool_calls（参数写在思维链正文
+            # 里），实测连续 5 轮空参 play_score 耗尽轮次。执行前从本轮
+            # 正文恢复；恢复不了也补 "{}" 保证回传 API 的 arguments 合法。
+            from ev.llm.tools.parser import _loose_json_loads
+            for tc in tool_calls:
+                args_str = (tc["function"].get("arguments") or "").strip()
+                if args_str:
+                    try:
+                        parsed_args = json.loads(args_str)
+                    except (json.JSONDecodeError, TypeError):
+                        # Windows 单反斜杠路径等非法转义：宽松修复
+                        parsed_args = _loose_json_loads(args_str)
+                    if parsed_args:
+                        if isinstance(parsed_args, dict):
+                            tc["function"]["arguments"] = json.dumps(
+                                parsed_args, ensure_ascii=False)
+                        continue  # 已有非空参数
+                # 恢复来源两段式：先扫正文；失败再扫思维链
+                # （glm-4v-flash 等模型会把参数写在 reasoning_content，
+                # 该字段由 stream_drainer 单独累积、不混入 content）
+                reasoning_text = "".join(reasoning_raw).strip()
+                recovered = _recover_tool_args(
+                    clean_content, tc["function"]["name"])
+                if not recovered:
+                    recovered = _recover_tool_args(
+                        reasoning_text, tc["function"]["name"])
+                    src = "思维链" if recovered else None
+                else:
+                    src = "正文"
+                if recovered:
+                    tc["function"]["arguments"] = json.dumps(
+                        recovered, ensure_ascii=False)
+                    console.warn(
+                        f"🔧 「{tc['function']['name']}」参数为空，"
+                        f"已从{src}恢复：{tc['function']['arguments'][:120]}")
+                else:
+                    tc["function"]["arguments"] = "{}"
             console.accent(_format_tool_calls(tool_calls))
 
             # 本轮含音效播放工具：音效播放后不再语音/文字回复（直播场景
@@ -474,7 +551,8 @@ async def _run_chat_stream_inner(
         final_reply = await self._request_final_reply(messages)
         for seg in _split_sentences(final_reply):
             cleaned = _clean_sentence(seg)
-            if cleaned.strip() and not sound_effect_used:
+            # P2-2 修复：非流式兜底同样过滤纯标点/无实质内容残句
+            if cleaned.strip() and has_content(cleaned) and not sound_effect_used:
                 yield ("final", cleaned)
 
     # 思考过程换行

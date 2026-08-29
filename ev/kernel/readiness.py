@@ -20,6 +20,10 @@ from ev.utils import config, console
 # 探针并发执行上限（TTS/ASR 活体探测是网络调用，串行会拖慢启动）
 _HTTP_TIMEOUT = 3.0
 
+# TTS 探针最长等待：模型在后台线程异步加载（实测 ~25-30s），留足余量
+_TTS_WAIT_TIMEOUT = 90.0
+_TTS_WAIT_INTERVAL = 0.5
+
 
 def readiness_check_enabled() -> bool:
     """3.15 总开关：关闭时 check_readiness 返回空报告（不打扰启动）。"""
@@ -42,14 +46,29 @@ async def _probe_http(url: str, *, ok_status=(200,)) -> tuple[bool, str]:
         return False, f"{type(e).__name__}: {e}"
 
 
-def _tts_probe(runtime) -> tuple[bool, str]:
-    """TTS 服务：优先引擎内部就绪标记，再做 / 活体探测。"""
+async def _tts_probe(runtime) -> tuple[bool, str]:
+    """TTS 服务：优先引擎内部就绪标记，再做 / 活体探测。
+
+    引擎模型在后台线程异步加载（约 20-30s），启动早期探针会撞上
+    "加载中"——此处等待其完成而非误报"启动连接失败"；
+    等待中引擎初始化失败会被上层置 None（降级纯字幕），按失败报告。
+    """
     tts = getattr(runtime, "tts", None)
     if tts is None:
         return False, "未初始化（无 TTS 组件）"
     if getattr(tts, "_ready", False):
         return True, "引擎已就绪"
-    return False, "引擎未就绪（启动连接失败）"
+    console.dim("TTS 引擎后台加载模型中，就绪检查等待…")
+    loop = asyncio.get_running_loop()
+    deadline = loop.time() + _TTS_WAIT_TIMEOUT
+    while loop.time() < deadline:
+        await asyncio.sleep(_TTS_WAIT_INTERVAL)
+        tts = getattr(runtime, "tts", None)
+        if tts is None:
+            return False, "引擎初始化失败（已降级纯字幕）"
+        if getattr(tts, "_ready", False):
+            return True, "引擎已就绪"
+    return False, f"等待超时（{_TTS_WAIT_TIMEOUT:.0f}s），模型加载过慢"
 
 
 def _asr_probe(runtime) -> tuple[bool, str]:
@@ -140,7 +159,10 @@ async def check_readiness(runtime) -> dict:
     results: list[dict] = []
     for name, probe in _probes():
         try:
-            ok, detail = probe(runtime)
+            result = probe(runtime)
+            if asyncio.iscoroutine(result):  # 支持异步探针（如 TTS 等待加载）
+                result = await result
+            ok, detail = result
         except Exception as e:
             ok, detail = False, f"{type(e).__name__}: {e}"
         results.append({"name": name, "ok": bool(ok), "detail": str(detail)})

@@ -8,7 +8,7 @@ from __future__ import annotations
 
 import asyncio
 
-from ev.llm.client.factory import get_async_openai_client
+from ev.llm.client.factory import build_thinking_extra_body, get_async_openai_client
 from ev.llm.utils.jsonutil import parse_json_array
 from ev.utils import config, console
 
@@ -95,22 +95,30 @@ async def _integrate_memories(
                 if attempt == 2
                 else ""
             )
+            _kw = dict(
+                model=model,
+                messages=[
+                    {"role": "system", "content": _INTEGRATE_SYSTEM},
+                    {
+                        "role": "user",
+                        "content": user_text + (retry_hint or ""),
+                    },
+                ],
+                temperature=0.2,
+                max_tokens=4096,
+            )
             try:
-                resp = await asyncio.wait_for(
-                    client.chat.completions.create(
-                        model=model,
-                        messages=[
-                            {"role": "system", "content": _INTEGRATE_SYSTEM},
-                            {
-                                "role": "user",
-                                "content": user_text + (retry_hint or ""),
-                            },
-                        ],
-                        temperature=0.2,
-                        max_tokens=4096,
-                    ),
-                    timeout=90.0,
-                )
+                try:
+                    # 显式关思考：整合输出 JSON 数组，思考只会拖慢整合
+                    resp = await asyncio.wait_for(
+                        client.chat.completions.create(
+                            **_kw, extra_body=build_thinking_extra_body(False)),
+                        timeout=90.0,
+                    )
+                except Exception:
+                    # thinking 字段不被支持 → 降级普通模式重试
+                    resp = await asyncio.wait_for(
+                        client.chat.completions.create(**_kw), timeout=90.0)
             except Exception as e:
                 console.warn(f"[ButlerAgent] 记忆整合调用失败：{e}")
                 break

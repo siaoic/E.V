@@ -26,16 +26,16 @@ if str(_PROJECT_ROOT) not in sys.path:
 
 
 def _db_path() -> Path:
-    """delegation.db 路径：DATA_ROOT/delegation.db。
+    """delegation.db 路径：DATA_ROOT/agent/delegation.db。
 
     import ev.utils.config 时 env_loader 会自动 load_dotenv，
     所以 cfg.DATA_ROOT 已就绪（可用 E_V_DATA_DIR 重定向）。
     """
     try:
         from ev.utils import config
-        return Path(config.cfg.DATA_ROOT) / "delegation.db"
+        return Path(config.cfg.DATA_ROOT) / "agent" / "delegation.db"
     except Exception:
-        return _PROJECT_ROOT / "data" / "delegation.db"
+        return _PROJECT_ROOT / "data" / "agent" / "delegation.db"
 
 
 def list_jobs(limit: int = 50) -> list:

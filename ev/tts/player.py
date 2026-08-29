@@ -86,10 +86,14 @@ class AsyncAudioPlayer:
             self._first_fired.add(sent_id)
             dur_s = float(getattr(chunk, "audio_len_s", 0.5) or 0.5)
             text = getattr(chunk, "orig_text", "") or ""
+            # P0-3 修复：传真实音频数据（而非恒 None），口型 RMS 曲线
+            # 直接从已解码样本计算，不再依赖文件路径/ffmpeg
+            audio = getattr(chunk, "audio_data", None)
+            sr = getattr(chunk, "samplerate", None)
             cb = self._on_play
             if cb is not None:
                 try:
-                    cb(None, text, dur_s)
+                    cb(audio, sr, text, dur_s)
                 except Exception:
                     pass
 

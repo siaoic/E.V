@@ -156,7 +156,7 @@ class VtsEmotionActor(BaseEmotionActor):
         """
         try:
             path = os.path.join(
-                self._cfg.DATA_ROOT, "vts_face_lib.json")
+                self._cfg.DATA_ROOT, "vts", "vts_face_lib.json")
             os.makedirs(os.path.dirname(path), exist_ok=True)
             with open(path, "w", encoding="utf-8") as f:
                 json.dump({

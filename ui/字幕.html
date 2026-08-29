@@ -95,57 +95,83 @@
 <body>
   <div id="userline"></div>
   <div id="subtitle"></div>
+  <div id="conn">字幕连接已断开，重连中…</div>
 
 <script>
 (function () {
   const sub = document.getElementById('subtitle');
   const userline = document.getElementById('userline');
+  const conn = document.getElementById('conn');
   const url = location.origin + '/events';
-  const es = new EventSource(url);
 
-  function show(text) {
-    sub.textContent = text;
-    if (!text) {
-      // 空文本：进入淡出（clear / 断线时）
+  /* 断线自动重连：指数退避（初始 1s，上限 10s） */
+  let reconnectTimer = null;
+  let reconnectDelay = 1000;
+
+  function connect() {
+    const es = new EventSource(url);
+
+    // 重连成功：清除断线提示，重置退避
+    es.onopen = () => {
+      reconnectDelay = 1000;
+      conn.classList.remove('visible');
+    };
+
+    function show(text) {
+      sub.textContent = text;
+      if (!text) {
+        // 空文本：进入淡出（clear 时）
+        sub.classList.remove('visible');
+        sub.classList.add('fading');
+        return;
+      }
+      sub.classList.remove('fading');
+      sub.classList.add('visible');
+    }
+
+    es.addEventListener('text', (e) => {
+      // 打字机累积文本：只显示、不自动隐藏——句间合成间隙可达数秒，
+      // 自动淡出会让字幕在回复中途消失又出现（闪烁）
+      show(e.data);
+    });
+
+    // 观众弹幕 / 用户发言：单独一行展示，3 秒后自动淡出（不遮挡 AI 字幕）
+    let userFadeTimer = null;
+    es.addEventListener('user', (e) => {
+      if (!e.data) return;
+      userline.textContent = e.data;
+      userline.classList.remove('fading');
+      userline.classList.add('visible');
+      clearTimeout(userFadeTimer);
+      userFadeTimer = setTimeout(() => {
+        userline.classList.remove('visible');
+        userline.classList.add('fading');
+      }, 3000);
+    });
+
+    es.addEventListener('clear', () => {
+      // 回复真正结束才淡出（文字保留到淡出完成，由 CSS 过渡平滑隐藏）
       sub.classList.remove('visible');
       sub.classList.add('fading');
-      return;
-    }
-    sub.classList.remove('fading');
-    sub.classList.add('visible');
+    });
+
+    es.onerror = () => {
+      // 断线：淡出当前字幕 + 显示灰色重连提示；
+      // 主动关闭（接管 EventSource 原生重试），按指数退避自动重连
+      sub.classList.remove('visible');
+      sub.classList.add('fading');
+      conn.classList.add('visible');
+      try { es.close(); } catch (e) {}
+      if (reconnectTimer) return;
+      reconnectTimer = setTimeout(() => {
+        reconnectTimer = null;
+        connect();
+      }, reconnectDelay);
+      reconnectDelay = Math.min(reconnectDelay * 2, 10000);
+    };
   }
 
-  es.addEventListener('text', (e) => {
-    // 打字机累积文本：只显示、不自动隐藏——句间合成间隙可达数秒，
-    // 自动淡出会让字幕在回复中途消失又出现（闪烁）
-    show(e.data);
-  });
-
-  // 观众弹幕 / 用户发言：单独一行展示，3 秒后自动淡出（不遮挡 AI 字幕）
-  let userFadeTimer = null;
-  es.addEventListener('user', (e) => {
-    if (!e.data) return;
-    userline.textContent = e.data;
-    userline.classList.remove('fading');
-    userline.classList.add('visible');
-    clearTimeout(userFadeTimer);
-    userFadeTimer = setTimeout(() => {
-      userline.classList.remove('visible');
-      userline.classList.add('fading');
-    }, 3000);
-  });
-
-  es.addEventListener('clear', () => {
-    // 回复真正结束才淡出（文字保留到淡出完成，由 CSS 过渡平滑隐藏）
-    sub.classList.remove('visible');
-    sub.classList.add('fading');
-  });
-
-  es.onerror = () => {
-    // 断线：淡出（EventSource 自带重试，重连后新字幕重新显示）
-    sub.classList.remove('visible');
-    sub.classList.add('fading');
-  };
+  connect();
 })();
 </script>
 </body>

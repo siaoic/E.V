@@ -17,12 +17,51 @@ import shutil
 
 from ev.utils import config, console
 
+# 数据文件归类布局：子目录 → 该目录下的文件名清单。运行时数据一律
+# 落子目录（数据根只留 knowledge/ / tts_cache/ 等资源目录与静态词库）。
+# 新增数据文件时在此登记，ensure_data_dirs 会自动建目录并迁移旧版平铺文件。
+_DATA_LAYOUT: dict[str, tuple[str, ...]] = {
+    "agent": (  # 委派队列 + 建议存储
+        "delegation.db",
+        "agent_suggestions.json",
+        "agent_suggestions_dismissed.json",
+    ),
+    "memory": (  # 记忆库（会话历史 / memU 向量库 / 图谱快照）
+        "history.db",
+        "memu.sqlite3",
+        "memory_graph.json",
+    ),
+    "evolution": (  # 自我进化引擎产物 + LLM 调用记账
+        "evolution_advice.md",
+        "evolution_advice_active.json",
+        "evolution_evals.jsonl",
+        "evolution_feedback.jsonl",
+        "evolution_policy.json",
+        "evolution_policy_history.md",
+        "evolution_profile.json",
+        "evolution_profile_history.jsonl",
+        "evolution_usage.jsonl",
+        "aux_usage.jsonl",
+        "skill_usage.json",
+    ),
+    "vts": (  # VTS 令牌 / 表情库 / 情绪映射（pet 与 vtuber 各一）
+        "vts_token.json",
+        "vts_face_lib.json",
+        "emotion_map.json",
+        "emotion_map_vts.json",
+    ),
+}
+
+# SQLite WAL 侧车后缀：迁移库文件时一并搬运
+_DB_SIDECARS = ("-wal", "-shm")
+
 
 def ensure_data_dirs() -> None:
     """集中创建可写数据根及标准子目录（幂等，失败静默不阻塞启动）。"""
     data_root = config.cfg.DATA_ROOT
     for sub in (
         "",  # data/
+        *_DATA_LAYOUT,  # agent/ memory/ evolution/ vts/ 归类子目录
         os.path.join("knowledge", "curated_cards"),
         os.path.join("knowledge", "world_lore"),
         "tts_cache",
@@ -31,6 +70,34 @@ def ensure_data_dirs() -> None:
             os.makedirs(os.path.join(data_root, sub), exist_ok=True)
         except OSError:
             continue
+    _migrate_flat_files()
+
+
+def _migrate_flat_files() -> None:
+    """一次性迁移：旧版平铺在数据根的文件搬入归类子目录（幂等）。
+
+    仅当旧路径存在且新路径不存在时移动（绝不覆盖新位置已有文件）；
+    SQLite 库文件连带 -wal / -shm 侧车一并处理。文件被占用（另一进程
+    正打开）时移动失败静默跳过，下次启动重试。
+    """
+    root = config.cfg.DATA_ROOT
+    moved = 0
+    for sub, names in _DATA_LAYOUT.items():
+        for name in names:
+            for suffix in ("",) + _DB_SIDECARS:
+                old = os.path.join(root, name + suffix)
+                if not os.path.isfile(old):
+                    continue
+                new = os.path.join(root, sub, name + suffix)
+                try:
+                    if os.path.exists(new):
+                        continue
+                    shutil.move(old, new)
+                    moved += 1
+                except OSError:
+                    continue
+    if moved:
+        console.dim(f"[数据根] 已把 {moved} 个历史数据文件归入子目录（{root}）")
 
 
 def sync_builtin_resources() -> None:

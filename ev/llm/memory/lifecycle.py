@@ -21,7 +21,7 @@ from __future__ import annotations
 import re
 from typing import Any, Callable, Optional
 
-from ev.llm.client.factory import get_async_openai_client
+from ev.llm.client.factory import build_thinking_extra_body, get_async_openai_client
 from ev.llm.utils.jsonutil import parse_json_object
 from ev.llm.memory.lore_guard import is_lore_leak
 from ev.utils import config
@@ -100,16 +100,24 @@ class LifecycleEngine:
             f"记忆归属者：{owner}\n"
             f"现有相关记忆：\n{context}"
         )
+        judge_kwargs = dict(
+            model=self._model,
+            messages=[
+                {"role": "system", "content": _JUDGE_SYSTEM},
+                {"role": "user", "content": user_text},
+            ],
+            temperature=0.2,
+            max_tokens=200,
+        )
         try:
-            resp = await client.chat.completions.create(
-                model=self._model,
-                messages=[
-                    {"role": "system", "content": _JUDGE_SYSTEM},
-                    {"role": "user", "content": user_text},
-                ],
-                temperature=0.2,
-                max_tokens=200,
-            )
+            try:
+                # 显式关思考：判决输出一行 JSON，思考只会拖慢判决
+                # （GLM 系默认强制思考）
+                resp = await client.chat.completions.create(
+                    **judge_kwargs, extra_body=build_thinking_extra_body(False))
+            except Exception:
+                # thinking 字段不被支持 → 降级普通模式重试
+                resp = await client.chat.completions.create(**judge_kwargs)
             data = parse_json_object(resp.choices[0].message.content or "")
             verdict = str(data.get("verdict", "ADD")).upper()
             if verdict not in ("ADD", "UPDATE", "DELETE", "IGNORE"):

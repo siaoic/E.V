@@ -37,7 +37,7 @@ class FaceHandler:
             return env_path
         name = ("emotion_map_vts.json" if self._current_mode() == "vtuber"
                 else "emotion_map.json")
-        return os.path.join(self.cfg.DATA_ROOT, name)
+        return os.path.join(self.cfg.DATA_ROOT, "vts", name)
 
     def _entry(self, emotion: str) -> dict:
         """情绪映射条目（惰性创建）。"""

@@ -108,6 +108,12 @@ class ChatHandler(BaseHandler):
                     if got_input:
                         # 打断：立即闭嘴 → 取消 LLM 流
                         console.dim("[打断] 用户输入/语音打断当前播报")
+                        # P1-1：通知子线程 drainer 断开 HTTP 流（协程取消
+                        # 无法停掉线程池里的同步迭代，会空跑到 finish_reason）
+                        try:
+                            runtime.brain.cancel_llm_stream()
+                        except Exception:
+                            pass
                         if tts is not None:
                             try:
                                 tts.interrupt()

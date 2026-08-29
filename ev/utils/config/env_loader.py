@@ -18,6 +18,10 @@ else:
         os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))))
 
 load_dotenv(os.path.join(_PROJECT_ROOT, ".env"))
+# 注意：python-dotenv 1.x 无 inline_comment_prefixes 参数（0.x/他库才有）；
+# 1.x 默认剥离「非空值」后的行内注释（KEY = value  # 注释 → value），
+# 但空值行（KEY =   # 注释）会把整段注释当值读入——.env 中须避免此写法
+# （注释另起一行），否则会触发如 MOTION_PATH 的“动作文件不存在” WARN。
 
 
 # ===== System Prompt 加载（支持直接加载整个 skill 文件夹） =====
@@ -216,7 +220,7 @@ def _default_emotion_map_file() -> str:
     """情绪 → 表情/动作映射文件默认路径：按运行模式分文件（vtuber/pet）。"""
     mode = (os.getenv("RUN_MODE") or "vtuber").strip().lower()
     return os.path.join(
-        _data_root(),
+        _data_root(), "vts",
         "emotion_map_vts.json" if mode == "vtuber" else "emotion_map.json")
 
 

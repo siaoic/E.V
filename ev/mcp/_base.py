@@ -18,14 +18,22 @@ from ev.mcp.registry import MCPToolRegistry
 
 
 def _tool_to_dict(tool) -> dict:
-    """官方 Tool 对象 → 注册表 dict 格式 {name, description, parameters}。"""
+    """官方 Tool 对象 → 注册表 dict 格式 {name, description, parameters}。
+
+    input_schema 在官方 SDK 里是普通 dict（dict[str, Any]），没有 model_dump；
+    此前误按 pydantic 模型处理导致所有 MCP 工具 schema 塌缩成 {"type": "object"}，
+    LLM 看不到任何参数定义（表现为 play_score 等工具被空参调用死循环）。
+    """
     schema = getattr(tool, "input_schema", None)
-    dump = getattr(schema, "model_dump", None)
-    parameters = dump(mode="json") if dump else {"type": "object"}
+    if isinstance(schema, dict):
+        parameters = schema
+    else:
+        dump = getattr(schema, "model_dump", None)
+        parameters = dump(mode="json") if callable(dump) else {"type": "object"}
     return {
         "name": tool.name,
         "description": getattr(tool, "description", "") or "",
-        "parameters": parameters,
+        "parameters": parameters or {"type": "object"},
     }
 
 

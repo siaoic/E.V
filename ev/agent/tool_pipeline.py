@@ -32,6 +32,21 @@ _TOOL_TIMEOUT = 10.0
 # 失败后后台重试的延迟（秒）
 _RETRY_DELAY = 1.0
 
+# 工具-参数适配守卫（deny + 改道路由）：key=工具名，
+# value=(允许的扩展名元组, 改道指引文本)。
+# 背景：GLM 系模型实测会把「给我弹<乐谱图片>」误路由到 play_midi_file，
+# 且 path 被工具描述里的示例目录带偏成 e:/sheet/...（连续 5 轮 ENOENT）。
+# 在 pre-execute 确定性拦截，模型下一轮即按指引改用 read_sheet_music。
+_TOOL_ARG_GUARDS = {
+    "play_midi_file": (
+        (".mid", ".midi"),
+        "play_midi_file 仅支持 .mid/.midi 文件，传入的不是 MIDI 文件。"
+        "若用户给的是乐谱图片（jpg/png 等），必须改用 read_sheet_music 工具："
+        "path 原样传用户提供的路径/文件名（相对路径按工作目录解析，禁止自行补目录"
+        "或改写），识谱成功后按其返回的 score_path 调用 play_score 弹奏。",
+    ),
+}
+
 
 class ToolPipeline:
     """三段式工具执行管线（进程内单例 tool_pipeline）。"""
@@ -93,6 +108,17 @@ class ToolPipeline:
                         "tool_call_id": tool_call_id,
                         "content": event.replaced}
 
+        # 工具-参数适配守卫：扩展名不符直接改道指引（deny-only，不执行）
+        guard = _TOOL_ARG_GUARDS.get(name)
+        if guard is not None:
+            _p = str((args or {}).get("path") or "").strip()
+            if _p and not _p.lower().endswith(guard[0]):
+                console.warn(
+                    f"  ↳ 「{name}」参数非 {guard[0]} 文件（…{_p[-50:]}），拦截并改道")
+                return {"role": "tool", "name": name,
+                        "tool_call_id": tool_call_id,
+                        "content": f"[{guard[1]}]"}
+
         # L2-B pre-execute budget：本轮预算已耗尽 → 不再真实执行，直接 stub
         # （模型依旧能看到「有工具被熔断」的提示，省去无谓的工具执行时间）
         if state["truncated"]:
@@ -125,15 +151,20 @@ class ToolPipeline:
         返回成功结果；超时返回占位（不再让单个工具拖死整轮）；
         首次失败立刻返回占位并后台重试（重试结果仅打印控制台，
         不进本轮 LLM context——本轮已按占位继续，避免二次等待）。
+
+        超时按工具放宽：注册超时（如 read_sheet_music 1500s）> 平铺
+        _TOOL_TIMEOUT 时按注册值执行，长耗时工具不再被一刀切掐断。
         """
         from plugins.builtin.tools import call_tool
+        from ev.agent.tool_registry import resolve_tool_timeout
 
+        timeout = max(_TOOL_TIMEOUT, resolve_tool_timeout(name))
         try:
             return await asyncio.wait_for(
-                call_tool(name, args, mcp), timeout=_TOOL_TIMEOUT)
+                call_tool(name, args, mcp), timeout=timeout)
         except asyncio.TimeoutError:
             console.warn(
-                f"  ↳ 「{name}」执行超时（>{_TOOL_TIMEOUT:.0f}s），本轮返回占位")
+                f"  ↳ 「{name}」执行超时（>{timeout:.0f}s），本轮返回占位")
             return f"[{name} 执行超时，本轮跳过]"
         except Exception as e:
             console.warn(f"  ↳ 「{name}」首次失败（{e}），后台重试...")

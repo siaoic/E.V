@@ -30,6 +30,15 @@ async def setup(runtime: "RuntimeContext") -> None:
         runtime.plugin_manager = None
         console.warn(f"[插件] 插件系统初始化失败（不影响运行）：{e}")
 
+    # OMR daemon 预热（fire-and-forget）：模型加载与第一次识谱解耦，
+    # 消除「首次识谱必超时、重试才成」。失败静默（识谱时再拉起兜底）。
+    try:
+        if runtime.cfg.TOOL_READ_SHEET_ENABLED:
+            from plugins.builtin.tools.read_sheet_music.sheet import _OmrDaemon
+            _OmrDaemon.warmup()
+    except Exception:
+        pass
+
 
 async def teardown(runtime: "RuntimeContext") -> None:
     """原 teardown 中 plugin_manager.stop_all 段（第一个执行）。"""

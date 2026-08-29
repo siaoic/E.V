@@ -130,6 +130,18 @@ class _ChatMixin:
             async for item in self._chat_stream_inner(user_text, proactive=proactive, history=history):
                 yield item
 
+    def cancel_llm_stream(self) -> None:
+        """打断当前 LLM 流式请求（P1-1 修复）。
+
+        线程池里的 stream_drainer 无法被 asyncio 取消——打断后 HTTP 流会
+        空跑到 finish_reason（浪费 token / 占用并发额度）。inner_loop 每轮
+        注册一个 cancel_event 到 self._drain_cancel；此方法设置它，drainer
+        在 chunk 间检查点立即断开响应退出。无在跑流时为空操作。
+        """
+        ev = getattr(self, "_drain_cancel", None)
+        if ev is not None:
+            ev.set()
+
     async def _chat_stream_inner(self, user_text: str, *, proactive: bool,
                                  history: Optional[list]) -> AsyncGenerator[str, None]:
         """chat_stream 实际实现体（thin wrapper，委托 inner_loop 模块）。"""

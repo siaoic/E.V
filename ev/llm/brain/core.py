@@ -1,4 +1,4 @@
-﻿import asyncio
+import asyncio
 from typing import List, Optional
 
 from ev.utils import config
@@ -100,6 +100,17 @@ class LLMBrain(_ChatMixin, _CuratorMixin, BaseLLMAdapter, _InjectionMixin, _Summ
         """
         if not self.cfg.LLM_API_KEY:
             return
+        # A-4 优化：知识库数据加载（首次 ~1.5s）同属首轮懒加载长尾，
+        # 挪到启动预热执行（失败静默，不影响启动与对话）
+        if getattr(self.cfg, "KNOWLEDGE_ENABLED", True):
+            try:
+                from ev.llm.knowledge import get_knowledge_service
+
+                await asyncio.wait_for(
+                    asyncio.to_thread(get_knowledge_service().preload),
+                    timeout=15)
+            except Exception:
+                pass
         try:
             await asyncio.wait_for(
                 asyncio.to_thread(

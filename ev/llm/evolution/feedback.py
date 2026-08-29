@@ -43,8 +43,10 @@ def is_negative_text(text: str) -> bool:
 
 
 def _feedback_path() -> str:
-    """负反馈事件文件路径（可写数据根，与其它 evolution 落盘口径一致）。"""
-    return os.path.join(config.cfg.DATA_ROOT, "evolution_feedback.jsonl")
+    """负反馈事件文件路径（可写数据根 evolution/ 子目录，与其它
+    evolution 落盘口径一致）。"""
+    return os.path.join(config.cfg.DATA_ROOT, "evolution",
+                        "evolution_feedback.jsonl")
 
 
 def _feedback_enabled() -> bool:

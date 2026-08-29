@@ -89,7 +89,9 @@ class InputHandler(BaseHandler):
             if input_fut in done:
                 text = input_fut.result()
                 # ---- 拒收：主动 / 弹幕正在播报 → 丢本条，换新 input_fut 继续等 ----
-                if is_rejecting_input():
+                # /quit 例外：退出命令必须随时生效（控制中心「停止」按钮可能在
+                # 播报中按下，丢弃会导致 30 秒后被强杀、归档丢失）
+                if is_rejecting_input() and text.strip() != "/quit":
                     console.dim("[输入丢弃] 正在回复弹幕 / 主动说话，忽略本次键盘输入")
                     input_fut = loop.run_in_executor(None, console.read_input)
                     continue

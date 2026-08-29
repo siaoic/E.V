@@ -258,7 +258,7 @@ def get_session_store() -> SessionStore:
             if _instance is None:
                 _instance = SessionStore(config.cfg.HISTORY_DB_PATH or
                                          os.path.join(config.cfg.DATA_ROOT,
-                                                      "history.db"))
+                                                      "memory", "history.db"))
     return _instance
 
 

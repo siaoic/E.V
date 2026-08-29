@@ -28,23 +28,25 @@ from datetime import datetime
 
 from openai import AsyncOpenAI
 
-from ev.llm.client.factory import get_async_openai_client
+from ev.llm.client.factory import build_thinking_extra_body, get_async_openai_client
 from ev.llm.utils.jsonutil import parse_json_object
 from ev.utils import config, console
 
 # 生效策略段文件：llm_brain 每轮读取注入系统提示（GEPA 择优后的当前版本）
-_POLICY_PATH = os.path.join(config.cfg.DATA_ROOT, "evolution_policy.json")
+_POLICY_PATH = os.path.join(config.cfg.DATA_ROOT, "evolution",
+                            "evolution_policy.json")
 
 # 策略版本历史存档（追加写，供用户审阅每次进化的成败）
 _POLICY_HISTORY_PATH = os.path.join(
-    config.cfg.DATA_ROOT, "evolution_policy_history.md")
+    config.cfg.DATA_ROOT, "evolution", "evolution_policy_history.md")
 
 # 候选策略段最大字符数：超限截断，防止策略膨胀失控稀释系统提示
 _POLICY_MAX_CHARS = 400
 
 # 评审评估存档（evolution_evals.jsonl，与技能评估共用同文件追加写）：
 # 记录每次 GEPA 评审的 {candidate, 双评分, context}，A/B 可回溯（5.16）
-_EVALS_PATH = os.path.join(config.cfg.DATA_ROOT, "evolution_evals.jsonl")
+_EVALS_PATH = os.path.join(config.cfg.DATA_ROOT, "evolution",
+                           "evolution_evals.jsonl")
 
 # 变异提示：把最近对话 + 当前策略交给 LLM，输出失败点与候选策略段
 _EVOLVE_SYSTEM = (
@@ -212,20 +214,30 @@ class PolicyEvolver:
             f"[最近对话记录]\n{text}\n\n"
             f"[当前生效的行为策略段]\n{current or '（无，首次进化）'}")
         start = time.time()
+        evolve_kwargs = dict(
+            model=self._model,
+            messages=[
+                {"role": "system", "content": _EVOLVE_SYSTEM.replace(
+                    "{max}", str(_POLICY_MAX_CHARS))},
+                {"role": "user", "content": evolve_user},
+            ],
+            temperature=0.7,
+            max_tokens=1024,
+        )
         try:
-            resp = await asyncio.wait_for(
-                client.chat.completions.create(
-                    model=self._model,
-                    messages=[
-                        {"role": "system", "content": _EVOLVE_SYSTEM.replace(
-                            "{max}", str(_POLICY_MAX_CHARS))},
-                        {"role": "user", "content": evolve_user},
-                    ],
-                    temperature=0.7,
-                    max_tokens=1024,
-                ),
-                timeout=60.0,
-            )
+            try:
+                # 显式关思考：变异输出结构化 JSON，思考只会拖慢进化节奏
+                resp = await asyncio.wait_for(
+                    client.chat.completions.create(
+                        **evolve_kwargs,
+                        extra_body=build_thinking_extra_body(False)),
+                    timeout=60.0,
+                )
+            except Exception:
+                # thinking 字段不被支持 → 降级普通模式重试
+                resp = await asyncio.wait_for(
+                    client.chat.completions.create(**evolve_kwargs),
+                    timeout=60.0)
         except Exception as e:
             console.warn(f"[GEPA] 变异调用失败：{e}")
             return
@@ -248,19 +260,29 @@ class PolicyEvolver:
             f"[最近对话记录]\n{text}\n\n"
             f"[当前策略]\n{current}\n\n[候选策略]\n{candidate}")
         start = time.time()
+        judge_kwargs = dict(
+            model=self._model,
+            messages=[
+                {"role": "system", "content": _JUDGE_SYSTEM},
+                {"role": "user", "content": judge_user},
+            ],
+            temperature=0.2,
+            max_tokens=512,
+        )
         try:
-            resp = await asyncio.wait_for(
-                client.chat.completions.create(
-                    model=self._model,
-                    messages=[
-                        {"role": "system", "content": _JUDGE_SYSTEM},
-                        {"role": "user", "content": judge_user},
-                    ],
-                    temperature=0.2,
-                    max_tokens=512,
-                ),
-                timeout=60.0,
-            )
+            try:
+                # 显式关思考：评审输出结构化 JSON，思考只会拖慢择优节奏
+                resp = await asyncio.wait_for(
+                    client.chat.completions.create(
+                        **judge_kwargs,
+                        extra_body=build_thinking_extra_body(False)),
+                    timeout=60.0,
+                )
+            except Exception:
+                # thinking 字段不被支持 → 降级普通模式重试
+                resp = await asyncio.wait_for(
+                    client.chat.completions.create(**judge_kwargs),
+                    timeout=60.0)
         except Exception as e:
             console.warn(f"[GEPA] 评审调用失败：{e}")
             return

@@ -22,12 +22,12 @@ _TOPICS_PATH = os.path.join(
 
 # 生效话术建议文件：llm_brain 每轮注入系统提示的共享介质（同时供到期回评）
 _ADVICE_ACTIVE_PATH = os.path.join(
-    config.cfg.DATA_ROOT, "evolution_advice_active.json")
+    config.cfg.DATA_ROOT, "evolution", "evolution_advice_active.json")
 
 # 观众画像文件：复盘提炼的长期事实（对标 hermes 的 USER.md/MEMORY.md），
 # llm_brain 每轮按关键词召回注入，补充向量记忆检索之外的召回
 _PROFILE_PATH = os.path.join(
-    config.cfg.DATA_ROOT, "evolution_profile.json")
+    config.cfg.DATA_ROOT, "evolution", "evolution_profile.json")
 
 
 @dataclass(frozen=True)

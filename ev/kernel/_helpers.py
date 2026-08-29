@@ -1,4 +1,4 @@
-﻿"""RuntimeContext 的业务 helper 方法（从旧 runtime.py 后半整体剥离）。
+"""RuntimeContext 的业务 helper 方法（从旧 runtime.py 后半整体剥离）。
 
 此 mixin 保存原 RuntimeContext 除 __init__ / setup / teardown / _hydrate 外的
 全部方法，使 ev/kernel/runtime.py 主骨架维持精简 ≤ 400 行。
@@ -455,12 +455,18 @@ class RuntimeHelpersMixin:
             self.tts = None
             return
         try:
+            # GSV 库 INFO 日志已在引擎 _load_model 压 root logger 到 WARNING
+            # （不刷屏）；这里只对外报一行预热耗时
+            _t0 = time.perf_counter()
             await self.tts.warmup()
+            console.dim(f"TTS 预热完成，耗时 {time.perf_counter() - _t0:.1f}s")
         except Exception:
             pass
         if self.face is not None:
-            def _on_tts_play(wav: str, text: str, dur_s: float) -> None:
-                if not self.face.load_speech_curve(wav):
+            def _on_tts_play(audio, sr, text: str, dur_s: float) -> None:
+                # P0-3 修复：回调现在携带真实音频（ndarray+采样率），
+                # load_speech_curve 直接算 RMS 曲线；失败回退节拍口型
+                if not self.face.load_speech_curve(audio, sr=sr):
                     self.face.start_speaking(dur_s)
             self.tts.set_on_play_callback(_on_tts_play)
         if self.emotion_actor is not None:
@@ -518,8 +524,9 @@ class RuntimeHelpersMixin:
         await self.speak_bot_reply(message)
 
     async def speak_bot_reply(self, text: str) -> None:
-        text = (text or "").strip()
-        if not text:
+        # P2-2 修复：直通路径统一清洗（MC 转述常含 markdown/emoji）
+        text = _clean_sentence(text or "").strip()
+        if not text or not has_content(text):
             return
         bridge = self.mindcraft_bridge
         output_lock = get_output_lock()

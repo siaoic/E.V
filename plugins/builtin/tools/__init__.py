@@ -177,6 +177,9 @@ def _register_local_tools() -> None:
             "local",
             function,
             handler=entry["execute"],
+            # 目录注册的参考超时（如 read_sheet_music 1500s）随注册带入，
+            # 供 resolve_tool_timeout / tool_pipeline 按工具放宽统一超时
+            timeout=float(entry.get("timeout") or 10.0),
         )
 
 
