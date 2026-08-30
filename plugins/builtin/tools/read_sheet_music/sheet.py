@@ -8,8 +8,10 @@
    （已存在且比图新的 musicxml 直接复用：识别结果确定，同图同结果）
 3. 按序解析全部 MusicXML → score JSON（treble/bass 双 track，跨页 beat 累计，
    处理 divisions 变化 / backup 声部回退 / chord 和弦对齐 / grace 装饰音跳过）
-4. 速度：homr 会丢弃图上的速度文字（MusicXML 无 tempo），用视觉模型并行识别
-   谱图顶部的 ♩=N / BPM 标记补上（优先级：tempo 参数 > MusicXML > 视觉识别）
+4. 速度：homr 会丢弃图上的速度文字（MusicXML 无 tempo）。两级恢复：
+   ① 结构检测（♩=N 节拍器标记，移植自 audiveris_py，纯 cv2，~0.1s，见
+   tempo_detect.py）；② 未命中再与 OMR 并行启动视觉模型识别谱图顶部补上
+   （优先级：tempo 参数 > MusicXML > 结构检测 > 视觉识别）
 5. score 写成 <stem>.score.json 文件，返回路径与摘要给主 LLM → 调 play_score(path=...)
 
 设计分工：本工具只负责「看谱转谱面文件」；「弹」交给 MCP piano 的 play_score
@@ -28,6 +30,8 @@ import tempfile
 import threading
 
 from ev.utils import console
+
+from plugins.builtin.tools.read_sheet_music.tempo_detect import detect_tempo_mark
 
 # homr 可执行：uv tool install homr 后 bin 在 PATH；兜底 uv 默认 bin 目录
 _HOMR_FALLBACK = os.path.join(os.path.expanduser("~"), ".local", "bin", "homr.exe")
@@ -459,25 +463,36 @@ async def _read_sheet_music(path: str = "", tempo: float | None = None) -> dict:
         except Exception as e:
             return {"status": "error", "message": f"错误：截取屏幕失败：{e}"}
 
-    # 谱面速度标记用视觉模型与 OMR 并行识别：homr 已知会 OCR 出速度文字但
-    # 故意丢弃（title_detection.is_tempo_marking 只用于区分标题），MusicXML
-    # 里没有 tempo 信息——谱面无 <sound tempo> 时从原图补认。
-    # daemon 懒启动发生在首个 _run_omr 里，启动开销与这段 VLM 识别天然并行
-    tempo_task = asyncio.create_task(_detect_tempo_by_vlm(images[0]))
+    # 谱面速度恢复两级通道：homr 已知会 OCR 出速度文字但故意丢弃
+    #（title_detection.is_tempo_marking 只用于区分标题），MusicXML 里没有
+    # tempo 信息——谱面无 <sound tempo> 时从原图补认。
+    # ① 结构检测（♩=N 节拍器标记，移植自 audiveris_py，纯 cv2 ~0.1s、零模型
+    #    开销）：先跑它，命中则完全跳过 VLM；
+    # ② VLM 视觉识别兜底：结构检测未命中才与 OMR 并行启动（daemon 懒启动
+    #    发生在首个 _run_omr 里，启动开销与 VLM 识别天然并行）。
+    tempo_struct = await asyncio.to_thread(detect_tempo_mark, images[0])
+    tempo_task = None
+    if tempo_struct is None:
+        tempo_task = asyncio.create_task(_detect_tempo_by_vlm(images[0]))
     try:
         xmls = []
         for img in images:
             xmls.append(await asyncio.to_thread(_run_omr, img))
     except Exception as e:
-        tempo_task.cancel()
+        if tempo_task is not None:
+            tempo_task.cancel()
         return {"status": "error", "message": f"错误：OMR 识别失败：{e}"}
-    vlm_tempo = await tempo_task  # 内部吞掉一切异常恒返 None，不会拖垮主流程
+    vlm_tempo = await tempo_task if tempo_task is not None else None
 
     score, note_count, total_beat, hands, used_tempo = _build_score(xmls, tempo)
     if used_tempo is not None:
         tempo_src = "调用参数指定" if tempo is not None else "MusicXML 标注"
+    if used_tempo is None and tempo_struct is not None:
+        # 结构检测优先于 VLM：确定性结果，且本来就不启动 VLM
+        used_tempo, tempo_src = tempo_struct, "谱面速度标记（结构检测）"
+        score["tempo"] = used_tempo
     if used_tempo is None and vlm_tempo is not None:
-        # 视觉识别兜底：仅当参数与 MusicXML 都没有速度时采用
+        # 视觉识别兜底：仅当参数、MusicXML、结构检测都没有速度时采用
         used_tempo, tempo_src = vlm_tempo, "谱面速度标记（视觉识别）"
         score["tempo"] = used_tempo
     if note_count == 0:

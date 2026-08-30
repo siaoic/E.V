@@ -267,6 +267,12 @@ class RuntimeHelpersMixin:
                 set_output_owner(None)
                 set_global_state(STATE_IDLE)
             set_danmaku_pending(False)
+            # 弹幕互动回复完成 → 回报契机引擎（刷新静默计时 + 氛围切换契机）
+            if self.proactive is not None:
+                try:
+                    self.proactive.on_ai_spoke()
+                except Exception:
+                    pass
 
         turn_tracker.end("端到端")
         turn_tracker.print_report()
@@ -595,6 +601,83 @@ class RuntimeHelpersMixin:
             return False
         return True
 
+    async def reload_tools(self) -> None:
+        """!tools（工具屋/设置页工具总开关）：重读 .env 工具字段 + 停启 MCP。
+
+        本地/插件工具每轮实时读 cfg（get_merged_tools），刷新单例即生效；
+        MCP 管理器对象在 MCP_ENABLED/TOOLS_ENABLED 切换时需要停启重建。
+        """
+        config.reload_tool_runtime()
+        cfg = self.cfg
+        want_mcp = bool(cfg.MCP_ENABLED and cfg.TOOLS_ENABLED)
+        if want_mcp and self.mcp is None:
+            try:
+                from ev.mcp.manager import MCPManager
+                self.mcp = MCPManager()
+                await self.mcp.initialize()
+                self.mcp.warmup()
+                console.ok("MCP 管理器已热启用")
+            except Exception as e:
+                self.mcp = None
+                console.warn(f"MCP 管理器热启用失败（本地工具不受影响）：{e}")
+        elif not want_mcp and self.mcp is not None:
+            try:
+                await self.mcp.stop()
+            except Exception:
+                pass
+            self.mcp = None
+            console.ok("MCP 管理器已热关闭")
+
+    async def reload_stt(self) -> None:
+        """!stt（语音识别开关/Key/URL/模型变化）：停旧引擎，按新配置重建。"""
+        config.reload_tool_runtime()
+        cfg = self.cfg
+        if self.stt_engine is not None:
+            try:
+                self.stt_engine.stop()
+            except Exception:
+                pass
+            self.stt_engine = None
+        if not cfg.STT_ENABLED:
+            console.ok("语音识别已按配置关闭")
+            return
+        try:
+            from ev.asr.stt import STTEngine
+            self.stt_engine = STTEngine(cfg)
+            self.stt_engine.start()
+            if self.stt_engine.check_health():
+                console.ok("语音识别引擎已按新配置重建")
+            else:
+                console.warn(
+                    "语音识别引擎已重建，但本地 ASR 服务未响应"
+                    "（请先启动 启动asr.bat 或配置 STT_BASE_URL 云端转写）")
+        except Exception as e:
+            self.stt_engine = None
+            console.warn(f"语音识别重建失败（保持关闭）：{e}")
+
+    async def apply_tts_hot(self, field: str, value: str) -> None:
+        """!tts_audio / !tts_text / !tts_audios：TTS 参考音频/文本热更新。
+
+        GPTSOVITS_* 字段只在全量热更新清单（不在 !tools 清单），先
+        reload_config 刷新 cfg，再同步到运行中的 TTS 引擎（下一句生效）。
+        """
+        config.reload_config()
+        cfg = self.cfg
+        if self.tts is None:
+            console.warn("TTS 引擎未运行，参考配置将在下次启动时生效")
+            return
+        if field == "tts_audio":
+            self.tts.apply_ref(audio=value, text=cfg.GPTSOVITS_PROMPT_TEXT or "")
+            console.ok(f"TTS 参考音频已热更新：{value or '（默认音色）'}")
+        elif field == "tts_text":
+            self.tts.apply_ref(audio=cfg.GPTSOVITS_REF_AUDIO or "", text=value)
+            console.ok("TTS 参考文本已热更新")
+        elif field == "tts_audios":
+            self.tts.apply_ref_extras(value)
+            console.ok("TTS 辅助参考已热更新")
+        else:
+            console.warn(f"未知的 TTS 热更新字段：{field}")
+
     def _reloaders(self) -> dict:
         if self._reloaders_map is None:
             self._reloaders_map = {
@@ -630,6 +713,12 @@ class RuntimeHelpersMixin:
         elif not cfg.PROACTIVE_ENABLED:
             self.proactive = None
             console.ok("主动对话已热关闭")
+        elif self.proactive is not None:
+            # 引擎已存在且保持启用：校准契机引擎阈值/开关（PROACTIVE_NUDGE_*）
+            try:
+                self.proactive.apply_nudge_cfg()
+            except Exception as e:
+                console.warn(f"契机引擎阈值校准失败（保留原阈值）：{e}")
 
     async def _reload_pf(self) -> None:
         cfg = self.cfg

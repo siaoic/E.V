@@ -102,6 +102,89 @@ def _cleanup_output() -> tuple:
     return files, freed
 
 
+class _PlaybackWriteClock:
+    """声卡消费进度时钟（字幕同步用，包装 gsv AudioQueue 统计样本数）。
+
+    为什么需要：GSV AudioQueue 的播放是「声卡实时消费 + 合成间隙空转」
+    （_run_playback 队列空即退出线程，下一块 put 时重开）。字幕时间戳是
+    纯音频时长（t0 起连续），墙钟对齐会在合成慢于实时时把空档也走完 →
+    字幕比语音越来越抢跑。本时钟以「已被设备接收的样本数 / 采样率」为
+    播放进度：``sd.OutputStream.write`` 以实时节奏阻塞放行（设备消费才
+    腾出缓冲），写入计数 ≈ 播放进度（误差 ≈ 设备缓冲容量，数十 ms），
+    且间隙自动冻结——字幕等进度到位才上屏，从机制上消除抢跑。
+
+    句锚定（sentence_clock）：以「调用时已投喂总样本数」为本句 0 点，
+    上一句尾音还在播 / 本句首块还在合成时，时钟值保持 0 不抢跑。
+    """
+
+    def __init__(self, audio_queue) -> None:
+        self.ok = False
+        self.samplerate = int(getattr(audio_queue, "samplerate", 0) or 0)
+        self.put_total = 0   # 已投喂样本总数（句起点锚定）
+        self.written = 0     # 已被设备接收样本数（≈已播放）
+        if self.samplerate <= 0:
+            return
+        orig_put = audio_queue.put
+
+        def _put(data, *args, **kwargs):
+            try:
+                self.put_total += int(
+                    data.shape[0] if hasattr(data, "shape") else len(data))
+            except Exception:
+                pass
+            return orig_put(data, *args, **kwargs)
+
+        stream = getattr(audio_queue, "stream", None)
+        if not hasattr(stream, "write"):
+            return
+        orig_write = stream.write
+
+        def _write(data, *args, **kwargs):
+            result = orig_write(data, *args, **kwargs)
+            try:
+                self.written += int(
+                    data.shape[0] if hasattr(data, "shape") else len(data))
+            except Exception:
+                pass
+            return result
+
+        # 设备输出缓冲补偿：write 完成只代表样本进入声卡缓冲，实际发声
+        # 还要晚约一个输出延迟（stream.latency，常见 20~200ms）。不补偿
+        # 则字幕恒定抢跑一个缓冲量——「说的字和显示的字对不上」的常数
+        # 残差。取不到或离谱（>0.5s）时按 0 处理。
+        latency_s = 0.0
+        try:
+            lat = getattr(stream, "latency", None)
+            if isinstance(lat, tuple):
+                lat = lat[-1]
+            if isinstance(lat, (int, float)) and 0.0 < float(lat) <= 0.5:
+                latency_s = float(lat)
+        except Exception:
+            latency_s = 0.0
+        self.latency_s = latency_s
+
+        try:
+            audio_queue.put = _put
+            stream.write = _write
+            self.ok = True
+        except Exception:
+            pass
+
+    def sentence_clock(self):
+        """取本句播放进度时钟（须在首块 play() 之前调用）；不可用返回 None。"""
+        if not self.ok:
+            return None
+        base = self.put_total
+        samplerate = self.samplerate
+        latency_s = self.latency_s
+
+        def _clock() -> float:
+            # 已接收样本 → 秒，再扣掉设备缓冲延迟 = 实际发声进度
+            return max(0.0, (self.written - base) / samplerate - latency_s)
+
+        return _clock
+
+
 class TTSEngine(BaseTTSAdapter):
     """进程内 GSV-TTS-Lite 流式合成引擎（兼容 HTTP 客户端接口）。"""
 
@@ -122,6 +205,7 @@ class TTSEngine(BaseTTSAdapter):
         self._skip_streak = 0
         self._on_play_done: Optional[Callable] = None
         self._tts = None      # gsv_tts.TTS 实例（start() 时懒加载）
+        self._play_clock = None  # 声卡消费进度时钟（_load_model 时挂载）
         self._ready = False
         # 参考音频 / 文本（start 时从 cfg 读取，apply_ref 可热更新）
         self._speaker = ""
@@ -197,6 +281,9 @@ class TTSEngine(BaseTTSAdapter):
         # 保留缓存与对象池；stop() 时统一做一次真实清理。
         self._tts._orig_empty_cache = self._tts._empty_cache
         self._tts._empty_cache = lambda: None
+        # 字幕同步：包装 audio_queue.put / stream.write 统计声卡消费进度
+        # （失败降级 None → 字幕回退墙钟对齐）
+        self._play_clock = _PlaybackWriteClock(self._tts.audio_queue)
         # cuDNN attention 对每个新输入形状需冷编译执行计划（新句子音素长度
         # 不同 ⇒ 每条新句首块 +~600ms）。decode 路径已被 CUDA Graph 冻结，
         # 此补丁只影响 eager prefill；换成 mem-efficient 后端冷热同速
@@ -307,6 +394,10 @@ class TTSEngine(BaseTTSAdapter):
         try:
             gen = self._stream(text)
             sid = self._player.begin_stream(tts.samplerate, text, gen)
+            # 本句播放进度时钟：在首块 play()（投喂声卡）之前取锚，
+            # 时钟 0 点 = 本句首样本开始被设备消费（上一句尾音/合成
+            # 间隙不计入）→ 字幕按真实播放进度上屏，不抢跑
+            clock = self._play_clock.sentence_clock() if self._play_clock else None
             chunk_idx = 0
             for audio in gen:
                 if self._interrupted.is_set() or self._session != session:
@@ -317,7 +408,7 @@ class TTSEngine(BaseTTSAdapter):
                 chunk_idx += 1
                 subs = getattr(audio, "subtitles", None)
                 if subs:
-                    self._subtitle_queue.add(subs, text)
+                    self._subtitle_queue.add(subs, text, clock)
             else:
                 self._skip_streak = 0  # 完整合成成功：清零连续跳句计数
         except Exception as e:

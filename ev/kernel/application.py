@@ -199,6 +199,63 @@ class Application:
                         _format_table, list_jobs)
                     console.ok(f"[命令]\n{_format_table(list_jobs(limit))}")
                     break
+                # 控制中心热更新命令（UI「更新配置」/工具屋/插件页发来）：
+                # !config（统一配置热更新，可带组件名细粒度）/
+                # !tools（工具总开关）/ !stt（语音识别）/
+                # !tts_audio|!tts_text|!tts_audios（TTS 参考音频/文本）。
+                # 此前这些命令没有分发——UI 发来的 !config 会穿透到对话链路
+                # 被当作聊天文本发给 LLM，且热更新从不生效（典型症状：
+                # 改了人设点「更新配置」，提示词没有变化）。
+                if user_text == "!config":
+                    await runtime.reload_all()
+                    console.ok("[命令] 配置已全部热更新"
+                               "（人设/LLM/主动对话/内容过滤/记忆/弹幕/桌宠/情绪）")
+                    break
+                if user_text.startswith("!config "):
+                    component = user_text[len("!config "):].strip()
+                    if await runtime.reload_component(component):
+                        console.ok(f"[命令] {component} 配置已热更新")
+                    break
+                if user_text == "!tools":
+                    await runtime.reload_tools()
+                    console.ok("[命令] 工具配置已热更新")
+                    break
+                if user_text == "!stt":
+                    await runtime.reload_stt()
+                    break
+                if user_text.startswith(("!tts_audio", "!tts_text", "!tts_audios")):
+                    _tts_cmd, _, _tts_val = user_text.partition(" ")
+                    await runtime.apply_tts_hot(_tts_cmd[1:], _tts_val.strip())
+                    break
+                # 启动页模型下拉热切换（桌宠模式）：直接换皮；
+                # vtuber 模式无 pet_widget → 忽略（.env 2s 监控兜底也不适用）
+                if user_text.startswith("!model "):
+                    _model_path = user_text[len("!model "):].strip()
+                    _pet = getattr(runtime, "pet_widget", None)
+                    if _pet is not None and _pet.switch_model(_model_path):
+                        console.ok(f"[命令] 桌宠模型已热切换：{_model_path}")
+                    else:
+                        console.dim(f"[命令] 忽略 !model（非桌宠模式或路径无效）："
+                                    f"{_model_path}")
+                    break
+                # 表情动作页试播（桌宠/VTS）：/expr <表情名> / /motion <动作名>
+                # （动作按文件名去扩展名播放，见 BaseEmotionActor.play_motion_by_name）
+                if user_text.startswith("/expr "):
+                    _name = user_text[len("/expr "):].strip()
+                    _actor = runtime.emotion_actor
+                    if _actor is not None and await _actor.play_expression(_name):
+                        console.ok(f"[命令] 试播表情：{_name}")
+                    else:
+                        console.dim(f"[命令] 表情试播失败（未知名称或当前模式无表情）：{_name}")
+                    break
+                if user_text.startswith("/motion "):
+                    _name = user_text[len("/motion "):].strip()
+                    _actor = runtime.emotion_actor
+                    if _actor is not None and await _actor.play_motion_by_name(_name):
+                        console.ok(f"[命令] 试播动作：{_name}")
+                    else:
+                        console.dim(f"[命令] 动作试播失败（未知名称或当前模式无动作）：{_name}")
+                    break
                 # 插件钩子：onUserInput（可注入背景上下文 / 改写消息 / 拦截不发给 AI）
                 if runtime.plugin_manager is not None:
                     event = UserInputEvent(user_text, "text")
@@ -298,6 +355,13 @@ class Application:
                         profanity_filter_rate=runtime.cfg.PROFANITY_FILTER_RATE,
                     )
                     runtime._pending_stdin_fut = pending
+                    # AI 互动回复完成 → 回报契机引擎（刷新静默计时 + 氛围切换契机，
+                    # 互动结束后的第一次心跳仍有一次开口机会）
+                    if runtime.proactive is not None:
+                        try:
+                            runtime.proactive.on_ai_spoke()
+                        except Exception:
+                            pass
                 except Exception as e:
                     console.error(f"对话流程出错：{e}")
                     await report_error(e, msg=f"对话流程出错：{e}")

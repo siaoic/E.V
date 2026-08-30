@@ -13,6 +13,9 @@ class LLMConfig:
     LLM_BASE_URL: str = ""
     LLM_MODEL: str = ""
     LLM_THINKING: bool = True
+    # 推理力度（DeepSeek v4 系 reasoning_effort，如 high/medium/low）：
+    # 仅 LLM_THINKING=true 时随 extra_body 下发；留空 = 不传该参数
+    LLM_REASONING_EFFORT: str = ""
     LLM_SERVERS: str = ""
     LLM_ROUTER_ENABLED: bool = True
     LLM_ROUTER_EPSILON: float = 0.1
@@ -58,6 +61,11 @@ class MemoryConfig:
     MEMORY_CURATOR_INTERVAL: int = 10  # 每 N 轮对话触发一次复盘
     # L4 编排（MemoryManager）：每轮召回硬超时（秒，0 关闭），防止慢后端拖垮首字延迟
     MEMORY_GATE_TIMEOUT: float = 8.0
+    # 每轮对话「召回注入」硬超时（秒，inner_loop 快路径；超时熔断跳过本轮
+    # 注入，优先保首字延迟；0=不设限不推荐）。查询嵌入预热（memory.py
+    # warmup_query_embedding）已把本地 embedding 服务冷启动前置到启动阶段，
+    # 正常不会触发熔断，此处只兜服务异常。调小 = 更坚决保首字。
+    MEMORY_RECALL_TIMEOUT: float = 0.8
 
 
 @dataclass
@@ -267,6 +275,19 @@ class ProactiveConfig:
     PROACTIVE_ENABLED: bool = True
     RESPONSE_INTERVAL_MIN: float = 5
     RESPONSE_INTERVAL_MAX: float = 10
+    # —— Nudge 契机引擎（Neuro-sama 风格，事件驱动，0 定时器）——
+    # 心跳到点/事件到来时检查契机，命中才问 LLM（未命中零 LLM 调用）
+    PROACTIVE_NUDGE_ENABLED: bool = True
+    PROACTIVE_NUDGE_LONG_SILENCE_SEC: float = 30.0      # 直播间冷场阈值
+    PROACTIVE_NUDGE_SILENT_TOO_LONG_SEC: float = 300.0  # AI 太久没说话阈值
+    PROACTIVE_NUDGE_MANY_UNREAD: int = 5                # 未回应弹幕堆积阈值
+    PROACTIVE_NUDGE_BURST_THRESHOLD: int = 10           # 弹幕爆发条数阈值
+    PROACTIVE_NUDGE_BURST_WINDOW_SEC: float = 30.0      # 爆发检测窗口
+    PROACTIVE_NUDGE_COOLDOWN_SEC: float = 30.0          # 两次契机最小间隔
+    PROACTIVE_NUDGE_REPEAT_GAP_SEC: float = 60.0        # 同因重复抑制间隔
+    # 防冷场兜底总开关：契机为冷场/太久没说且静默超阈值时强制开口
+    # （false = 纯 Neuro 风格，LLM [SILENT] 即真沉默）
+    PROACTIVE_FORCE_SPEAK: bool = True
 
 
 @dataclass

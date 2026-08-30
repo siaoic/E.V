@@ -111,4 +111,7 @@ class PerfTracker:
                 sys.stdout.reconfigure(encoding="utf-8", errors="replace")  # type: ignore[attr-defined]
             except Exception:
                 pass
-            print(text)
+            # 与 console 共用输出锁：报告是多行整块输出，被流式对话
+            # 打印（其他线程）插进中间会把 ⏱ 表格和回复文字互相切碎
+            with console.output_lock():
+                print(text)

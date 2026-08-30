@@ -24,6 +24,7 @@ _LLM_LOADERS = {
     "LLM_BASE_URL": lambda: os.getenv("LLM_BASE_URL", ""),
     "LLM_MODEL": lambda: os.getenv("LLM_MODEL", "") or os.getenv("ZHIPU_MODEL", "glm-4.7-flash"),
     "LLM_THINKING": lambda: _get_bool("LLM_THINKING", _get_bool("THINKING_ENABLED", True)),
+    "LLM_REASONING_EFFORT": lambda: os.getenv("LLM_REASONING_EFFORT") or "",
     "LLM_SERVERS": lambda: os.getenv("LLM_SERVERS") or "",
     "LLM_ROUTER_ENABLED": lambda: _get_bool("LLM_ROUTER_ENABLED", True),
     "LLM_ROUTER_EPSILON": lambda: float(os.getenv("LLM_ROUTER_EPSILON", "0.1")),
@@ -59,6 +60,12 @@ _MEMORY_LOADERS = {
     "MEMORY_CURATOR_ENABLED": lambda: _get_bool("MEMORY_CURATOR_ENABLED", True),
     "MEMORY_CURATOR_INTERVAL": lambda: int(os.getenv("MEMORY_CURATOR_INTERVAL") or "10"),
     "MEMORY_GATE_TIMEOUT": lambda: float(os.getenv("MEMORY_GATE_TIMEOUT") or "8.0"),
+    # 每轮召回注入硬超时（inner_loop 快路径）。兼容历史 .env 里的旧名
+    # MEMORY_RETRIEVE_TIMEOUT（此前从未被读取，纯死变量；同名语义一致）
+    "MEMORY_RECALL_TIMEOUT": lambda: float(
+        os.getenv("MEMORY_RECALL_TIMEOUT")
+        or os.getenv("MEMORY_RETRIEVE_TIMEOUT")
+        or "0.8"),
 }
 
 _KNOWLEDGE_LOADERS = {
@@ -213,6 +220,23 @@ _PROACTIVE_LOADERS = {
     "PROACTIVE_ENABLED": lambda: _get_bool("PROACTIVE_ENABLED", True),
     "RESPONSE_INTERVAL_MIN": lambda: float(os.getenv("RESPONSE_INTERVAL_MIN") or "5"),
     "RESPONSE_INTERVAL_MAX": lambda: float(os.getenv("RESPONSE_INTERVAL_MAX") or "10"),
+    # —— Nudge 契机引擎（Neuro 风格事件驱动）——
+    "PROACTIVE_NUDGE_ENABLED": lambda: _get_bool("PROACTIVE_NUDGE_ENABLED", True),
+    "PROACTIVE_NUDGE_LONG_SILENCE_SEC": lambda: float(
+        os.getenv("PROACTIVE_NUDGE_LONG_SILENCE_SEC") or "30"),
+    "PROACTIVE_NUDGE_SILENT_TOO_LONG_SEC": lambda: float(
+        os.getenv("PROACTIVE_NUDGE_SILENT_TOO_LONG_SEC") or "300"),
+    "PROACTIVE_NUDGE_MANY_UNREAD": lambda: int(
+        os.getenv("PROACTIVE_NUDGE_MANY_UNREAD") or "5"),
+    "PROACTIVE_NUDGE_BURST_THRESHOLD": lambda: int(
+        os.getenv("PROACTIVE_NUDGE_BURST_THRESHOLD") or "10"),
+    "PROACTIVE_NUDGE_BURST_WINDOW_SEC": lambda: float(
+        os.getenv("PROACTIVE_NUDGE_BURST_WINDOW_SEC") or "30"),
+    "PROACTIVE_NUDGE_COOLDOWN_SEC": lambda: float(
+        os.getenv("PROACTIVE_NUDGE_COOLDOWN_SEC") or "30"),
+    "PROACTIVE_NUDGE_REPEAT_GAP_SEC": lambda: float(
+        os.getenv("PROACTIVE_NUDGE_REPEAT_GAP_SEC") or "60"),
+    "PROACTIVE_FORCE_SPEAK": lambda: _get_bool("PROACTIVE_FORCE_SPEAK", True),
 }
 
 _DANMAKU_LOADERS = {
@@ -306,6 +330,7 @@ _TOOL_HOT_FIELDS = (
 # !config（统一配置热更新）：= !tools 字段 + 其余可热更新字段
 _ALL_HOT_FIELDS = _TOOL_HOT_FIELDS + (
     "LLM_API_KEY", "LLM_BASE_URL", "LLM_MODEL", "LLM_THINKING",
+    "LLM_REASONING_EFFORT",
     "BUTLER_THINKING",
     "SYSTEM_PROMPT_FILE", "SYSTEM_PROMPT", "AUTHOR_NOTE",
     "KNOWLEDGE_ENABLED", "KNOWLEDGE_MAX_CHARS",
@@ -315,6 +340,11 @@ _ALL_HOT_FIELDS = _TOOL_HOT_FIELDS + (
     "BUDGET_COST_PER_HOUR", "AGENT_SKILL_CREATION",
     "AGENT_MEMORY_SINK",
     "PROACTIVE_ENABLED", "RESPONSE_INTERVAL_MIN", "RESPONSE_INTERVAL_MAX",
+    "PROACTIVE_NUDGE_ENABLED", "PROACTIVE_NUDGE_LONG_SILENCE_SEC",
+    "PROACTIVE_NUDGE_SILENT_TOO_LONG_SEC", "PROACTIVE_NUDGE_MANY_UNREAD",
+    "PROACTIVE_NUDGE_BURST_THRESHOLD", "PROACTIVE_NUDGE_BURST_WINDOW_SEC",
+    "PROACTIVE_NUDGE_COOLDOWN_SEC", "PROACTIVE_NUDGE_REPEAT_GAP_SEC",
+    "PROACTIVE_FORCE_SPEAK",
     "LLM_MAX_CONCURRENCY", "PROACTIVE_QUEUE_MAX",
     "AGENT_AVOID_MAIN_LLM", "AGENT_HISTORY_SNAPSHOT", "AGENT_DUP_THRESHOLD",
     "PROFANITY_FILTER_ENABLED", "PROFANITY_FILTER_RATE",

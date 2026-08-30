@@ -2,6 +2,11 @@
 
 全部以「接受 ProactiveEngine self 作为首参数」的模块函数形式存在，
 由 core.ProactiveEngine 的同名方法转发。
+
+重构说明（参考 新建文件夹/EV-Anthropomorphic，Neuro-sama 风格）：
+  - heartbeat 增加契机门控：命中 Nudge 契机才问 LLM，接受/拒绝都回报统计；
+  - 播报完成后回报 ai_spoke（刷新契机状态：清未读/刷新静默计时）；
+  - 队列条目携带契机来源，日志可追溯每次主动发言由哪种契机驱动。
 """
 
 from __future__ import annotations
@@ -32,7 +37,18 @@ from .policies import (
 # ---------- heartbeat（对外核心方法）----------
 
 async def heartbeat(self) -> bool:
-    """自主开口检查：由主模型决定此刻想不想说话、想说什么。"""
+    """自主开口检查：契机命中才问 LLM，开口/沉默都由主模型决定。
+
+    流程（Neuro-sama 风格）：
+      1. 状态闸门（忙碌/弹幕待回/话题活跃 → 直接跳过）；
+      2. 契机门控：取待处理契机或现场检查 Nudge 引擎；
+         - 命中 → 携带契机上下文问 LLM，接受/拒绝都记录统计；
+         - 未命中（契机引擎启用时）→ 本轮零 LLM 调用，保持沉默；
+         - 契机引擎停用（PROACTIVE_NUDGE_ENABLED=false）→ 回退旧行为，
+           每次心跳都询问主模型。
+      3. 强制开口兜底：仅冷场/太久没说契机 + PROACTIVE_FORCE_SPEAK=true
+         + 静默超阈值时启用（防冷场，仍受总开关约束）。
+    """
     if not self.cfg.PROACTIVE_ENABLED:
         return False
     if self.active_topic is not None:
@@ -48,12 +64,31 @@ async def heartbeat(self) -> bool:
     if self.active_topic is not None:
         return False
     _log_heartbeat(self)
-    force_speak = (time.time() - self.last_interaction) >= _FORCE_SPEAK_QUIET
+
+    force_speak = False
+    nudge = self._take_nudge()
+    if nudge is None:
+        if self._nudge_enabled:
+            # 无契机：不给开口机会（零 LLM 调用），保持沉默
+            return False
+    else:
+        force_speak = (
+            self._nudge_enabled
+            and bool(getattr(self.cfg, "PROACTIVE_FORCE_SPEAK", True))
+            and self.nudge.is_forcible(nudge.reason)
+            and (time.time() - self.last_interaction) >= _FORCE_SPEAK_QUIET)
     topic = _pick_topic(self)
-    text = await self._decide_and_generate(topic, force=force_speak)
+    text = await self._decide_and_generate(
+        topic, force=force_speak, nudge=nudge)
     if not text:
+        self._stats["silent"] += 1
+        if nudge is not None and self._nudge_enabled:
+            self.nudge.report_reject()
         return False
-    return _enqueue(self, text, topic)
+    if nudge is not None and self._nudge_enabled:
+        self.nudge.report_act()
+    return _enqueue(self, text, topic,
+                    nudge_reason=(nudge.reason.value if nudge is not None else ""))
 
 
 # ---------- 主动消息队列（限流 / 去重 / 丢弃）----------
@@ -73,7 +108,8 @@ def discard_pending(self) -> int:
     return dropped
 
 
-def _enqueue(self, text: str, topic: Optional[dict]) -> bool:
+def _enqueue(self, text: str, topic: Optional[dict],
+             nudge_reason: str = "") -> bool:
     """把一条主动发言放入队列；队列满丢弃最旧、与近期内容重复丢弃。"""
     kind = "topic" if topic is not None else "emotional"
     if _is_duplicate(self, text, kind):
@@ -88,7 +124,7 @@ def _enqueue(self, text: str, topic: Optional[dict]) -> bool:
         except asyncio.QueueEmpty:
             pass
     item = {"tag": "agent_proactive", "kind": kind,
-            "text": text, "topic": topic}
+            "text": text, "topic": topic, "nudge_reason": nudge_reason}
     try:
         self._queue.put_nowait(item)
     except asyncio.QueueFull:
@@ -158,10 +194,12 @@ async def _speak_item(self, item: dict) -> None:
     kind = item["kind"]
     text = item["text"]
     topic = item.get("topic")
+    nudge_reason = item.get("nudge_reason") or ""
     reason = "心里话" if kind == "emotional" else "话题"
     topic_tag = (f"｜灵感话题 {topic['category']}/{topic['id']}"
                  if topic is not None else "")
-    console.dim(f"[主动] 自主开口（{reason}）...{topic_tag}"
+    nudge_tag = f"｜契机 {nudge_reason}" if nudge_reason else ""
+    console.dim(f"[主动] 自主开口（{reason}）{nudge_tag}...{topic_tag}"
                 f"（{len(text)} 字）")
 
     self.speaking = True
@@ -211,6 +249,12 @@ async def _speak_item(self, item: dict) -> None:
                 set_output_owner(None)
                 set_global_state(STATE_IDLE)
                 self._speak_done.set()
+                # 播报完成 → 回报契机引擎（刷新静默计时/清未读；
+                # interaction_ended=False：主动发言自身不制造新契机，防连环开口）
+                try:
+                    self.on_ai_spoke(interaction_ended=False)
+                except Exception:
+                    pass
     except Exception as e:
         console.error(
             f"主动发言失败：{e}\n"

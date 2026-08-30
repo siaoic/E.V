@@ -100,7 +100,10 @@ def _pick_topic(self) -> Optional[dict]:
 
     1. 类别权重；2. 近期类别惩罚；3. 独立冷却；4. 互动率加权；
     5. 全部冷却中放宽冷却强制选一个。
+    无任何话题种子时返回 None（无话题也能开口，走「自己决定想聊什么」）。
     """
+    if not self._topic_seeds:
+        return None
     weights = dict(_TOPIC_WEIGHTS)
     now = datetime.now()
     available: Dict[str, List[dict]] = {}

@@ -58,8 +58,18 @@ def build_thinking_extra_body(enabled: bool) -> dict:
 
     输出结构与历史实现完全一致；服务不支持该字段时由调用方捕获异常后
     降级为 extra_body=None 重试（llm_brain 已有该兜底路径）。
+
+    DeepSeek v4 系支持 reasoning_effort（推理力度）参数：LLM_THINKING
+    开启且 .env 配置了 LLM_REASONING_EFFORT（如 high）时随 body 下发；
+    关闭思考或未配置时不传，保持对不认识该字段的服务零影响。
     """
-    return {"thinking": {"type": "enabled" if enabled else "disabled"}}
+    body: dict = {"thinking": {"type": "enabled" if enabled else "disabled"}}
+    if enabled:
+        from ev.utils import config  # 延迟导入，避免底层模块循环依赖
+        effort = (getattr(config.cfg, "LLM_REASONING_EFFORT", "") or "").strip()
+        if effort:
+            body["reasoning_effort"] = effort
+    return body
 
 
 # D-7 优化：服务商 thinking 字段支持记忆（进程内）。首次探测到不支持

@@ -47,3 +47,20 @@ export function normalizeNote(note) {
 
 export const MIN_MIDI = 21; // A0
 export const MAX_MIDI = 108; // C8
+
+/**
+ * 判断一个 MIDI 值是否落在标准 88 键钢琴范围（A0=21 ~ C8=108）内，
+ * 且为整数。用于入口校验：超范围的音直接拒，禁止用合成替代。
+ */
+export function isValidPianoMidi(m) {
+  return Number.isInteger(m) && m >= MIN_MIDI && m <= MAX_MIDI;
+}
+
+/**
+ * 把任意 note 表达（音名 / MIDI 数字 / MIDI 字符串）转为钢琴范围内的 MIDI。
+ * 超范围 / 非法时返回 fallback（默认 null），便于入口做 fail()。
+ */
+export function enforcePianoRange(note, fallback = null) {
+  const m = noteToMidi(note);
+  return isValidPianoMidi(m) ? m : fallback;
+}

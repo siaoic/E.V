@@ -210,6 +210,12 @@ class _BiliDanmakuHandler(blivedm.BaseHandler):
         picker = get_danmaku_picker()
         if picker is not None:
             picker.submit(uid=uid, username=uname, text=text)
+        # 契机引擎埋点（Neuro 风格）：未读堆积/弹幕爆发 → 触发主动开口契机
+        try:
+            from ev.llm.proactive import nudge as _proactive_nudge
+            _proactive_nudge.observe("danmaku", {"username": uname, "text": text})
+        except Exception:
+            pass
 
     # ===== SC 醒目留言（paid 类型） =====
     def _on_super_chat(self, client, message: web_models.SuperChatMessage):

@@ -221,15 +221,32 @@ def warmup(img: str, pool: ThreadPoolExecutor) -> None:
     print("[daemon] warmup done", file=sys.stderr, flush=True)
 
 
+_RESP = None  # 协议专用 stdout（真实 fd 1 的副本）
+
+
+def _resp(line: str) -> None:
+    """往协议通道写一行响应。与日志通道分离，见 main() 开头的重定向说明。"""
+    _RESP.write(line + "\n")
+    _RESP.flush()
+
+
 def main() -> None:
+    global _RESP
     sys.stdin.reconfigure(encoding="utf-8")
-    sys.stdout.reconfigure(encoding="utf-8")
     sys.stderr.reconfigure(encoding="utf-8")
+    # 协议/日志双通道：库代码会随手 print 到 stdout——实测
+    # musicxml.xmlelement.xmlchildcontainer._check_choices_intelligently 在 XML
+    # 生成收尾往 stdout 打调试行（0000038-w-b-5 页必现），污染行式 JSON 响应流：
+    # 客户端把调试行当响应 → json 解析失败 → 杀 daemon 重建 → 整页回退 CPU
+    # 重跑（40-60s）。故启动即把 sys.stdout 重定向到 stderr（一切库 print 进
+    # 日志），协议响应只走 dup 出来的真实 stdout，对任何杂散 print 免疫。
+    _RESP = os.fdopen(os.dup(1), "w", encoding="utf-8", buffering=1)
+    sys.stdout = sys.stderr
     pool = ThreadPoolExecutor(max_workers=4)
     warmup_img = sys.argv[1] if len(sys.argv) > 1 else None
     if warmup_img:
         warmup(warmup_img, pool)
-    print("READY", flush=True)
+    _resp("READY")
     for line in sys.stdin:
         line = line.strip()
         if not line:
@@ -241,9 +258,9 @@ def main() -> None:
         out_xml = parts[1] if len(parts) > 1 else img.rsplit(".", 1)[0] + ".musicxml"
         try:
             timings = process_image(img, out_xml, pool)
-            print(json.dumps({"ok": True, "xml": out_xml, "timing": timings}), flush=True)
+            _resp(json.dumps({"ok": True, "xml": out_xml, "timing": timings}))
         except Exception as ex:  # noqa: BLE001
-            print(json.dumps({"ok": False, "error": repr(ex)}), flush=True)
+            _resp(json.dumps({"ok": False, "error": repr(ex)}))
 
 
 if __name__ == "__main__":

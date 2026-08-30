@@ -26,7 +26,20 @@ RUN_MODE=tui 分支（旁路）：
 import json
 import os
 import sys
+import threading
 import unicodedata
+
+# ---- 输出互斥 ----
+# 所有终端输出共用一把锁：对话流式打印（打字机 end=""）、后台线程日志
+# （ButlerAgent / TTS pump / 记忆检索）、主循环提示符都可能并发写 stdout，
+# 不加锁时一次输出内部的多次 write 会被其他线程插入，产生「我叫深[WARN]…」
+# 这类撕裂行。裸 print 的模块（perf_tracker 等）用 output_lock() 共用此锁。
+_PRINT_LOCK = threading.RLock()
+
+
+def output_lock() -> threading.RLock:
+    """返回全局输出锁：绕过 console 直接 print 的模块应 with 它包住打印。"""
+    return _PRINT_LOCK
 
 # ---- TUI 模式旁路 ----
 # RUN_MODE=tui 时，stdout 发 JSON-RPC 事件、stdin 读 JSON-RPC 请求；
@@ -106,7 +119,8 @@ def prompt_user() -> None:
     TUI 模式：noop（TUI 自己渲染输入框，不需要提示符）。
     """
     if not IS_TUI:
-        print("你 > ", end="", flush=True)
+        with _PRINT_LOCK:
+            print("你 > ", end="", flush=True)
 
 # ---- ANSI 颜色 ----
 RESET = "\033[0m"
@@ -126,6 +140,29 @@ BRIGHT_CYAN = "\033[96m"
 # 用零宽连接符包裹。普通终端里零宽字符不可见（输出效果等同 print）；
 # 控制中心捕获 stdout 后凭此标记把内容路由到左侧「对话」面板并剥离。
 CHAT_TAG = "\u2060"
+
+# ---- 管道行帧模式 ----
+# stdout 是管道（控制中心 QProcess / 测试 harness）而非真实终端时，chat
+# 输出逐帧补换行（"TAG 内容 TAG\n"）：消费端按「完整行是否含标记」做
+# 无状态路由，不再依赖跨块的标记交替状态——管道读取随时可能从一次
+# write 的中间截断（LLM 流式 + TTS 合成抢 CPU 时频繁），交替状态一旦
+# 错位，之后所有内容左右栏整体对调（实测回复被劈成两半分落两栏）。
+# 真实终端保持原无换行输出，打字机效果不受影响。
+_PIPELINE_STDOUT = False
+try:
+    if not IS_TUI and hasattr(sys.stdout, "isatty"):
+        _PIPELINE_STDOUT = not sys.stdout.isatty()
+except Exception:
+    _PIPELINE_STDOUT = False
+if _PIPELINE_STDOUT:
+    # 管道模式禁用 write 侧 \n→\r\n 翻译（Windows TextIOWrapper 默认
+    # newline=None 会翻译）：帧协议按 \n 切行，\r 会污染消费端路由
+    # （旧版控制中心把 \r 当换行 → 每个流式块单独成行）。
+    try:
+        sys.stdout.reconfigure(newline="\n")
+        sys.stderr.reconfigure(newline="\n")
+    except Exception:
+        pass
 
 
 def _display_width(text: str) -> int:
@@ -148,6 +185,11 @@ def chat(text: str = "", end: str = "\n", flush: bool = False) -> None:
     内容与 end 一起被零宽标记包裹：控制中心据此路由到左侧「对话」面板
     并剥离标记；直接在终端运行时零宽字符不可见，输出效果与 print 一致。
 
+    管道模式（_PIPELINE_STDOUT，控制中心 / harness）：每帧补换行成完整
+    行（"TAG 内容 TAG\\n"），消费端按行无状态路由；end 含换行时补发一个
+    空帧作为「换行」信号（空帧由消费端翻译成对话面板换行，打字机分片
+    不受影响）。真实终端保持原样（帧后不换行）。
+
     TUI 模式：非空 text 发 assistant_chunk 事件（TUI 端累积成流式回复），
     空 text（换行/起始信号）忽略——TUI 自己管布局，不需要换行事件。
     """
@@ -155,7 +197,13 @@ def chat(text: str = "", end: str = "\n", flush: bool = False) -> None:
         if text:
             _tui_emit({"type": "assistant_chunk", "text": text})
         return
-    print(f"{CHAT_TAG}{text}{end}{CHAT_TAG}", end="", flush=flush)
+    with _PRINT_LOCK:
+        if _PIPELINE_STDOUT:
+            print(f"{CHAT_TAG}{text}{CHAT_TAG}\n", end="", flush=flush)
+            if text and "\n" in end:
+                print(f"{CHAT_TAG}{CHAT_TAG}\n", end="", flush=flush)
+        else:
+            print(f"{CHAT_TAG}{text}{end}{CHAT_TAG}", end="", flush=flush)
 
 
 # Windows 控制台 VT 转义相关常量
@@ -189,7 +237,8 @@ def _print_status(label: str, color: str, msg: str) -> None:
                      "[WARN]": "warn", "[FAIL]": "fail"}
         _tui_log(level_map.get(label, "info"), msg)
         return
-    print(f"{paint(label, color)} {msg}")
+    with _PRINT_LOCK:
+        print(f"{paint(label, color)} {msg}")
 
 
 def ok(msg: str) -> None:
@@ -217,7 +266,8 @@ def dim(msg: str) -> None:
     if IS_TUI:
         _tui_log("dim", msg)
         return
-    print(paint(msg, GRAY))
+    with _PRINT_LOCK:
+        print(paint(msg, GRAY))
 
 
 def accent(msg: str, end: str = "\n") -> None:
@@ -225,7 +275,8 @@ def accent(msg: str, end: str = "\n") -> None:
     if IS_TUI:
         _tui_log("info", msg)
         return
-    print(paint(msg, BRIGHT_CYAN), end=end, flush=True)
+    with _PRINT_LOCK:
+        print(paint(msg, BRIGHT_CYAN), end=end, flush=True)
 
 
 def header(title: str, width: int = 56) -> None:
@@ -240,9 +291,10 @@ def header(title: str, width: int = 56) -> None:
         return
     bar = "━" * width
     left = max(0, (width - _display_width(title)) // 2)
-    print(f"\n{paint(bar, BRIGHT_CYAN)}")
-    print(paint(" " * left + title, BOLD + BRIGHT_CYAN))
-    print(paint(bar, BRIGHT_CYAN))
+    with _PRINT_LOCK:
+        print(f"\n{paint(bar, BRIGHT_CYAN)}")
+        print(paint(" " * left + title, BOLD + BRIGHT_CYAN))
+        print(paint(bar, BRIGHT_CYAN))
 
 
 def kv(label: str, value: str, label_width: int = 12) -> None:
@@ -250,7 +302,8 @@ def kv(label: str, value: str, label_width: int = 12) -> None:
     if IS_TUI:
         _tui_log("info", f"{label}: {value}")
         return
-    print(f"  {paint(label.ljust(label_width), CYAN)}{value}")
+    with _PRINT_LOCK:
+        print(f"  {paint(label.ljust(label_width), CYAN)}{value}")
 
 
 def progress(text: str) -> None:
@@ -258,7 +311,8 @@ def progress(text: str) -> None:
     if IS_TUI:
         _tui_log("dim", text)
         return
-    print(f"  {paint('·', CYAN)} {text}")
+    with _PRINT_LOCK:
+        print(f"  {paint('·', CYAN)} {text}")
 
 
 # 兼容旧写法：from src.utils.console import console；某些上游通过 hasattr(module,'console') 校验。
@@ -273,6 +327,8 @@ __all__ = [
     "CHAT_TAG",
     # TUI 旁路
     "IS_TUI", "read_input", "prompt_user", "report_status",
+    # 输出互斥
+    "output_lock",
     # 函数
     "paint", "chat", "ok", "info", "warn", "error", "dim", "accent",
     "header", "kv", "progress",

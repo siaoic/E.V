@@ -1,5 +1,6 @@
 """主进程管理（mixin）：启动/优雅停止/超时强杀/日志分栏/stdin 输入。"""
 
+import codecs
 import os
 import sys
 
@@ -11,6 +12,103 @@ from ev.utils.console import CHAT_TAG
 from ui.utils.ansi_helpers import strip_ansi
 from ui.utils import env_helpers
 from ui.utils.path_helpers import _find_project_root
+
+
+class _StdoutLineRouter:
+    """主程序 stdout/stderr 流的按行分栏路由器（无状态，逐帧判归属）。
+
+    主程序在管道模式下把对话内容成帧输出（console.chat：每帧
+    "TAG 内容 TAG\\n"，见 ev/utils/console.py）。本路由器把字节流按
+    \\n 切成完整行，**按行独立判归属**：含 CHAT_TAG 的行 → 对话栏
+    （剥标记，不带换行，保持打字机累积显示）；否则 → 工具日志栏。
+
+    与旧「标记交替」方案的区别：旧方案每遇到一个标记切换一次归属，
+    一旦管道读取从 write 中间截断（LLM 流式 + TTS 合成抢 CPU 时频繁
+    发生），标记配对错位会让之后所有内容左右栏整体对调——实测回复被
+    劈成两半分落两栏（「缺字」假象）、日志成段挤进对话栏。按行路由
+    无状态可累加，任何截断最多延迟一行，永不扩散。
+
+    细节：
+    - 增量 UTF-8 解码：多字节字符（含 3 字节的 CHAT_TAG 本身）被块边界
+      劈开时留在解码器里等下一块补全，不会变成 U+FFFD 丢标记；
+    - 尾部不成行：含完整帧（≥2 标记）→ 立即路由（帧后理应有 \\n，
+      提前上屏保证流式观感）；只有 1 个标记 → 被劈开的帧，留缓冲等
+      补全；无标记 → 立即上屏（「你 > 」提示符等无换行输出不能延迟）；
+    - 空对话帧（TAGTAG）= 子进程的「换行」信号 → 对话面板追加换行。
+    """
+
+    def __init__(self) -> None:
+        self._decoder = codecs.getincrementaldecoder("utf-8")("replace")
+        self._buffer = ""
+        self._skip_nl = False  # 刚提前上屏过完整帧：下一块开头的 \n 是帧终止符
+
+    def feed(self, data: bytes) -> tuple[str, str]:
+        """喂入新到字节，返回 (对话栏增量, 工具栏增量)。"""
+        text = self._decoder.decode(data)
+        # Windows 管道 \r\n 归一化（防御：老版本主程序仍会发出 \r\n），
+        # \r 留在行文本里会被 Qt 当作换行 → 流式块逐块断行
+        text = text.replace("\r\n", "\n").replace("\r", "\n")
+        self._buffer += text
+        return self._route()
+
+    def flush(self) -> tuple[str, str]:
+        """流结束（进程退出）：冲刷解码器残余并按工具栏兜底收尾。"""
+        self._buffer += self._decoder.decode(b"", final=True)
+        chat, tool = "", ""
+        if self._buffer:
+            if CHAT_TAG in self._buffer:
+                chat = self._frame_text(self._buffer)
+            else:
+                tool = strip_ansi(self._buffer)
+            self._buffer = ""
+        return chat, tool
+
+    # --------------------------- 内部 ---------------------------
+
+    def _route(self) -> tuple[str, str]:
+        # 上一轮提前上屏过完整帧：其帧后换行符是本块开头的第一个字节，
+        # 吞掉（它是对话帧的终止符，不是工具日志的空行）
+        if self._skip_nl and self._buffer:
+            if self._buffer.startswith("\n"):
+                self._buffer = self._buffer[1:]
+            self._skip_nl = False
+        chat_parts: list[str] = []
+        tool_parts: list[str] = []
+        *lines, self._buffer = self._buffer.split("\n")
+        for line in lines:
+            self._route_line(line, chat_parts, tool_parts)
+        # 尾部不成行的残余
+        tail = self._buffer
+        if CHAT_TAG in tail:
+            if tail.count(CHAT_TAG) >= 2:
+                # 完整帧已到、仅帧后换行符未到：立即上屏（流式观感），
+                # 并记下下一块开头的 \n 是帧终止符，不当空行显示
+                self._route_line(tail, chat_parts, tool_parts)
+                self._buffer = ""
+                self._skip_nl = True
+            # 只有 1 个标记：帧被劈开，留缓冲等下一块补全
+        elif tail:
+            # 无标记残余：提示符「你 > 」等无换行输出，立即上屏不能延迟
+            tool_parts.append(strip_ansi(tail))
+            self._buffer = ""
+        return "".join(chat_parts), "".join(tool_parts)
+
+    @staticmethod
+    def _route_line(line: str, chat_parts: list, tool_parts: list) -> None:
+        if CHAT_TAG in line:
+            text = strip_ansi(line.replace(CHAT_TAG, ""))
+            if text:
+                chat_parts.append(text)
+            else:
+                chat_parts.append("\n")  # 空帧 = 换行信号
+        elif line:
+            # 工具行；纯空行丢弃（对话帧内部的换行——如段落帧 TAG\n\nTAG
+            # 的中段——不应在工具栏产生空行）
+            tool_parts.append(strip_ansi(line) + "\n")
+
+    @staticmethod
+    def _frame_text(text: str) -> str:
+        return strip_ansi(text.replace(CHAT_TAG, ""))
 
 
 class ProcessHandler:
@@ -82,6 +180,9 @@ class ProcessHandler:
             self.proc.start(sys.executable, ["main.py"])
 
         self.btn_toggle.setText("停止")
+        # 新进程新流：行路由器（解码器 + 未成行缓冲）一并复位
+        self._router_out = None
+        self._router_err = None
         self._log(f"[控制中心] 已以「{mode}」模式启动\n")
 
     def _stop(self) -> None:
@@ -177,15 +278,48 @@ class ProcessHandler:
 
     def _on_stdout(self) -> None:
         if self.proc is not None and not self._closing:
-            self._log(bytes(self.proc.readAllStandardOutput()).decode("utf-8", "replace"))
+            chat, tool = self._stdout_router().feed(
+                bytes(self.proc.readAllStandardOutput()))
+            self._append_log(self.ui.log_chat, chat)
+            self._append_log(self.ui.log_tool, tool)
 
     def _on_stderr(self) -> None:
         if self.proc is not None and not self._closing:
-            self._log(bytes(self.proc.readAllStandardError()).decode("utf-8", "replace"))
+            chat, tool = self._stderr_router().feed(
+                bytes(self.proc.readAllStandardError()))
+            self._append_log(self.ui.log_chat, chat)
+            self._append_log(self.ui.log_tool, tool)
+
+    # ---- stdout/stderr 行路由器（懒初始化；mixin 无 __init__） ----
+
+    def _stdout_router(self) -> "_StdoutLineRouter":
+        router = getattr(self, "_router_out", None)
+        if router is None:
+            router = _StdoutLineRouter()
+            self._router_out = router
+        return router
+
+    def _stderr_router(self) -> "_StdoutLineRouter":
+        router = getattr(self, "_router_err", None)
+        if router is None:
+            router = _StdoutLineRouter()
+            self._router_err = router
+        return router
+
+    def _flush_routers(self) -> None:
+        """进程退出时冲刷解码器与未成行的残余缓冲，避免尾部输出丢失。"""
+        for getter in (self._stdout_router, self._stderr_router):
+            try:
+                chat, tool = getter().flush()
+            except Exception:
+                continue
+            self._append_log(self.ui.log_chat, chat)
+            self._append_log(self.ui.log_tool, tool)
 
     def _on_finished(self) -> None:
         if self._closing:
             return
+        self._flush_routers()
         self.btn_toggle.setText("启动")
         self._log("[控制中心] 主程序已退出\n")
         # 复位优雅停止状态并取消超时强杀定时器（进程已结束）
@@ -199,6 +333,9 @@ class ProcessHandler:
         """清空左右两个日志面板（「清空日志」按钮）。"""
         self.ui.log_chat.clear()
         self.ui.log_tool.clear()
+        # 行路由器的未成行缓冲一并丢弃
+        self._router_out = None
+        self._router_err = None
 
     def _append_log(self, widget, text: str) -> None:
         """把文本追加到指定日志控件尾部并滚动到底部。"""
@@ -211,17 +348,5 @@ class ProcessHandler:
         widget.ensureCursorVisible()
 
     def _log(self, text: str) -> None:
-        # 主程序 stdout 的 console.* 输出带 ANSI 颜色码（\x1b[90m 等），
-        # 日志控件不支持渲染，写入前统一剥离。
-        # 分栏：被 CHAT_TAG（console.chat 的零宽标记）包裹的片段属于左栏
-        # 「对话」，其余归右栏「工具日志」——按标记出现顺序切分，每遇到
-        # 一个标记就切换一次归属，可正确处理两类内容交错到达的片段。
-        is_chat = False
-        chat_parts = []
-        tool_parts = []
-        for seg in text.split(CHAT_TAG):
-            seg = strip_ansi(seg)
-            (chat_parts if is_chat else tool_parts).append(seg)
-            is_chat = not is_chat
-        self._append_log(self.ui.log_chat, "".join(chat_parts))
-        self._append_log(self.ui.log_tool, "".join(tool_parts))
+        """控制中心自己产生的日志（非主程序 stdout）：直接进工具日志栏。"""
+        self._append_log(self.ui.log_tool, strip_ansi(text))

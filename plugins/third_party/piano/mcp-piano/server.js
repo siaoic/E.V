@@ -23,7 +23,7 @@ import { Bridge } from './src/bridge.js';
 import { Scheduler } from './src/scheduler.js';
 import { parseMelodyString, scoreToEvents } from './src/melody.js';
 import { loadMidiFile } from './src/midiPlayer.js';
-import { noteToMidi, normalizeNote, midiToNote } from './src/notes.js';
+import { noteToMidi, normalizeNote, midiToNote, isValidPianoMidi, enforcePianoRange, MIN_MIDI, MAX_MIDI } from './src/notes.js';
 import { analyzeChord, getScale, keySignature, analyzeInterval, chordProgression, harmonize } from './src/theory.js';
 
 const log = (...args) => process.stderr.write('[mcp-piano] ' + args.join(' ') + '\n');
@@ -97,8 +97,12 @@ server.tool(
     velocity: z.number().min(0.05).max(1).optional().describe('力度 0~1，默认 1'),
   },
   async ({ note, duration = 0.6, velocity = 1 }) => {
-    const midi = noteToMidi(note);
-    if (midi === null) return fail(`无法解析音符 "${note}"`);
+    const midi = enforcePianoRange(note);
+    if (midi === null) {
+      const raw = noteToMidi(note);
+      if (raw === null) return fail(`无法解析音符 "${note}"`);
+      return fail(`音符 MIDI ${raw} 超出 88 键钢琴范围 A0(${MIN_MIDI}) ~ C8(${MAX_MIDI})，拒绝弹奏。仅接受 A0 ~ C8 范围内的真钢琴采样——禁止用合成音源替代。`);
+    }
     const r = scheduler.schedule([{ midi, time: 0, duration, velocity }]);
     if (!r.ok) return fail(r.error);
     return ok(`正在弹奏 ${midiToNote(midi)}（MIDI ${midi}，${duration}s）`, { note: midiToNote(midi), midi, duration });
@@ -117,14 +121,17 @@ server.tool(
   async ({ notes, duration = 1.2, velocity = 1 }) => {
     const midis = [];
     for (const n of notes) {
-      const m = noteToMidi(n);
-      if (m === null) return fail(`无法解析音符 "${n}"`);
-      midis.push(m);
+      const raw = noteToMidi(n);
+      if (raw === null) return fail(`无法解析音符 "${n}"`);
+      if (!isValidPianoMidi(raw)) {
+        return fail(`和弦音 "${n}"（MIDI ${raw}）超出 88 键钢琴范围 A0(${MIN_MIDI}) ~ C8(${MAX_MIDI})，拒绝弹奏。仅接受 A0 ~ C8 范围内的真钢琴采样——禁止用合成音源替代。`);
+      }
+      midis.push(raw);
     }
     const events = midis.map((midi) => ({ midi, time: 0, duration, velocity }));
     const r = scheduler.schedule(events);
     if (!r.ok) return fail(r.error);
-    return ok(`正在弹奏和弦 [${midis.map(midiToNote).join(', ')}]`, { notes: midis.map(midiToNote), duration });
+    return ok(`正在弹奏和弦 [${midis.map(midiToNote).join(', ')}]`, { notes: midis.map(midiToNote), duration, skippedCount: r.skippedCount ?? 0 });
   }
 );
 
@@ -148,20 +155,60 @@ server.tool(
     if (typeof melody === 'string') {
       const parsed = parseMelodyString(melody);
       if (parsed.error) return fail(parsed.error);
+      // 字符串解析后的 midi 也强制过钢琴范围（parseMelodyString 内部只保证 0~127）
+      for (let i = 0; i < parsed.notes.length; i += 1) {
+        const n = parsed.notes[i];
+        if (!isValidPianoMidi(n.midi)) {
+          return fail(`旋律第 ${i + 1} 个音 "${parsed.rawTokens ? parsed.rawTokens[i] : midiToNote(n.midi) || n.midi}"（MIDI ${n.midi}）超出 88 键钢琴范围 A0(${MIN_MIDI}) ~ C8(${MAX_MIDI})，拒绝弹奏。仅接受真钢琴采样——禁止用合成音源替代。`);
+        }
+      }
       notes = parsed.notes.map((n) => ({ midi: n.midi, beat: n.beat, duration: n.beats, velocity: n.velocity }));
     } else {
       notes = melody;
       if (!Array.isArray(notes) || notes.length === 0) return fail('melody 数组为空');
-      const invalid = notes.find((n) => !n || (!n.note && n.midi === undefined));
-      if (invalid) return fail('melody 中的每个对象都需要提供 note（如 "C4"）或 midi');
+      // 对象数组：逐项类型校验 + 钢琴范围校验（不再允许"静默丢音"）
+      for (let i = 0; i < notes.length; i += 1) {
+        const n = notes[i];
+        if (!n || typeof n !== 'object') return fail(`melody 第 ${i + 1} 项为空或非对象`);
+        const hasNote = Object.prototype.hasOwnProperty.call(n, 'note');
+        const hasMidi = Object.prototype.hasOwnProperty.call(n, 'midi');
+        if (!hasNote && !hasMidi) {
+          return fail(`melody 第 ${i + 1} 项缺少 note 或 midi 字段（二选一必填）`);
+        }
+        // 先把 note/midi 解析成 midi
+        let midi = null;
+        if (hasMidi) {
+          if (!Number.isInteger(n.midi)) {
+            return fail(`melody 第 ${i + 1} 项的 midi 必须是整数（当前类型=${typeof n.midi}，值=${String(n.midi)}）`);
+          }
+          midi = n.midi;
+        } else { // hasNote
+          if (typeof n.note !== 'string' && typeof n.note !== 'number') {
+            return fail(`melody 第 ${i + 1} 项的 note 必须是字符串（"C4"）或数字（MIDI 编号）（当前类型=${typeof n.note}）`);
+          }
+          midi = noteToMidi(n.note);
+          if (midi === null) return fail(`melody 第 ${i + 1} 项的 note "${n.note}" 无法解析为音符`);
+        }
+        if (!isValidPianoMidi(midi)) {
+          return fail(`melody 第 ${i + 1} 项 MIDI ${midi} 超出 88 键钢琴范围 A0(${MIN_MIDI}) ~ C8(${MAX_MIDI})，拒绝弹奏。仅接受真钢琴采样——禁止用合成音源替代。`);
+        }
+        // beat/duration 必须有限正数
+        if (!Number.isFinite(n.beat)) {
+          return fail(`melody 第 ${i + 1} 项的 beat 必须是有限数字（当前=${String(n.beat)}）`);
+        }
+        if (!Number.isFinite(n.duration) || n.duration <= 0) {
+          return fail(`melody 第 ${i + 1} 项的 duration 必须是 >0 的有限数字（当前=${String(n.duration)}）`);
+        }
+      }
     }
     const events = scoreToEvents(notes, tempo);
     if (events.length === 0) return fail('没有可演奏的音符');
     const r = scheduler.schedule(events);
     if (!r.ok) return fail(r.error);
     return ok(
-      `开始弹奏旋律：${events.length} 个音符，约 ${r.totalSeconds}s（${tempo} BPM）`,
-      { noteCount: events.length, totalSeconds: r.totalSeconds, tempo }
+      `开始弹奏旋律：${r.noteCount} 个音符，约 ${r.totalSeconds}s（${tempo} BPM）` +
+        (r.skippedCount ? `（入口校验后，调度器再跳过 ${r.skippedCount} 个非法事件）` : ''),
+      { noteCount: r.noteCount, totalSeconds: r.totalSeconds, tempo, skippedCount: r.skippedCount ?? 0 }
     );
   }
 );

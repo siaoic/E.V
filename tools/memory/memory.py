@@ -747,6 +747,26 @@ class MemoryManager:
         except Exception as e:
             console.dim(f"[记忆] 索引预热失败（将回退慢路径）：{e}")
 
+    async def warmup_query_embedding(self) -> None:
+        """预热查询嵌入链路：把 embedding 服务冷启动前置到启动阶段。
+
+        本地 llama-server（EMBEDDING_BASE_URL）首次 /embed 请求可能触发
+        秒级惰性加载；若发生在首轮对话，查询嵌入会烧掉召回硬超时
+        （MEMORY_RECALL_TIMEOUT，超时熔断跳过注入）——实测首轮回退
+        「召回超时（>0.8s）」即此因。启动时空查一发，把这笔成本从
+        对话首字路径挪走。失败静默（不影响使用，retrieve 自带兜底）。
+        """
+        if not self.embedding_enabled:
+            return
+        started = time.monotonic()
+        try:
+            service = self._ensure_service()
+            await self._embed_batcher.embed(service, "预热")
+            elapsed_ms = (time.monotonic() - started) * 1000
+            console.dim(f"[记忆] 查询嵌入预热完成 {elapsed_ms:.0f}ms")
+        except Exception as e:
+            console.dim(f"[记忆] 查询嵌入预热失败（不影响使用）：{e}")
+
     def _build_index(self) -> None:
         """(Re)build in-memory segment vector index and file pool from SQLite.
 
@@ -1479,8 +1499,9 @@ async def retrieve(query: str, top_k: int = 8, user: str = _USER_DEFAULT) -> str
 
 
 async def warmup() -> None:
-    """启动预热：初始化存储（失败仅告警）。"""
+    """启动预热：初始化存储 + 预热查询嵌入链路（失败仅告警）。"""
     get_manager().load()
+    await get_manager().warmup_query_embedding()
 
 
 async def decay_loop() -> None:

@@ -158,12 +158,14 @@ async def converse(brain: LLMBrain,
         # 首句偶发 500）；preheat() 只做本地播放链路激活，不触网，立即返回。
         if tts is not None:
             tts.preheat()
-        # 打字机流式：累计已打印字符数，delta 时只打 buffer 的「新增尾段」，
-        # 完整段 final 时清零，下一段 delta 不会重复打印。
+        # 模型流式直显（对齐 OpenAI/DeepSeek SDK 流式示例：服务端每吐一个
+        # delta.content 块就立即显示）。delta 是「自切段起点的累加 buffer」
+        # （每 chunk 都 yield、切段后重置），只打相对上一轮的新增尾段，
+        # 视觉上即模型原始流的逐块节奏；final 仅走 TTS/字幕流水线不重打。
         printed_len = 0
         async for item in brain.chat_stream(text, proactive=proactive, history=history):
-            # chat_stream 新协议：yield (mode, text)，mode ∈ {"delta","final"}
-            # - delta: 实时累加文本（打字机显示），不触发 TTS/字幕/复读/事件
+            # chat_stream 协议：yield (mode, text)，mode ∈ {"delta","final"}
+            # - delta: 实时累加文本（仅用于显示，绝不触发 TTS/字幕/复读/事件）
             # - final: 完整可合成段，走完整副作用流水线
             if isinstance(item, tuple) and item and item[0] == "delta":
                 delta_text: str = item[1]
@@ -185,7 +187,7 @@ async def converse(brain: LLMBrain,
                 sentence = item
             else:
                 continue
-            # final 段：清零打印游标，下一段 delta 重新累加
+            # final 段：buffer 已在切段后重置，清零打印游标
             printed_len = 0
             # 复读防护（宁缺毋怪）：句子拼入累积文本后检测，命中即中止本轮，
             # 丢弃后续全部输出，避免把退化复读流播给观众
@@ -210,9 +212,8 @@ async def converse(brain: LLMBrain,
             for seg, sfx in split_sfx_markers(spoken):
                 if not seg.strip():
                     continue  # 纯标记段已合并到其后文本段，正常不会出现
-                # final 段：整段打印（delta 已逐字打印过，final 时不再重打）
-                # — 但 LLM 流式情况下 delta 的「最后一截」= final 段末尾，
-                # console.chat 已打过，final 这里跳过避免重复；非流式兜底再打
+                # final 段不再打印：显示由 delta 逐块完成（模型流式节奏），
+                # 这里只做 TTS/字幕/事件等副作用
                 full_reply_parts.append(seg)
                 # 逐句情绪判断（规则分类零开销）：每句话播放对应表情/动作，
                 # 与 TTS 播放并行，不阻塞句子入队节奏

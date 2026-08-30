@@ -43,10 +43,10 @@ from ev.utils.perf_tracker import PerfTracker
 
 from .inner_tail import _chat_stream_tail
 
-# 记忆召回硬超时（秒）：超时熔断跳过注入，保障首字延迟不被检索拖垮
+# 记忆召回硬超时（秒）默认值：超时熔断跳过注入，保障首字延迟不被检索拖垮
 # （B 优化：实测快路径 0ms，熔断只在检索服务异常时触发、此时注入价值
-# 本来就低，故 1.5s 收紧到 0.8s）
-_MEMORY_RECALL_TIMEOUT = 0.8
+# 本来就低，故 1.5s 收紧到 0.8s）。实际值读 .env MEMORY_RECALL_TIMEOUT。
+_MEMORY_RECALL_TIMEOUT_DEFAULT = 0.8
 
 # 段落早产切分（压 TTS 首句延迟，让「从 LLM 第一个字开始合成」落地）：
 # LLM 流式产字不等句末，尽早切出可合成段交 TTS（首块 ~200ms 即出声）——
@@ -149,11 +149,17 @@ async def _run_chat_stream_inner(
         mem_block = memory.STANDING_INSTRUCTION
         try:
             # 硬超时熔断：召回超时直接跳过注入，优先保障响应速度
-            mem_ctx = await asyncio.wait_for(
-                mem_task, timeout=_MEMORY_RECALL_TIMEOUT)
+            # （.env MEMORY_RECALL_TIMEOUT 可调；0 = 不设限，不推荐）
+            recall_timeout = float(
+                getattr(config.cfg, "MEMORY_RECALL_TIMEOUT",
+                        _MEMORY_RECALL_TIMEOUT_DEFAULT))
+            if recall_timeout > 0:
+                mem_ctx = await asyncio.wait_for(mem_task, timeout=recall_timeout)
+            else:
+                mem_ctx = await mem_task
         except asyncio.TimeoutError:
             console.warn(
-                f"[记忆检索] 召回超时（>{_MEMORY_RECALL_TIMEOUT}s），"
+                f"[记忆检索] 召回超时（>{recall_timeout}s），"
                 "熔断跳过本次注入")
             mem_ctx = ""
         if mem_ctx:

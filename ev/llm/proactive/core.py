@@ -1,6 +1,12 @@
 """ProactiveEngine 类骨架：__init__ + 对外接口 + LLM 决策 + prompt 组装。
 
-队列、去重、播报实现 → executor.py；话题策略、冷却、权重 → policies.py。
+重构说明（参考 新建文件夹/EV-Anthropomorphic，Neuro-sama 风格）：
+  - 心跳不再无脑问 LLM「想不想说」，而是先过 Nudge 契机引擎（nudge.py）：
+    只有契机命中（冷场/未读堆积/氛围变化/太久没说/弹幕爆发）才问一次 LLM，
+    由主模型自主决定开口还是 [SILENT] 拒绝（契机是建议不是命令）。
+  - 新增 request_speak()：被动响应式主动发言申请（LLM/技能可主动举手），
+    返回结构化结果，供未来以工具形式暴露给 agent。
+  - 话题策略、冷却、权重 → policies.py；队列、去重、播报 → executor.py。
 """
 
 from __future__ import annotations
@@ -14,6 +20,8 @@ from typing import Optional
 from ev.utils import console
 from ev.kernel.output_lock import get_output_lock
 
+from . import nudge as _nudge_mod
+from .nudge import NudgeEngine, NudgeEvent
 from .policies import (
     _SILENT_MARKERS,
     _RECENT_TYPE_WINDOW,
@@ -24,9 +32,33 @@ from .policies import (
 )
 from . import executor as _executor_mod
 
+# 契机的"保质期"：事件现场产生的契机若未能及时消费（被忙碌门控挡住），
+# 超过此时长视为过期丢弃，避免陈旧契机在几分钟后突然触发生成。
+_NUDGE_TTL_SEC = 20.0
+
+
+def _nudge_kwargs(cfg) -> dict:
+    """从 cfg 提取契机引擎阈值参数（__init__ 与热更新共用同一份映射）。"""
+    return {
+        "long_silence_sec": getattr(
+            cfg, "PROACTIVE_NUDGE_LONG_SILENCE_SEC", 30.0),
+        "silent_too_long_sec": getattr(
+            cfg, "PROACTIVE_NUDGE_SILENT_TOO_LONG_SEC", 300.0),
+        "many_unread_threshold": getattr(
+            cfg, "PROACTIVE_NUDGE_MANY_UNREAD", 5),
+        "burst_threshold": getattr(
+            cfg, "PROACTIVE_NUDGE_BURST_THRESHOLD", 10),
+        "burst_window_sec": getattr(
+            cfg, "PROACTIVE_NUDGE_BURST_WINDOW_SEC", 30.0),
+        "nudge_cooldown_sec": getattr(
+            cfg, "PROACTIVE_NUDGE_COOLDOWN_SEC", 30.0),
+        "repeat_gap_sec": getattr(
+            cfg, "PROACTIVE_NUDGE_REPEAT_GAP_SEC", 60.0),
+    }
+
 
 class ProactiveEngine:
-    """主动对话引擎：事件驱动心跳 → 灵感话题 → LLM 自主决策 → 后台播报。"""
+    """主动对话引擎：事件契机驱动 → 灵感话题 → LLM 自主决策 → 后台播报。"""
 
     def __init__(self, brain, tts, face, sub, cfg,
                  butler=None, memory_manager=None,
@@ -57,7 +89,97 @@ class ProactiveEngine:
         self._worker_task: Optional[asyncio.Task] = None
         self._speak_done = asyncio.Event()
         self._recent_prompts: deque = deque(maxlen=3)
-        self._stats = {"trigger": 0, "speak": 0, "dropped": 0}
+        self._stats = {"trigger": 0, "speak": 0, "dropped": 0, "silent": 0}
+
+        # ---- Nudge 契机引擎（全局单例，弹幕埋点与本引擎共享）----
+        self._nudge_enabled = bool(getattr(cfg, "PROACTIVE_NUDGE_ENABLED", True))
+        self.nudge: NudgeEngine = _nudge_mod.ensure_engine(**_nudge_kwargs(cfg))
+        self._pending_nudge: Optional[NudgeEvent] = None
+        if self._nudge_enabled:
+            self.nudge.add_listener(self._on_nudge_fired)
+
+    # ---------- Nudge 契机 ----------
+
+    def apply_nudge_cfg(self) -> None:
+        """!config 热更新：按最新 cfg 校准契机引擎阈值（含启停开关）。
+
+        PROACTIVE_NUDGE_ENABLED=false → 移除监听器（契机不再触发心跳）；
+        重新启用 → 恢复监听。阈值经 ensure_engine 原地校准，单例不重建
+        （弹幕埋点共享的全局状态不丢失）。
+        """
+        enabled = bool(getattr(self.cfg, "PROACTIVE_NUDGE_ENABLED", True))
+        self.nudge = _nudge_mod.ensure_engine(**_nudge_kwargs(self.cfg))
+        if enabled and not self._nudge_enabled:
+            self.nudge.add_listener(self._on_nudge_fired)
+        elif not enabled and self._nudge_enabled:
+            self.nudge.clear_listeners()
+            self._pending_nudge = None
+        self._nudge_enabled = enabled
+
+    def _on_nudge_fired(self, event: NudgeEvent) -> None:
+        """契机命中回调（事件现场触发）：暂存契机并唤醒主循环心跳。"""
+        self._pending_nudge = event
+        self._wakeup.set()
+
+    def _take_nudge(self) -> Optional[NudgeEvent]:
+        """取出待处理的契机；过期（TTL 外）则丢弃并现场重查一次。"""
+        nudge, self._pending_nudge = self._pending_nudge, None
+        if nudge is not None and (time.time() - nudge.ts) > _NUDGE_TTL_SEC:
+            console.dim(f"[主动] 契机 {nudge.reason.value} 已过期（忙碌避让），丢弃")
+            nudge = None
+        if nudge is None and self._nudge_enabled:
+            nudge = self.nudge.check()  # 心跳路径：覆盖纯冷场（无事件）契机
+        return nudge
+
+    def notify(self, event_type: str, payload: Optional[dict] = None) -> None:
+        """向契机引擎埋事件（danmaku / user_input / ai_spoke / state_change）。
+
+        弹幕 client 等外部事件源请直接调 ev.llm.proactive.nudge.observe()。
+        """
+        if not self._nudge_enabled:
+            return
+        try:
+            self.nudge.observe(event_type, payload)
+        except Exception as e:
+            console.dim(f"[主动] 契机状态更新出错（忽略）：{e}")
+
+    def on_ai_spoke(self, interaction_ended: bool = True) -> None:
+        """AI 播报完成回调：更新契机状态；互动式回复再补一个「氛围切换」契机。
+
+        interaction_ended=True（键盘/弹幕回复完成）→ 产生 state_change 契机，
+        让互动结束后的第一次心跳有一次开口机会（保留旧行为）；
+        False（主动发言自身完成）→ 只更新时间戳，避免自问自答连环开口。
+        """
+        self.notify("ai_spoke")
+        if interaction_ended:
+            self.notify("state_change",
+                        {"from": "interactive", "to": "idle"})
+
+    def nudge_check(self) -> dict:
+        """查询当前契机状态（调试/未来暴露为工具）：是否该说话 + 现场快照。"""
+        if not self._nudge_enabled:
+            return {"ok": True, "enabled": False,
+                    "hint": "契机引擎未启用，心跳按旧逻辑直接询问主模型"}
+        should, event = self.nudge.should_speak_now()
+        result = {
+            "ok": True, "enabled": True,
+            "should_speak": should,
+            "hint": event.prompt_hint if event is not None else "没有契机，继续潜水/正常处理",
+            "state": self.nudge.get_state(),
+        }
+        if event is not None:
+            result["reason"] = event.reason.value
+            result["context"] = event.context
+        return result
+
+    def get_stats(self) -> dict:
+        """运行统计：队列/播报 + 契机接受率（自进化复盘用）。"""
+        stats = dict(self._stats)
+        stats.update(self.nudge.get_stats())
+        stats["queue_size"] = self._queue.qsize()
+        stats["active_topic_id"] = (
+            self.active_topic["topic_id"] if self.active_topic is not None else None)
+        return stats
 
     # ---------- 对外接口 ----------
 
@@ -78,10 +200,11 @@ class ProactiveEngine:
                 self.active_topic["topic_id"], {"use": 0, "engaged": 0})
             stats["engaged"] += 1
             self.active_topic = None
+        self.notify("user_input")
         self._wakeup.set()
 
     async def heartbeat(self) -> bool:
-        """自主开口检查（转发到 executor 实现）。"""
+        """契机门控的自主开口检查（转发到 executor 实现）。"""
         return await _executor_mod.heartbeat(self)
 
     def discard_pending(self) -> int:
@@ -92,11 +215,66 @@ class ProactiveEngine:
         """距下一次「自主开口机会」的秒数。"""
         return _next_wake_in(self)
 
+    # ---------- 被动响应：request_speak ----------
+
+    async def request_speak(self, topic_hint: str = "", reason: str = "",
+                            nudge_reason: str = "") -> dict:
+        """主动申请一次发言（被动响应式，参考 EV-Anthropomorphic 工具协议）。
+
+        与心跳路径的区别：不经过契机门控（自己举手 = 自己给契机），
+        但仍受忙碌/去重/队列约束；LLM 内部仍可输出 [SILENT] 拒说。
+
+        Returns:
+            {"ok": True, "text": ..., "topic": ...} 或
+            {"ok": False, "reason": "busy" / "output_locked" / "silent" /
+             "duplicate_or_queue_full" / "topic_unavailable"}
+        """
+        self._stats["trigger"] += 1
+        # 1) 状态闸门
+        if self.speaking or not self._queue.empty():
+            return {"ok": False, "reason": "busy"}
+        if self._output_lock.locked():
+            return {"ok": False, "reason": "output_locked"}
+        # 2) 选话题（指定 hint 优先，否则按权重挑）
+        if topic_hint:
+            topic = {"id": "user_hint", "concept": topic_hint,
+                     "category": "user_requested", "tags": [],
+                     "cooldown_minutes": 0}
+        else:
+            topic = _pick_topic(self)
+            if topic is None:
+                return {"ok": False, "reason": "topic_unavailable"}
+        # 3) LLM 决策（内部仍允许 [SILENT] 拒说）
+        text = await self._decide_and_generate(
+            topic, force=False, mode="request",
+            request_reason=reason, nudge_reason=nudge_reason)
+        if not text:
+            self._stats["silent"] += 1
+            if nudge_reason and self._nudge_enabled:
+                self.nudge.report_reject()
+            return {"ok": False, "reason": "silent",
+                    "topic": (topic or {}).get("concept", "")[:50]}
+        # 4) 入队（去重/限流）+ 契机回报
+        if not _executor_mod._enqueue(self, text, topic):
+            return {"ok": False, "reason": "duplicate_or_queue_full"}
+        if nudge_reason and self._nudge_enabled:
+            self.nudge.report_act()
+        return {"ok": True, "text": text[:200],
+                "topic": (topic or {}).get("concept", "")[:50],
+                "nudge_reason": nudge_reason}
+
     # ---------- LLM 自主决策 + prompt ----------
 
-    async def _decide_and_generate(self, topic, force: bool = False) -> Optional[str]:
-        """LLM 自主决策：想说就生成发言文本，不想说返回 None。"""
-        prompt = await self._build_prompt(topic, force=force)
+    async def _decide_and_generate(self, topic, force: bool = False,
+                                   mode: str = "nudge",
+                                   request_reason: str = "",
+                                   nudge_reason: str = "",
+                                   nudge: Optional[NudgeEvent] = None,
+                                   ) -> Optional[str]:
+        """LLM 自主决策：想说就生成发言文本，不想说（[SILENT]）返回 None。"""
+        prompt = await self._build_prompt(
+            topic, force=force, mode=mode, request_reason=request_reason,
+            nudge_reason=nudge_reason, nudge=nudge)
         if not prompt:
             return None
         history_len = len(self.brain.history)
@@ -129,7 +307,17 @@ class ProactiveEngine:
 
     @staticmethod
     def _parse_decision(text: str) -> Optional[str]:
-        """解析自主开口结果：沉默 → None；否则返回发言文本。"""
+        """解析自主开口结果：[SILENT]/<SILENT>/沉默 → None；否则返回发言文本。
+
+        兼容 EV-Anthropomorphic 标记协议：[SILENT] 静默、[END] 主动收尾
+        （前置文本正常播报）。
+        """
+        if not text:
+            return None
+        # [END]/<END> 收尾标记：剥掉后正常播报前置文本
+        for end_tag in ("[END]", "<END>"):
+            if end_tag in text:
+                text = text.replace(end_tag, "").strip()
         if not text:
             return None
         t = text.strip()
@@ -144,10 +332,18 @@ class ProactiveEngine:
         for m in _SILENT_MARKERS:
             if t.startswith(m) and len(t) <= 12:
                 return None
+        # [SILENT] / <SILENT> 显式静默标记（含前后缀文本时整体视为拒说）
+        upper = text.upper()
+        if "[SILENT]" in upper or "<SILENT>" in upper:
+            return None
         return text
 
-    async def _build_prompt(self, topic, force: bool = False) -> str:
-        """组装主模型的「自主开口决策」请求：agent 优先，无 agent 回退内置。"""
+    async def _build_prompt(self, topic, force: bool = False,
+                            mode: str = "nudge",
+                            request_reason: str = "",
+                            nudge_reason: str = "",
+                            nudge: Optional[NudgeEvent] = None) -> str:
+        """组装「自主开口决策」请求：agent 优先，无 agent 回退内置。"""
         memory_context = ""
         if self.mm is not None:
             try:
@@ -160,10 +356,9 @@ class ProactiveEngine:
                 prompt = self.butler.build_proactive_prompt(
                     topic["concept"] if topic is not None else "",
                     memory_context, hour)
-                if force:
-                    prompt += (
-                        "\n\n【强制开口】直播间已安静超过 25 秒，"
-                        "此刻必须开口说点什么，禁止输出 <SILENT> 或任何沉默表达。")
+                prompt += self._context_block(
+                    force=force, mode=mode, request_reason=request_reason,
+                    nudge_reason=nudge_reason, nudge=nudge)
                 return prompt
             except Exception as e:
                 console.error(f"[主动] agent 构造发言请求失败，回退内置：{e}")
@@ -183,11 +378,34 @@ class ProactiveEngine:
             "- 玩梗可以挑衅，但收尾必须用夸张的「自我解构」把攻击性卸掉。\n\n"
             f"{topic_hint}\n"
         )
-        if force:
-            prompt += """
-                      现在你不需要迎合谁，只需要回答自己一个问题：
-                     「此时此刻，这个站在麦克风前的我，是真的想开口，还是只是在替直播间填白？」
-                      - 若想开口，说出那句「不吐不快」的话，哪怕冒犯、荒诞、自嘲都行。禁止输出 <SILENT>。"""
-        else:
-            prompt += "规则：只要开口，必须是「非标品」的句子。无话可说时，请虔诚地输出 <SILENT>。"
+        prompt += self._context_block(
+            force=force, mode=mode, request_reason=request_reason,
+            nudge_reason=nudge_reason, nudge=nudge)
         return prompt
+
+    @staticmethod
+    def _context_block(force: bool, mode: str, request_reason: str,
+                       nudge_reason: str, nudge: Optional[NudgeEvent]) -> str:
+        """拼装契机上下文段：本次开口机会从哪来 + 强制开口声明。"""
+        lines = []
+        if mode == "request":
+            lines.append("\n--- 本次开口机会的来源 ---")
+            lines.append("这是你自己调用 request_speak 申请来的发言机会，"
+                         "系统不会再来问你了，这是你的场。")
+            if request_reason:
+                lines.append(f"你的申请理由：{request_reason}")
+        else:
+            lines.append("\n--- 系统契机（Neuro 式提醒，非命令）---")
+            if nudge is not None:
+                lines.append(f"契机类型：{nudge.reason.value}")
+                if nudge.prompt_hint:
+                    lines.append(f"契机提示：{nudge.prompt_hint}")
+            elif nudge_reason:
+                lines.append(f"契机类型：{nudge_reason}")
+            lines.append("契机只是提醒，说不说仍由你决定；"
+                         "无话可说时请虔诚地输出 <SILENT>。")
+        if force:
+            lines.append(
+                "\n【强制开口】直播间已安静超过 25 秒，"
+                "此刻必须开口说点什么，禁止输出 <SILENT> 或任何沉默表达。")
+        return "\n".join(lines) + "\n"
