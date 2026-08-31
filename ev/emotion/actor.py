@@ -150,12 +150,14 @@ class BaseEmotionActor:
 
         与 handle() 的区别：只做向量情绪分类 → 播放该情绪绑定的表情/动作，
         不匹配手动命令（回复内容不是用户指令）。
+        走 classify_async：逐句调用绝不阻塞事件循环（阻塞会让 TTS 排队、
+        弹幕回调卡住，播报路径红线）。
         返回播放描述文本（空串表示未播放）。
         """
         text = (text or "").strip()
         if not text:
             return ""
-        emotion = self._rule_classifier.classify(text).emotion
+        emotion = (await self._rule_classifier.classify_async(text)).emotion
         played = await self._play_map(emotion)
         if played:
             console.dim(f"情绪「{emotion}」→ {played}")

@@ -108,7 +108,11 @@ class MessageReaction:
         return classifier
 
     def classify(self, message: str) -> EmotionIntent:
-        """分类消息，返回情绪意图（纯向量，无正则）。"""
+        """分类消息，返回情绪意图（纯向量，无正则）。
+
+        同步接口：内部经后台事件循环桥接，**会阻塞调用线程**直到 embed
+        返回——仅限非 asyncio 场景使用；asyncio 上下文一律用 classify_async。
+        """
         text = (message or "").strip()
         if not text:
             return self._neutral(text, source="neutral")
@@ -125,6 +129,52 @@ class MessageReaction:
         emotion = getattr(result, "emotion", "中性") or "中性"
         score = float(getattr(result, "score", 0.0) or 0.0)
         return self._build(emotion, score, text)
+
+    # ---------- 异步接口（asyncio 上下文用这个，不阻塞事件循环） ----------
+
+    async def classify_async(self, message: str) -> EmotionIntent:
+        """异步分类：直接 await 底层 classify，零阻塞零线程桥接。
+
+        播报路径逐句情绪分类请一律走本方法（同步版会阻塞整个事件循环，
+        阻塞期间 TTS 排队 / 弹幕回调全部卡住）。
+        """
+        text = (message or "").strip()
+        if not text:
+            return self._neutral(text, source="neutral")
+
+        classifier = await self._ensure_classifier_async()
+        if classifier is None:
+            return self._neutral(text, source="fallback")
+
+        try:
+            result = await classifier.classify(text)
+        except Exception:
+            return self._neutral(text, source="fallback")
+
+        emotion = getattr(result, "emotion", "中性") or "中性"
+        score = float(getattr(result, "score", 0.0) or 0.0)
+        return self._build(emotion, score, text)
+
+    async def _ensure_classifier_async(
+        self,
+    ) -> Optional[EmbeddingEmotionClassifier]:
+        """异步懒初始化（失败返回 None，只尝试一次）。"""
+        if self._classifier is not None:
+            return self._classifier
+        if self._init_attempted:
+            return None
+        self._init_attempted = True
+
+        provider = SiliconFlowEmbeddingProvider()
+        if not provider.configured:
+            return None
+
+        classifier = EmbeddingEmotionClassifier(provider)
+        if not await classifier.initialize():
+            return None
+
+        self._classifier = classifier
+        return classifier
 
     def _build(
         self,

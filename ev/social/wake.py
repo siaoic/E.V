@@ -67,6 +67,15 @@ _wake: WakeConfig = WakeConfig()
 _wake_lock = asyncio.Lock()
 _event: asyncio.Event = asyncio.Event()  # 用于"立即打断 wait_for"
 _listeners: list = []  # 监听 wake 状态变化的回调
+# 主循环句柄（bootstrap 时注册）：poke 可能从弹幕线程调用，
+# asyncio.Event.set() 非线程安全——跨线程时必须经 call_soon_threadsafe
+_main_loop: Optional[object] = None
+
+
+def set_main_loop(loop) -> None:
+    """注册主事件循环（bootstrap 在主循环内调用一次）。"""
+    global _main_loop
+    _main_loop = loop
 
 
 def get_wake_config() -> WakeConfig:
@@ -162,9 +171,21 @@ async def cancel_wake() -> None:
 
 def poke() -> None:
     """外部事件"戳一下",让 wait_for 立即返回(不持久化配置)。
-    
-    主循环在收到弹幕/输入/任何事件时调用。
+
+    可能从任意线程调用（弹幕线程/主循环）：已注册主循环且当前不在
+    主循环线程时，经 call_soon_threadsafe 投递（Event.set 非线程安全）。
     """
+    if _main_loop is not None:
+        try:
+            running = asyncio.get_running_loop()
+        except RuntimeError:
+            running = None
+        if running is not _main_loop:
+            try:
+                _main_loop.call_soon_threadsafe(_event.set)
+                return
+            except RuntimeError:
+                pass  # 主循环已关闭：就地 set 兜底
     _event.set()
 
 

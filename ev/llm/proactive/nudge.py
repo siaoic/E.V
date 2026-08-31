@@ -30,6 +30,7 @@ NudgeEvent 给主动引擎 → 由主模型自主决定开口还是 [SILENT] 拒
 
 from __future__ import annotations
 
+import threading
 import time
 from dataclasses import dataclass, field
 from enum import Enum
@@ -138,6 +139,10 @@ class NudgeEngine:
         self.last_state_change_ts: float = 0.0
         self.last_state_change: tuple = (None, None)  # (from, to)
 
+        # ---- 线程安全：observe 由弹幕线程调用、check 由主循环调用，
+        #      共享状态（未读/爆发窗口/时间戳）的读写一律持锁 ----
+        self._state_lock = threading.Lock()
+
         # ---- 防刷状态 ----
         self.last_nudge_ts: float = 0.0
         self._last_fire_ts: Dict[NudgeReason, float] = {}
@@ -189,6 +194,11 @@ class NudgeEngine:
     # ----- 内部：状态更新 -----
 
     def _update_state(self, event_type: str, payload: dict, now: float) -> None:
+        with self._state_lock:
+            self._update_state_locked(event_type, payload, now)
+
+    def _update_state_locked(self, event_type: str, payload: dict,
+                             now: float) -> None:
         if event_type == "danmaku":
             self.last_activity_ts = now
             self.unread_count += 1
@@ -216,6 +226,21 @@ class NudgeEngine:
     # ----- 内部：契机评估 -----
 
     def _check(self, now: float) -> Optional[NudgeEvent]:
+        # 状态计算/变更持锁（observe 在弹幕线程、check 在主循环），
+        # 监听器回调放到锁外（回调耗时不应放大锁窗口）。
+        with self._state_lock:
+            nudge = self._check_locked(now)
+        if nudge is None:
+            return None
+        console.dim(f"[契机] {nudge.reason.value}：{nudge.prompt_hint}")
+        for cb in list(self._listeners):
+            try:
+                cb(nudge)
+            except Exception as e:
+                console.dim(f"[契机] 监听器出错（忽略）：{e}")
+        return nudge
+
+    def _check_locked(self, now: float) -> Optional[NudgeEvent]:
         # 1) 全局冷却（两次契机最小间隔）
         if now - self.last_nudge_ts < self.nudge_cooldown_sec:
             return None
@@ -280,18 +305,12 @@ class NudgeEngine:
         if nudge is None:
             return None
 
-        # 5) 记录推送 + 通知监听器
+        # 5) 记录推送（通知监听器在 _check 锁外进行）
         self.last_nudge_ts = now
         self._last_fire_ts[nudge.reason] = now
         self._window_count += 1
         self._stats["nudge_total"] += 1
         self._stats["nudge_by_reason"][nudge.reason.value] += 1
-        console.dim(f"[契机] {nudge.reason.value}：{nudge.prompt_hint}")
-        for cb in list(self._listeners):
-            try:
-                cb(nudge)
-            except Exception as e:
-                console.dim(f"[契机] 监听器出错（忽略）：{e}")
         return nudge
 
     def _make_nudge(self, reason: NudgeReason, context: dict) -> NudgeEvent:

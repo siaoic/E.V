@@ -75,6 +75,14 @@ async def bootstrap(ctx=None) -> bool:
         logger.info(f"[social] bootstrap started (event_driven="
                     f"{flags.get('event_driven', True)}), flags={flags}")
 
+        # 0) 注册主事件循环句柄：弹幕线程的埋点/poke 统一经
+        #    call_soon_threadsafe 投递回主循环（Event.set 非线程安全）
+        try:
+            from .wake import set_main_loop
+            set_main_loop(asyncio.get_running_loop())
+        except Exception as e:
+            logger.debug(f"[social] main loop register failed: {e}")
+
         # 1) 加载人设参数
         try:
             from .personalize import load_persona_params
@@ -252,12 +260,38 @@ def observe_danmaku(text: str, *, user_id=None,
                     is_superchat: bool = False, is_gift: bool = False) -> None:
     """一条弹幕到达时的拟人化层埋点（同步、非阻塞、零异常外泄）。
 
+    线程安全：弹幕线程调用时，整个埋点体经 call_soon_threadsafe 投递到
+    主循环执行（bootstrap 已注册主循环句柄）；未注册/已在主循环时就地执行。
     覆盖：engagement 事件推进 + wake poke + learning 被动监听。
     deliberation/quote 的打分走 should_block / detect_quote_signal，
     由调用方按需使用（主项目弹幕挑选器已有自己的评分管线）。
     """
     if not is_enabled():
         return
+    # 跨线程归队：弹幕线程 -> 主循环
+    try:
+        from .wake import _main_loop as _wake_loop
+    except Exception:
+        _wake_loop = None
+    if _wake_loop is not None:
+        try:
+            running = asyncio.get_running_loop()
+        except RuntimeError:
+            running = None
+        if running is not _wake_loop:
+            try:
+                _wake_loop.call_soon_threadsafe(
+                    _observe_danmaku_on_loop, text, user_id,
+                    is_superchat, is_gift)
+                return
+            except RuntimeError:
+                pass  # 主循环已关闭：就地执行兜底
+    _observe_danmaku_on_loop(text, user_id, is_superchat, is_gift)
+
+
+def _observe_danmaku_on_loop(text: str, user_id,
+                             is_superchat: bool, is_gift: bool) -> None:
+    """埋点实现（保证在主循环上执行，create_task 才归位）。"""
     flags = _read_flags()
 
     # 1) engagement 状态推进（事件驱动核心）

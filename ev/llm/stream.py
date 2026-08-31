@@ -223,6 +223,17 @@ async def converse(brain: LLMBrain,
                 if hit and random.random() < profanity_filter_rate:
                     console.warn(f"[内容过滤] AI 回复命中敏感词，已替换")
                     spoken = masked
+            # 拟人化层沉默协议（ev.social）：主对话路径剥离 [SILENT]/[END]
+            # 标记——只剥不静默（主对话是用户点名，不该真沉默），防止标记
+            # 被 TTS 念出来。主动路径已在 _parse_decision 提前处理。
+            if not proactive:
+                try:
+                    from ev.utils import config as _silence_cfg
+                    if getattr(_silence_cfg.cfg, "SOCIAL_SILENCE_ENABLED", True):
+                        from ev.social.silence import strip_markers as _strip
+                        spoken = _strip(spoken)
+                except Exception:
+                    pass
             if proactive and not turn_prefixed:
                 console.chat("主动对话：", end="", flush=True)
                 turn_prefixed = True

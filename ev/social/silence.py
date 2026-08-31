@@ -20,8 +20,8 @@ from typing import Optional
 
 logger = logging.getLogger("ev.social.silence")
 
-_SILENT_MARKER = re.compile(r"\[SILENT\]")
-_END_MARKER = re.compile(r"\[END\]")
+_SILENT_MARKER = re.compile(r"\[SILENT\]", re.IGNORECASE)
+_END_MARKER = re.compile(r"\[END\]", re.IGNORECASE)
 
 # 强制不沉默的场景(调用方传 context)
 def _is_forced_speech(context: Optional[dict]) -> bool:
@@ -48,12 +48,22 @@ def detect_end(text: str) -> bool:
     return bool(_END_MARKER.search(text))
 
 
+_SILENT_ALT_RE = re.compile(r"<SILENT>", re.IGNORECASE)
+_END_ALT_RE = re.compile(r"<END>", re.IGNORECASE)
+
+
 def strip_markers(text: str) -> str:
-    """清掉 [SILENT] / [END] 标记,返回干净的对话文本。"""
+    """清掉 [SILENT] / [END] 标记(含 <SILENT>/<END> 变体),返回干净文本。
+
+    只剥标记不改语义——调用方自行决定"剥完是否播报"(主动路径按标记
+    静默,主对话路径只剥不静默)。
+    """
     if not text:
         return text
     text = _SILENT_MARKER.sub("", text)
     text = _END_MARKER.sub("", text)
+    text = _SILENT_ALT_RE.sub("", text)
+    text = _END_ALT_RE.sub("", text)
     return text.strip()
 
 

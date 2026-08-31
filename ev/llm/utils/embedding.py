@@ -17,6 +17,9 @@
 from __future__ import annotations
 
 import asyncio
+import hashlib
+import json
+import os
 import threading
 from collections import OrderedDict
 from typing import Any
@@ -56,6 +59,57 @@ _EMOTION_CORPUS: dict[str, list[str]] = {
 }
 
 _CACHE_CAPACITY = 4096
+
+# 语料向量磁盘缓存（data/emotion_corpus_cache.npz）：矩阵 L2 归一化后保存，
+# 附语料指纹 key；任一因素（模型/端点/维度/语料内容）变化即失效重建。
+_CORPUS_CACHE_PATH = os.path.join("data", "emotion_corpus_cache.npz")
+
+
+def _corpus_cache_key(texts: list[str]) -> str:
+    """语料指纹：模型 + 端点 + 维度 + 全部语料内容。"""
+    from ev.utils import config as _cfg
+    cfg = _cfg.cfg
+    raw = "|".join([
+        str(getattr(cfg, "EMBEDDING_MODEL", "") or ""),
+        str(getattr(cfg, "EMBEDDING_BASE_URL", "") or ""),
+        str(getattr(cfg, "EMBEDDING_DIMENSIONS", "") or ""),
+        str(len(texts)),
+    ]) + "|" + "|".join(texts)
+    return hashlib.sha1(raw.encode("utf-8")).hexdigest()
+
+
+def _load_corpus_cache(key: str, expected_rows: int):
+    """读缓存；命中且行数/键一致返回 (matrix, labels)，否则 None。"""
+    try:
+        if not os.path.isfile(_CORPUS_CACHE_PATH):
+            return None
+        with np.load(_CORPUS_CACHE_PATH, allow_pickle=False) as data:
+            if str(data["key"]) != key:
+                return None
+            matrix = np.asarray(data["matrix"], dtype=float)
+            labels = np.asarray(data["labels"])
+        if matrix.shape[0] != expected_rows or matrix.shape[0] != labels.shape[0]:
+            return None
+        return matrix, labels
+    except Exception:
+        return None
+
+
+def _save_corpus_cache(key: str, matrix: np.ndarray, labels: np.ndarray) -> None:
+    """写缓存（失败静默——缓存只是加速，不是正确性依赖）。"""
+    try:
+        os.makedirs(os.path.dirname(_CORPUS_CACHE_PATH), exist_ok=True)
+        # np.savez 会给不以 .npz 结尾的文件名自动补后缀——临时名必须带
+        # .npz，否则 os.replace 找不到文件
+        tmp = _CORPUS_CACHE_PATH + ".tmp.npz"
+        # labels 必须存成 unicode 数组：object dtype 需要 pickle，而读取侧
+        # np.load(allow_pickle=False) 会直接拒绝
+        np.savez(tmp, key=np.array(key), matrix=matrix.astype(np.float32),
+                 labels=np.asarray([str(x) for x in labels]))
+        os.replace(tmp, _CORPUS_CACHE_PATH)
+    except Exception:
+        pass
+
 
 
 # 常驻后台事件循环：embedding 同步桥接共用同一个循环，保证 httpx 连接池
@@ -250,6 +304,24 @@ class EmbeddingEmotionClassifier:
                 for example in examples:
                     texts.append(example)
                     groups.append(emotion)
+
+            # 语料向量磁盘缓存：key = sha1(模型+端点+维度+全语料内容)。
+            # 命中则直接加载矩阵（进程重启零 embed 成本），语料/模型变化
+            # 自动失效重建。读写失败一律降级为正常 embed 路径。
+            cache_key = _corpus_cache_key(texts)
+            cached = _load_corpus_cache(cache_key, len(texts))
+            if cached is not None:
+                matrix, cached_labels = cached
+                self._matrix = matrix
+                self._group_rows = {
+                    emotion: np.flatnonzero(cached_labels == emotion)
+                    for emotion in _EMOTION_CORPUS
+                }
+                self._ready = True
+                console.dim(f"情绪语料向量缓存命中（{matrix.shape[0]} 条，"
+                            f"跳过批量 embed）")
+                return True
+
             vectors = await self._provider.batch_embed(texts)
             matrix = np.asarray(vectors, dtype=float)  # (N, D)
             norms = np.linalg.norm(matrix, axis=1, keepdims=True)
@@ -267,6 +339,7 @@ class EmbeddingEmotionClassifier:
                 for emotion in _EMOTION_CORPUS
             }
             self._ready = True
+            _save_corpus_cache(cache_key, matrix, labels)
         except Exception as e:
             console.dim(f"情绪分类器初始化失败：{e}")
             self._ready = False
