@@ -57,6 +57,20 @@ async def speak_text(text: str,
     逐句播放对应表情/动作（每句话一个情绪，不只看整段）。
     """
     sender = get_output_owner() or "user"
+    # 拟人化层沉默协议（ev.social，EV-Anthropomorphic 方案）：LLM 输出
+    # [SILENT] → 静默不播报；[END] → 前置文本播报并标记收尾。
+    # 开关 SOCIAL_SILENCE_ENABLED（默认 true），任何失败 bypass 不影响播报。
+    try:
+        from ev.utils import config as _cfg
+        if getattr(_cfg.cfg, "SOCIAL_SILENCE_ENABLED", True):
+            from ev.social.silence import on_ai_final as _silence_hook
+            _result = await _silence_hook(text or "")
+            if _result is None or _result == "":
+                console.dim("[silence] AI 标记 [SILENT]，本段静默不播报")
+                return
+            text = _result
+    except Exception:
+        pass
     # P2-2 修复：直通路径（主动发言等）统一清洗——markdown/URL/LaTeX/代码块/
     # emoji/动作标注全走 _clean_sentence；纯标点/无实质内容（「。。。」、
     # 纯 emoji）整段拒播，防止引擎拖长音怪叫
@@ -106,6 +120,12 @@ async def speak_text(text: str,
             pass
     if sub:
         sub.push("clear", "")
+    # 拟人化层：记录 AI 刚说的话（ev.social.quote 引用上一条检测用）
+    try:
+        from ev.social.quote import record_ai_msg
+        record_ai_msg(spoken)
+    except Exception:
+        pass
     # 事件总线：一次播报结束
     await bus.emit(EV_SPEAKING_END, SpeakingEvent(sender=sender))
 

@@ -216,6 +216,13 @@ class _BiliDanmakuHandler(blivedm.BaseHandler):
             _proactive_nudge.observe("danmaku", {"username": uname, "text": text})
         except Exception:
             pass
+        # 拟人化层埋点（ev.social）：engagement 状态推进 + learning 词库监听
+        # + wake poke（全部非阻塞、失败静默，行为回落原 E.V）
+        try:
+            from ev.social import bootstrap as _social
+            _social.observe_danmaku(text, user_id=uid)
+        except Exception:
+            pass
 
     # ===== SC 醒目留言（paid 类型） =====
     def _on_super_chat(self, client, message: web_models.SuperChatMessage):

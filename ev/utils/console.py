@@ -85,6 +85,21 @@ def report_status(**kwargs) -> None:
     _tui_emit({"type": "status", **kwargs})
 
 
+# 纯打断哨兵：TUI 发 {"method":"interrupt"} 时 read_input 返回它，
+# ChatHandler 据此走「打断但不携带新输入」分支（正常输入不可能含 NUL）。
+EV_INTERRUPT_SENTINEL = "\x00__EV_INTERRUPT__\x00"
+
+
+def report_meta(**kwargs) -> None:
+    """TUI 模式元信息事件（公开接口）：mode/model/version/tts/avatar 等。
+
+    启动完成后调用一次；TUI 用它渲染顶栏与状态行徽标。非 TUI 模式 no-op。
+    """
+    if not IS_TUI:
+        return
+    _tui_emit({"type": "meta", **kwargs})
+
+
 def read_input(prompt: str = "") -> str:
     """统一输入入口：TUI 模式从 stdin 读 JSON-RPC 请求，否则走 input()。
 
@@ -103,8 +118,12 @@ def read_input(prompt: str = "") -> str:
             return ""
         try:
             req = json.loads(line)
-            if isinstance(req, dict) and req.get("method") == "send":
-                return str(req.get("text", ""))
+            if isinstance(req, dict):
+                if req.get("method") == "send":
+                    return str(req.get("text", ""))
+                if req.get("method") == "interrupt":
+                    # TUI Esc 纯打断：返回哨兵（见 EV_INTERRUPT_SENTINEL）
+                    return EV_INTERRUPT_SENTINEL
         except Exception:
             # 非 JSON 或格式不符：当纯文本处理（兼容性兜底）
             return line
@@ -326,7 +345,8 @@ __all__ = [
     "BRIGHT_GREEN", "BRIGHT_YELLOW", "BRIGHT_MAGENTA", "BRIGHT_CYAN",
     "CHAT_TAG",
     # TUI 旁路
-    "IS_TUI", "read_input", "prompt_user", "report_status",
+    "IS_TUI", "read_input", "prompt_user", "report_status", "report_meta",
+    "EV_INTERRUPT_SENTINEL",
     # 输出互斥
     "output_lock",
     # 函数

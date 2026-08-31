@@ -464,8 +464,14 @@ class RuntimeHelpersMixin:
             # GSV 库 INFO 日志已在引擎 _load_model 压 root logger 到 WARNING
             # （不刷屏）；这里只对外报一行预热耗时
             _t0 = time.perf_counter()
-            await self.tts.warmup()
-            console.dim(f"TTS 预热完成，耗时 {time.perf_counter() - _t0:.1f}s")
+            _warm_ok = await self.tts.warmup()
+            _warm_dt = time.perf_counter() - _t0
+            if _warm_ok:
+                console.dim(f"TTS 预热完成，耗时 {_warm_dt:.1f}s")
+            else:
+                console.warn(
+                    f"TTS 预热未完成（已让路给真实合成，{_warm_dt:.1f}s）："
+                    "首句首块可能略慢，不影响功能")
         except Exception:
             pass
         if self.face is not None:

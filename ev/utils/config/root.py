@@ -10,7 +10,7 @@ from .dataclasses import (
     LLMConfig, ButlerConfig, MemoryConfig, KnowledgeConfig, AgentConfig,
     PersonaConfig, FilterConfig, ToolConfig, EvolutionConfig, VoiceConfig,
     VTSConfig, PetConfig, EmotionConfig, ProactiveConfig, DanmakuConfig,
-    MindcraftConfig, PathsConfig,
+    SocialConfig, MindcraftConfig, PathsConfig,
 )
 from .loaders import _LOADERS, _FIELD_GROUP
 from .env_loader import _PROJECT_ROOT, _SKIP_YAML_FIELDS
@@ -38,6 +38,7 @@ class Config:
     pet: PetConfig = field(default_factory=PetConfig)
     emotion: EmotionConfig = field(default_factory=EmotionConfig)
     proactive: ProactiveConfig = field(default_factory=ProactiveConfig)
+    social: SocialConfig = field(default_factory=SocialConfig)
     danmaku: DanmakuConfig = field(default_factory=DanmakuConfig)
     mindcraft: MindcraftConfig = field(default_factory=MindcraftConfig)
     paths: PathsConfig = field(default_factory=PathsConfig)

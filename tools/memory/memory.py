@@ -760,7 +760,10 @@ class MemoryManager:
             return
         started = time.monotonic()
         try:
-            service = self._ensure_service()
+            # _ensure_service 含 memU 惰性 import + service/sqlite 构建，
+            # 开机拥堵期可达数秒——放线程池执行，避免冻结事件循环
+            # （memory_tools 等路径本就在工作线程调用它，线程安全）
+            service = await asyncio.to_thread(self._ensure_service)
             await self._embed_batcher.embed(service, "预热")
             elapsed_ms = (time.monotonic() - started) * 1000
             console.dim(f"[记忆] 查询嵌入预热完成 {elapsed_ms:.0f}ms")

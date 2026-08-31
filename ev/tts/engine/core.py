@@ -203,6 +203,15 @@ class TTSEngine(BaseTTSAdapter):
         self._session = 0
         # P1-7：连续跳句计数（成功合成一句即清零）
         self._skip_streak = 0
+        # 并发防护：GSV 库的 async 接口统一用 _infer_lock 串行化推理，但同步
+        # infer_stream 生成器不拿锁——预热线程与 pump 线程一旦并发驱动同一批
+        # CUDA 模型（共享权重缓存 / CUDA Graph 静态 buffer），会触发
+        # device-side assert 把整个 CUDA context 打废，此后每句必失败。
+        # 引擎侧统一互斥（合成期间持 _infer_lock），真实语句到来时中止剩余预热。
+        self._warmup_abort = threading.Event()
+        # CUDA context 报废熔断：device-side assert 后同进程无法恢复，
+        # 置位后跳过所有合成（字幕降级为纯文字继续），不再每句刷错误
+        self._cuda_dead = False
         self._on_play_done: Optional[Callable] = None
         self._tts = None      # gsv_tts.TTS 实例（start() 时懒加载）
         self._play_clock = None  # 声卡消费进度时钟（_load_model 时挂载）
@@ -298,25 +307,46 @@ class TTSEngine(BaseTTSAdapter):
         console.ok(f"TTS 模型加载完成：{models_dir}")
         return True
 
-    async def warmup(self) -> None:
-        """启动预热：跑一遍完整流式合成链路（产物只走推理、不播放）。"""
+    async def warmup(self) -> bool:
+        """启动预热：跑一遍完整流式合成链路（产物只走推理、不播放）。
+
+        返回 False = 被真实语句打断（让路）或预热过程出错；不影响功能。
+        """
         if not self._ready or self._tts is None:
-            return
+            return True
         try:
-            await asyncio.to_thread(self._warmup_sync)
+            return await asyncio.to_thread(self._warmup_sync)
         except Exception as e:
             console.dim(f"TTS 预热失败（不影响后续合成）：{e}")
+            return False
 
-    def _warmup_sync(self) -> None:
+    def _warmup_sync(self) -> bool:
         """多样化预热：覆盖常见句长/标点形态，建立 cudnn 规划与分配器形状池。
 
         只用单一短句预热时，真实对话的多样句子仍会走冷路径
         （GPT 首 yield 可恶化到 ~600ms/句）。
+
+        互斥说明：GSV 同步 infer_stream 生成器内部无锁，预热若与 pump
+        线程的真实合成并发驱动同一批 CUDA 模型，会触发 device-side assert
+        （CUDA context 永久报废）。这里每条预热文本持 _infer_lock 执行；
+        真实语句入队时置 _warmup_abort，当前文本跑完立即让路。
         """
+        lock = getattr(self._tts, "_infer_lock", None)
         for _ in range(2):
             for text in _WARMUP_TEXTS:
-                for _ in self._stream(text):
-                    pass
+                if self._warmup_abort.is_set():
+                    return False
+                try:
+                    if lock is not None:
+                        lock.acquire()
+                    if self._warmup_abort.is_set():  # 等锁期间被打断
+                        return False
+                    for _ in self._stream(text):
+                        pass
+                finally:
+                    if lock is not None:
+                        lock.release()
+        return True
 
     def preheat(self) -> None:
         """每轮对话起始调用：本地进程内推理，链路已由 start/warmup 激活，立即返回。"""
@@ -383,38 +413,84 @@ class TTSEngine(BaseTTSAdapter):
             **_SYNTH_PARAMS,
         )
 
+    @staticmethod
+    def _classify_cuda_error(e: Exception) -> str:
+        """错误分类：'assert'（device-side assert，不可恢复）/'cuda'（其他
+        CUDA 错误）/''（非 CUDA）。"""
+        msg = str(e)
+        if "device-side assert" in msg or "cudaErrorAssert" in msg:
+            return "assert"
+        if "CUDA error" in msg:
+            return "cuda"
+        return ""
+
     def _synth_one(self, text: str, sfx: str = None) -> None:
         """（pump 线程）流式合成单句：每块写入 GSV AudioQueue 播放 + 字幕推送。"""
         tts = self._tts
         if tts is None:
             return
+        if self._cuda_dead:
+            # 熔断后语音不可恢复；字幕继续推原文（读稿模式），直播不哑场
+            try:
+                self._subtitle_queue.push_text(text)
+            except Exception:
+                pass
+            return
         # P2-4：快照代次号——被打断后 session 变化，本循环立即作废退出，
         # 不再依赖 _interrupted 标志（新轮 clear 会复位它导致旧句复播）
         session = self._session
+        # 真实语句到来：中止剩余预热，并等待其当前文本跑完。持 _infer_lock
+        # 保证预热/合成永不并发（并发驱动同一批 CUDA 模型 → device-side assert）
+        self._warmup_abort.set()
+        lock = getattr(tts, "_infer_lock", None)
         try:
-            gen = self._stream(text)
-            sid = self._player.begin_stream(tts.samplerate, text, gen)
-            # 本句播放进度时钟：在首块 play()（投喂声卡）之前取锚，
-            # 时钟 0 点 = 本句首样本开始被设备消费（上一句尾音/合成
-            # 间隙不计入）→ 字幕按真实播放进度上屏，不抢跑
-            clock = self._play_clock.sentence_clock() if self._play_clock else None
-            chunk_idx = 0
-            for audio in gen:
-                if self._interrupted.is_set() or self._session != session:
-                    break
-                sr = int(getattr(audio, "samplerate", 0) or tts.samplerate)
-                self._player.emit(audio, sr, text, getattr(audio, "subtitles", None), gen)
-                self._player._emit_block(audio, sr, sid, chunk_idx, gen)
-                chunk_idx += 1
-                subs = getattr(audio, "subtitles", None)
-                if subs:
-                    self._subtitle_queue.add(subs, text, clock)
-            else:
-                self._skip_streak = 0  # 完整合成成功：清零连续跳句计数
+            if lock is not None:
+                lock.acquire()
+            try:
+                gen = self._stream(text)
+                sid = self._player.begin_stream(tts.samplerate, text, gen)
+                # 本句播放进度时钟：在首块 play()（投喂声卡）之前取锚，
+                # 时钟 0 点 = 本句首样本开始被设备消费（上一句尾音/合成
+                # 间隙不计入）→ 字幕按真实播放进度上屏，不抢跑
+                clock = self._play_clock.sentence_clock() if self._play_clock else None
+                chunk_idx = 0
+                for audio in gen:
+                    if self._interrupted.is_set() or self._session != session:
+                        break
+                    sr = int(getattr(audio, "samplerate", 0) or tts.samplerate)
+                    self._player.emit(audio, sr, text, getattr(audio, "subtitles", None), gen)
+                    self._player._emit_block(audio, sr, sid, chunk_idx, gen)
+                    chunk_idx += 1
+                    subs = getattr(audio, "subtitles", None)
+                    if subs:
+                        self._subtitle_queue.add(subs, text, clock)
+                else:
+                    self._skip_streak = 0  # 完整合成成功：清零连续跳句计数
+            finally:
+                if lock is not None:
+                    lock.release()
         except Exception as e:
             # P1-7 修复：跳句必须醒目告警（原 console.dim 一闪而过，OOM 也静默）
             self._skip_streak += 1
             streak = self._skip_streak
+            kind = self._classify_cuda_error(e)
+            # device-side assert = CUDA context 已报废，同进程不可能恢复：
+            # 立即熔断止损（否则每句重复报错，直播全程无声且刷屏）
+            if kind == "assert" or (kind == "cuda" and streak >= 2):
+                self._cuda_dead = True
+                reason = (
+                    "device-side assert（CUDA 上下文已损坏）" if kind == "assert"
+                    else "连续 CUDA 错误（上下文疑似损坏）")
+                console.error(
+                    f"⚠️ TTS 语音输出已熔断：{reason}\n  本句报错：{e}\n"
+                    "  同进程内无法恢复，请重启程序；字幕将降级为纯文字继续显示")
+                try:
+                    self._subtitle_queue.push_text(
+                        "（我的语音引擎出了点问题，接下来暂时只能打字了…）")
+                    self._subtitle_queue.push_text(text)
+                except Exception:
+                    pass
+                return
             if streak >= 3:
                 console.error(
                     f"⚠️ TTS 已连续 {streak} 句合成失败！本句跳过：{e}\n"

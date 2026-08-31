@@ -55,7 +55,7 @@ class BaseEmotionActor:
         self._motions: Dict[str, int] = {}
         self._map: Dict[str, Dict[str, str]] = {}
         self._classifier: "EmbeddingEmotionClassifier | None" = None
-        # 规则情绪分类器（纯正则、零开销）：AI 回复逐句情绪判断用
+        # 向量情绪分类器（Embedding 实现）：AI 回复逐句情绪判断用
         self._rule_classifier = MessageReaction()
 
     # ---------- 启动扫描（子类实现） ----------
@@ -117,7 +117,12 @@ class BaseEmotionActor:
                             "（仍可用 /expr /motion 手动控制）")
                 return False
             self._classifier = EmbeddingEmotionClassifier(provider)
-        return await self._classifier.initialize()
+        ok = await self._classifier.initialize()
+        if ok:
+            # 复用同一 embedding 分类器给规则情绪分类器（向量版），
+            # 避免 handle_rule 再重复 embed 一遍语料。
+            self._rule_classifier.set_classifier(self._classifier)
+        return ok
 
     async def handle(self, text: str) -> str:
         """处理一条输入：分类情绪并播放映射。
@@ -141,11 +146,10 @@ class BaseEmotionActor:
         return played
 
     async def handle_rule(self, text: str) -> str:
-        """按句判断情绪（规则分类，零开销）并播放映射：AI 回复逐句用。
+        """按句判断情绪（向量分类）并播放映射：AI 回复逐句用。
 
-        与 handle() 的区别：只做规则情绪分类 → 播放该情绪绑定的表情/动作，
-        不匹配手动命令（回复内容不是用户指令），不需要 Embedding 服务
-        （离线可用、无网络/初始化依赖）。
+        与 handle() 的区别：只做向量情绪分类 → 播放该情绪绑定的表情/动作，
+        不匹配手动命令（回复内容不是用户指令）。
         返回播放描述文本（空串表示未播放）。
         """
         text = (text or "").strip()

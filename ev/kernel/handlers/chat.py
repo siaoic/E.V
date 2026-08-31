@@ -84,7 +84,11 @@ class ChatHandler(BaseHandler):
                             input_fut = None
                             continue
                         got_input = True
-                        if not buzz.strip():
+                        if buzz == console.EV_INTERRUPT_SENTINEL:
+                            # TUI 纯打断（Esc）：清空文本直接落入打断分支，
+                            # 不走下方「空输入忽略」（否则打断信号被吞）
+                            buzz = ""
+                        elif not buzz.strip():
                             watch.discard(input_fut)
                             input_fut = loop.run_in_executor(None, console.read_input)
                             watch.add(input_fut)

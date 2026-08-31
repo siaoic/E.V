@@ -294,6 +294,14 @@ class EmbeddingEmotionClassifier:
                 best_emotion, best_score = emotion, score
         return EmotionIntent(best_emotion, best_score)
 
+    def initialize_sync(self) -> bool:
+        """同步初始化（经常驻后台事件循环桥接；供同步调用方使用）。"""
+        return _run_sync(self.initialize())
+
+    def classify_sync(self, text: str) -> EmotionIntent:
+        """同步版 classify（经常驻后台事件循环桥接；供同步调用方使用）。"""
+        return _run_sync(self.classify(text))
+
 
 __all__ = [
     "SiliconFlowEmbeddingProvider",

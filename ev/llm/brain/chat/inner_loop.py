@@ -212,6 +212,25 @@ async def _run_chat_stream_inner(
         if patch_section:
             sections.append((True, patch_section))
 
+    # 11. 拟人化层段（stable，低频变化；ev.social，EV-Anthropomorphic 方案）：
+    #     [SILENT]/[END] 标记协议 + 弹幕词表召回。开关关闭或无内容时为空，
+    #     行为与升级前完全一致；任何失败 bypass 不影响对话。
+    try:
+        from ev.utils import config as _social_cfg
+        if getattr(_social_cfg.cfg, "SOCIAL_SILENCE_ENABLED", True):
+            from ev.social.silence import build_silence_prompt_patch
+            _rate = getattr(_social_cfg.cfg, "SOCIAL_SILENCE_RATE_TARGET", 0.2)
+            _patch = build_silence_prompt_patch(target_rate=_rate)
+            if _patch:
+                sections.append((True, _patch))
+        if getattr(_social_cfg.cfg, "SOCIAL_LEARNING_ENABLED", True):
+            from ev.social.learning import build_lexicon_prompt_patch
+            _lex = build_lexicon_prompt_patch()
+            if _lex:
+                sections.append((True, _lex))
+    except Exception:
+        pass
+
     if self.cfg.PROMPT_CACHE_MODE:
         # 缓存友好：stable 段作前缀（字节稳定可命中服务端前缀缓存），
         # volatile 段作尾部（每轮重建，只影响后缀）

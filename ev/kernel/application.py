@@ -46,6 +46,15 @@ class Application:
         runtime = RuntimeContext(cfg)
         await runtime.setup()
 
+        # 拟人化层（ev.social，EV-Anthropomorphic 方案）：加载状态 + 注册
+        # 发言工具 + 接线主动引擎/学习判定器。完全事件驱动（无 tick_loop），
+        # 失败彻底 bypass（不影响主程序）。
+        try:
+            from ev.social.bootstrap import bootstrap as social_bootstrap
+            await social_bootstrap(runtime)
+        except Exception as e:
+            console.dim(f"[social] bootstrap 失败（忽略，行为回落原 E.V）：{e}")
+
         # TUI 模式：启动后立即推送模型信息到状态栏
         if console.IS_TUI:
             try:
@@ -53,6 +62,23 @@ class Application:
                     model=cfg.LLM_MODEL or "",
                     working=False,
                     ctx_total=getattr(cfg, "CONTEXT_WINDOW", 0) or 0,
+                )
+            except Exception:
+                pass
+
+        # TUI 模式：推送元信息（顶栏/状态行徽标：模式、TTS、版本）
+        if console.IS_TUI:
+            try:
+                from ev.utils.config import cfg as _cfg
+                _ev_version = getattr(_cfg, "VERSION", "") or ""
+            except Exception:
+                _ev_version = ""
+            try:
+                console.report_meta(
+                    mode="tui",
+                    model=cfg.LLM_MODEL or "",
+                    version=_ev_version,
+                    tts=runtime.tts is not None,
                 )
             except Exception:
                 pass

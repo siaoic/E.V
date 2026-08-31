@@ -104,14 +104,14 @@ class NudgeEngine:
 
     def __init__(
         self,
-        long_silence_sec: float = 30.0,
-        silent_too_long_sec: float = 300.0,
+        long_silence_sec: float = 10.0,
+        silent_too_long_sec: float = 30.0,
         many_unread_threshold: int = 5,
         burst_threshold: int = 10,
-        burst_window_sec: float = 30.0,
-        nudge_cooldown_sec: float = 30.0,
-        repeat_gap_sec: float = 60.0,
-        state_change_window_sec: float = 30.0,
+        burst_window_sec: float = 15.0,
+        nudge_cooldown_sec: float = 10.0,
+        repeat_gap_sec: float = 20.0,
+        state_change_window_sec: float = 25.0,
         window_cap: int = 3,
     ) -> None:
         # ---- 阈值配置 ----

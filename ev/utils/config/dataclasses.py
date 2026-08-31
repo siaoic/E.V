@@ -291,6 +291,35 @@ class ProactiveConfig:
 
 
 @dataclass
+class SocialConfig:
+    """拟人化层（ev.social，参考 EV-Anthropomorphic 方案）：潜水/参与度/学习等。
+
+    全部开关默认与参考实现一致；任何模块失败 bypass 回原 E.V 行为。
+    """
+    SOCIAL_EVENT_DRIVEN: bool = True         # 完全事件驱动（wake 状态持久化）
+    SOCIAL_ENGAGEMENT_ENABLED: bool = True   # 参与度状态机
+    SOCIAL_ENGAGEMENT_DEFAULT_STATE: str = "observe"
+    SOCIAL_ENGAGEMENT_ACTIVE_DENSITY: int = 5    # 60s 弹幕数 > 此值 → active
+    SOCIAL_ENGAGEMENT_EXIT_AFTER: int = 180      # active 态 0 弹幕持续秒数 → exit
+    SOCIAL_ENGAGEMENT_SLEEP_HOUR: int = 24       # 深夜休眠小时（24 = 不启用）
+    SOCIAL_DELIBERATION_ENABLED: bool = False    # 弹幕选择性决策（与挑选器并存，默认关）
+    SOCIAL_QUOTE_ENABLED: bool = True            # 引用回复检测
+    SOCIAL_QUOTE_EXTRA_NAMES: str = ""           # 追加人设名（逗号分隔）
+    SOCIAL_QUOTE_INTEREST_KEYWORDS: str = ""     # 兴趣关键词（逗号分隔）
+    SOCIAL_QUOTE_BLOCKED_KEYWORDS: str = ""      # 黑名单关键词（逗号分隔）
+    SOCIAL_QUOTE_RECENT_WINDOW_SEC: float = 300  # 引用上一条的时效窗口
+    SOCIAL_SILENCE_ENABLED: bool = True          # [SILENT]/[END] 标记协议
+    SOCIAL_SILENCE_RATE_TARGET: float = 0.20     # 目标 [SILENT] 率
+    SOCIAL_LEARNING_ENABLED: bool = True         # 社会学习（弹幕新词词库）
+    SOCIAL_LEARNING_SKIP_SC: bool = True         # 跳过 SC 内容（隐私）
+    SOCIAL_LEARNING_MIN_FREQ: int = 3            # 候选词沉淀最低频次
+    SOCIAL_LEARNING_MAX_LEXICON_SIZE: int = 200  # 词库上限
+    SOCIAL_LEARNING_TTL_DAYS: int = 30           # 词条过期天数
+    SOCIAL_LEARNING_PURGE_TODAY: bool = False    # 启动时清空词库（调试）
+    TOOL_SOCIAL_SPEAK_ENABLED: bool = True       # 4 个发言工具暴露给 LLM
+
+
+@dataclass
 class DanmakuConfig:
     """B 站直播弹幕（blivedm → SSE 弹幕气泡网页）。"""
     BILI_ENABLED: bool = True

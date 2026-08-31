@@ -195,3 +195,7 @@ tools/everyonepiano_crawler/output/
 
 # ================= OMR 谱面裁剪产物（可由原图再生成，不入库） =================
 /钢琴谱/
+
+# TUI 第三方发行版（体积大，本地使用不入库）
+dsh-TUI-main/
+dsh-TUI-main.zip
