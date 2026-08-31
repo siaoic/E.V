@@ -100,6 +100,37 @@ class RuntimeHelpersMixin:
 
         picker = DanmakuPicker(_on_pick, on_batch_reply_callback=_on_batch_pick)
         set_danmaku_picker(picker)
+
+        # 弹幕观察器：全量观察（只看不回）+ 刷屏规律触发回复。
+        # 触发回调与优选弹幕走同一条入队/回复管线（忙碌自动避让）。
+        try:
+            from ev.utils import config as _obs_cfg
+            if getattr(_obs_cfg.cfg, "DANMAKU_OBSERVER_ENABLED", True):
+                from ev.danmaku.observer import get_observer
+                observer = get_observer()
+                observer.reset()
+
+                def _enqueue_pattern(hit) -> None:
+                    # bili 线程调用：忙碌避让（不抢当前播报/回复），
+                    # 合成一条「系统观察」弹幕走既有管线
+                    from ev.kernel.output_lock import (
+                        get_output_lock, is_danmaku_pending,
+                    )
+                    if get_output_lock().locked() or is_danmaku_pending():
+                        console.dim(
+                            f"[弹幕观察] 忙碌，跳过刷屏回复"
+                            f"（「{hit.pattern}」×{hit.count}）")
+                        return
+                    item = (0, "弹幕流观察", hit.describe())
+                    console.dim(
+                        f"[弹幕观察] 刷屏触发回复：「{hit.pattern}」"
+                        f"×{hit.count}（{hit.users} 人）")
+                    _enqueue([item])
+
+                observer.bind_pattern_sink(_enqueue_pattern)
+        except Exception as e:
+            console.dim(f"[弹幕观察] 初始化失败（忽略）：{e}")
+
         task = asyncio.create_task(
             self._danmaku_reply_loop(queue),
             name="danmaku_reply_loop",
@@ -138,38 +169,46 @@ class RuntimeHelpersMixin:
                 record_feedback("barrage", "negative", text)
         except Exception:
             pass
-        if extra:
-            shown = f"{text}（等{extra}条弹幕）"
-        else:
-            shown = text
-        console.chat(f"精彩弹幕：{shown}")
-        await bus.emit(EV_USER_INPUT, InputEvent(
-            source="barrage", content=shown, sender=username,
-            metadata={"uid": uid, "extra": extra}))
-        if self.bili_svc is not None:
-            try:
-                self.bili_svc.broadcast({
-                    "type": "reply",
-                    "username": username,
-                    "text": shown,
-                    "uid": uid,
-                })
-            except Exception:
-                pass
+        # 观察弹幕流背景（只看不回）：让 AI 带全场语境回复优选，
+        # 而不是只看到被挑中的那几条。排除本批回复目标避免重复。
+        observe_block = ""
+        try:
+            from ev.utils import config as _obs_cfg
+            if getattr(_obs_cfg.cfg, "DANMAKU_OBSERVER_ENABLED", True):
+                from ev.danmaku.observer import get_observer
+                _exclude = {t for _, _, t in items}
+                _sec = float(getattr(_obs_cfg.cfg,
+                                     "DANMAKU_OBSERVE_CONTEXT_SEC", 60))
+                _max = int(getattr(_obs_cfg.cfg,
+                                   "DANMAKU_OBSERVE_CONTEXT_MAX", 20))
+                recent = get_observer().snapshot(
+                    window_sec=_sec, limit=_max, exclude_texts=_exclude)
+                if recent:
+                    lines = "\n".join(f"- {n}：{t}" for n, t in recent)
+                    observe_block = (
+                        f"\n[你一直在看弹幕流（最近 {_sec:.0f} 秒，背景信息，"
+                        f"用于理解直播间现在的氛围和梗，绝对不要逐条回应它们）]"
+                        f"\n{lines}\n"
+                        f"[如果大家最近在刷同一句话，可以顺势接一句热闹的。]"
+                    )
+        except Exception:
+            observe_block = ""
 
         if extra:
             danmaku_lines = "\n".join(
                 f"- 观众{nick}：{t}" for _, nick, t in items)
             wrapped = (
                 f"[系统提示] 现在你在直播间，刚收到几条观众弹幕，请合并回应"
-                f"（不要逐条念，抓住共同话题自然地回一句）。\n{danmaku_lines}\n"
+                f"（不要逐条念，抓住共同话题自然地回一句）。\n{danmaku_lines}"
+                f"{observe_block}\n"
                 f"请用 stream-chat 技能的直播闲聊风格回复（先回应情绪或接话，"
                 f"一句话说完即可，不要连续追问）。"
             )
         else:
             wrapped = (
                 f"[系统提示] 现在你在直播间，收到观众弹幕请自然地回一句。"
-                f"观众昵称：{username}，弹幕内容：\n{text}\n"
+                f"观众昵称：{username}，弹幕内容：\n{text}"
+                f"{observe_block}\n"
                 f"请用 stream-chat 技能的直播闲聊风格回复（先回应情绪或接话，"
                 f"一句话说完即可，不要连续追问）。"
             )

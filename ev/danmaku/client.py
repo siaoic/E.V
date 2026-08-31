@@ -210,6 +210,15 @@ class _BiliDanmakuHandler(blivedm.BaseHandler):
         picker = get_danmaku_picker()
         if picker is not None:
             picker.submit(uid=uid, username=uname, text=text)
+        # 弹幕观察器：全量进滚动缓冲（只看不回）——回复优选时注入为
+        # 背景上下文；同句刷屏等规律命中时经 sink 触发一次回复
+        try:
+            from ev.utils import config as _obs_cfg
+            if getattr(_obs_cfg.cfg, "DANMAKU_OBSERVER_ENABLED", True):
+                from ev.danmaku.observer import get_observer
+                get_observer().observe(text, username=uname, uid=uid)
+        except Exception:
+            pass
         # 契机引擎埋点（Neuro 风格）：未读堆积/弹幕爆发 → 触发主动开口契机
         try:
             from ev.llm.proactive import nudge as _proactive_nudge

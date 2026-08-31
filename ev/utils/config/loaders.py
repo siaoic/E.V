@@ -277,6 +277,22 @@ _DANMAKU_LOADERS = {
     "BILI_ROOM_IDS": lambda: _get_room_ids(),
     "BILI_SESSDATA": lambda: os.getenv("BILI_SESSDATA") or "",
     "BILI_SERVER_PORT": lambda: int(os.getenv("BILI_SERVER_PORT") or "8766"),
+    # —— 弹幕观察器 ——
+    "DANMAKU_OBSERVER_ENABLED": lambda: _get_bool("DANMAKU_OBSERVER_ENABLED", True),
+    "DANMAKU_OBSERVE_CONTEXT_SEC": lambda: float(
+        os.getenv("DANMAKU_OBSERVE_CONTEXT_SEC") or "60"),
+    "DANMAKU_OBSERVE_CONTEXT_MAX": lambda: int(
+        os.getenv("DANMAKU_OBSERVE_CONTEXT_MAX") or "20"),
+    "DANMAKU_OBSERVE_BUFFER_MAX": lambda: int(
+        os.getenv("DANMAKU_OBSERVE_BUFFER_MAX") or "60"),
+    "DANMAKU_FLOOD_WINDOW_SEC": lambda: float(
+        os.getenv("DANMAKU_FLOOD_WINDOW_SEC") or "15"),
+    "DANMAKU_FLOOD_MIN_COUNT": lambda: int(
+        os.getenv("DANMAKU_FLOOD_MIN_COUNT") or "5"),
+    "DANMAKU_FLOOD_MIN_USERS": lambda: int(
+        os.getenv("DANMAKU_FLOOD_MIN_USERS") or "2"),
+    "DANMAKU_FLOOD_COOLDOWN_SEC": lambda: float(
+        os.getenv("DANMAKU_FLOOD_COOLDOWN_SEC") or "180"),
 }
 
 _MINDCRAFT_LOADERS = {
@@ -402,6 +418,10 @@ _ALL_HOT_FIELDS = _TOOL_HOT_FIELDS + (
     "EMOTION_ACTOR_ENABLED",
     "BILI_ENABLED", "BILI_ROOM_ID", "BILI_ROOM_IDS",
     "BILI_SESSDATA", "BILI_SERVER_PORT",
+    "DANMAKU_OBSERVER_ENABLED", "DANMAKU_OBSERVE_CONTEXT_SEC",
+    "DANMAKU_OBSERVE_CONTEXT_MAX", "DANMAKU_OBSERVE_BUFFER_MAX",
+    "DANMAKU_FLOOD_WINDOW_SEC", "DANMAKU_FLOOD_MIN_COUNT",
+    "DANMAKU_FLOOD_MIN_USERS", "DANMAKU_FLOOD_COOLDOWN_SEC",
 )
 
 __all__ = [

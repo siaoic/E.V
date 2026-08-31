@@ -321,12 +321,21 @@ class SocialConfig:
 
 @dataclass
 class DanmakuConfig:
-    """B 站直播弹幕（blivedm → SSE 弹幕气泡网页）。"""
+    """B 站直播弹幕（blivedm → SSE 弹幕气泡网页）+ 弹幕观察器。"""
     BILI_ENABLED: bool = True
     BILI_ROOM_ID: int = 0
     BILI_ROOM_IDS: list = field(default_factory=list)
     BILI_SESSDATA: str = ""
     BILI_SERVER_PORT: int = 8766
+    # —— 弹幕观察器（全量观察只看不回 + 刷屏规律触发回复）——
+    DANMAKU_OBSERVER_ENABLED: bool = True        # 总开关
+    DANMAKU_OBSERVE_CONTEXT_SEC: float = 60.0    # 回复时注入的观察窗口
+    DANMAKU_OBSERVE_CONTEXT_MAX: int = 20        # 注入上下文最多条数
+    DANMAKU_OBSERVE_BUFFER_MAX: int = 60         # 滚动缓冲容量
+    DANMAKU_FLOOD_WINDOW_SEC: float = 15.0       # 刷屏检测窗口
+    DANMAKU_FLOOD_MIN_COUNT: int = 5             # 触发最少条数
+    DANMAKU_FLOOD_MIN_USERS: int = 2             # 触发最少不重复观众
+    DANMAKU_FLOOD_COOLDOWN_SEC: float = 180.0    # 同 pattern 触发冷却
 
 
 @dataclass
