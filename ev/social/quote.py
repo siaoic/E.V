@@ -235,27 +235,17 @@ def build_quote_context(signal: QuoteSignal, last_ai_msg: Optional[dict] = None)
     parts = []
     
     if signal.is_quoted and last_ai_msg:
-        parts.append(f"## 用户引用了你上一条\n{last_ai_msg.get('text', '')}\n\n请接着这个话茬继续。")
-    
+        parts.append(f"[用户引用了你上一条：{last_ai_msg.get('text', '')}——接着话茬继续]")
     if signal.is_at_me:
-        parts.append("## 用户 @ 了你\n请正面回应,不要沉默。")
-    
+        parts.append("[用户 @ 了你，必须正面回应，禁止沉默]")
     if signal.mentions_name and not signal.is_at_me:
-        parts.append(
-            f"## 用户提到了你的人设名({signal.matched_name or '你的名字'})\n"
-            f"请用第一人称回应,不要破功。"
-        )
-    
+        parts.append(f"[用户叫了你的名字（{signal.matched_name or ''}），第一人称回应别破功]")
     if signal.is_superchat:
-        parts.append(
-            f"## 醒目留言(SC)\n"
-            f"请认真回应,语气尊重。"
-        )
-    
+        parts.append("[醒目留言 SC，认真回应]")
     if signal.is_gift:
-        parts.append("## 用户送出了礼物\n请致谢。")
+        parts.append("[用户送了礼物，记得致谢]")
     
-    return "\n\n".join(parts)
+    return "\n".join(parts)
 
 
 # ===== 状态机唤醒 =====

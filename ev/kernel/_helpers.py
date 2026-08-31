@@ -186,10 +186,8 @@ class RuntimeHelpersMixin:
                 if recent:
                     lines = "\n".join(f"- {n}：{t}" for n, t in recent)
                     observe_block = (
-                        f"\n[你一直在看弹幕流（最近 {_sec:.0f} 秒，背景信息，"
-                        f"用于理解直播间现在的氛围和梗，绝对不要逐条回应它们）]"
-                        f"\n{lines}\n"
-                        f"[如果大家最近在刷同一句话，可以顺势接一句热闹的。]"
+                        f"\n[弹幕流背景（最近 {_sec:.0f}s，只看不用逐条回；大家在刷同一句时可顺势接一句）]"
+                        f"\n{lines}"
                     )
         except Exception:
             observe_block = ""
@@ -198,19 +196,15 @@ class RuntimeHelpersMixin:
             danmaku_lines = "\n".join(
                 f"- 观众{nick}：{t}" for _, nick, t in items)
             wrapped = (
-                f"[系统提示] 现在你在直播间，刚收到几条观众弹幕，请合并回应"
-                f"（不要逐条念，抓住共同话题自然地回一句）。\n{danmaku_lines}"
-                f"{observe_block}\n"
-                f"请用 stream-chat 技能的直播闲聊风格回复（先回应情绪或接话，"
-                f"一句话说完即可，不要连续追问）。"
+                f"[直播间] 几条弹幕合并回一句（别逐条念，抓共同话题）。"
+                f"{danmaku_lines}"
+                f"{observe_block}"
             )
         else:
             wrapped = (
-                f"[系统提示] 现在你在直播间，收到观众弹幕请自然地回一句。"
-                f"观众昵称：{username}，弹幕内容：\n{text}"
-                f"{observe_block}\n"
-                f"请用 stream-chat 技能的直播闲聊风格回复（先回应情绪或接话，"
-                f"一句话说完即可，不要连续追问）。"
+                f"[直播间] 弹幕请自然回一句（先接情绪，一句话，别追问）。"
+                f"{username}：{text}"
+                f"{observe_block}"
             )
 
         if self.plugin_manager is not None:

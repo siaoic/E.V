@@ -365,17 +365,11 @@ class ProactiveEngine:
         topic_hint = (f"可以顺着这个灵感话题聊：{topic['concept']}"
                       if topic is not None else "也可以自己决定想聊什么")
         prompt = (
-            "现在是直播间的「静默时刻」。没有任何Cue，没有任何救场需求。\n"
-            "你不是在答题，你是在决定「此刻这个灵魂」想不想暴露在麦克风前。\n\n"
-            "请根据你当下的人设状态，从以下三种「心流路径」中选一条执行：\n"
-            "1. 如果觉得无聊或疲惫 -> 输出 <SILENT>（保持沉默不丢人，避免水词）\n"
-            "2. 如果心里有句憋不住的骚话/吐槽 -> 直接说（1-3句，带点冒犯或自嘲）\n"
-            "3. 如果想找存在感 -> 用「反常规逻辑」解构那个灵感锚点（哪怕硬拐都行）\n\n"
-            "--- 执行红线（根据历史经验修正） ---\n"
-            "- 拒绝「你好吗」「今天天气」式的水词问候。\n"
-            "- 拒绝教科书式的正面说教。如果话题涉及对立，用「诗意悖论」或「科学梗」消解，别站队。\n"
-            "- 如果灵感锚点太无聊，允许你极端歪曲它，制造「地狱笑话」或「荒诞跳转」。\n"
-            "- 玩梗可以挑衅，但收尾必须用夸张的「自我解构」把攻击性卸掉。\n\n"
+            "[静默时刻] 没人说话，由你决定开不开口：\n"
+            "1. 累/无聊 -> <SILENT>\n"
+            "2. 想吐槽/骚话 -> 直接说 1~3 句（自嘲/冒犯随意）\n"
+            "3. 找存在感 -> 用反常规逻辑解构灵感锚点\n"
+            "红线：禁水词问候；禁说教；玩梗挑衅后用自我解构收尾。\n"
             f"{topic_hint}\n"
         )
         prompt += self._context_block(
@@ -389,23 +383,15 @@ class ProactiveEngine:
         """拼装契机上下文段：本次开口机会从哪来 + 强制开口声明。"""
         lines = []
         if mode == "request":
-            lines.append("\n--- 本次开口机会的来源 ---")
-            lines.append("这是你自己调用 request_speak 申请来的发言机会，"
-                         "系统不会再来问你了，这是你的场。")
+            lines.append("\n[主动申请] 你的场，说不说由你")
             if request_reason:
-                lines.append(f"你的申请理由：{request_reason}")
+                lines.append(f"理由：{request_reason}")
         else:
-            lines.append("\n--- 系统契机（Neuro 式提醒，非命令）---")
-            if nudge is not None:
-                lines.append(f"契机类型：{nudge.reason.value}")
-                if nudge.prompt_hint:
-                    lines.append(f"契机提示：{nudge.prompt_hint}")
-            elif nudge_reason:
-                lines.append(f"契机类型：{nudge_reason}")
-            lines.append("契机只是提醒，说不说仍由你决定；"
-                         "无话可说时请虔诚地输出 <SILENT>。")
+            kind = nudge.reason.value if nudge else nudge_reason
+            hint = nudge.prompt_hint if nudge else ""
+            if kind:
+                lines.append(f"[契机] {kind} {hint}".rstrip())
+            lines.append("说与不说仍由你决定；无话可说 -> <SILENT>")
         if force:
-            lines.append(
-                "\n【强制开口】直播间已安静超过 25 秒，"
-                "此刻必须开口说点什么，禁止输出 <SILENT> 或任何沉默表达。")
+            lines.append("[强制] 静默 >25s，必须开口，禁止 <SILENT>")
         return "\n".join(lines) + "\n"

@@ -298,8 +298,16 @@ def render_tool_guide(tools: List[dict]) -> str:
         if not name:
             continue
         description = " ".join(description.split())
+        # prefill 减负：指南里只保留首句（完整描述已在 function defs 里，
+        # 指南只是"何时用哪个"的索引，长描述重复占 token）
+        for sep in ("。", "；", ";", ". ", "！", "!", "？", "?", "）"):
+            if sep in description:
+                description = description.split(sep, 1)[0] + ("。" if sep != ". " else ".")
+                break
+        if len(description) > 50:
+            description = description[:50] + "…"
         entries.append(f"- {name}: {description}")
     if not entries:
         return ""
-    return ("可用工具（工具名 + 使用时机，情境匹配时优先调用）：\n"
+    return ("可用工具（名字 + 何时用；详情见工具 schema）：\n"
             + "\n".join(entries))

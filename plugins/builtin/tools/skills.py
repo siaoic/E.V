@@ -301,11 +301,8 @@ class SkillManager:
         if not skills:
             return ""
         lines = [
-            "技能使用指引（按需加载、情境匹配才用）：",
-            "1. 对话情境与某个技能的触发时机匹配时，先用 load_skill 加载该技能完整指令，再按它执行；技能名须与下方完全一致",
-            "2. 技能涉及细节资源时，再用 read_skill_resource 按相对路径按需读取",
-            "3. 没有任何技能匹配时正常对话，不要强行套用技能",
-            "可用技能（技能名 + 触发时机）：",
+            "技能（名字 + 触发时机；情境匹配时先 load_skill 加载再执行，"
+            "无匹配就正常聊，别硬套）：",
         ]
         lines.extend(f"- {s.name}: {s.description}" for s in skills)
         return "\n".join(lines)

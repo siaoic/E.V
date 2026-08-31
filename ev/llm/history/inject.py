@@ -96,9 +96,8 @@ class _InjectionMixin:
                 blocks.append(block)
         if not blocks:
             return ""
-        return ("### 长期记忆（跨会话持久，当前会话内冻结不更新）\n"
-                "以下是从 MEMORY.md / USER.md 读取的稳定事实，"
-                "回答时自然融入，不要机械复述：\n"
+        return ("### 长期记忆（跨会话稳定事实，会话内冻结）\n"
+                "（自然融入，别复述）\n"
                 + "\n\n".join(blocks))
 
     # ---------- 观众画像注入（进化引擎复盘的长期事实，关键词召回） ----------

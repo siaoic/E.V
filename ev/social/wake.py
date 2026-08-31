@@ -322,15 +322,14 @@ def clear_listeners() -> None:
 
 # ===== 工具函数(给 MCP 暴露) =====
 def get_tool_definitions() -> list:
-    """返回可暴露给 LLM 的工具定义(给 MCP server 用)。"""
+    """返回可暴露给 LLM 的工具定义（prefill 减负：description 一句话）。"""
     return [
         {
             "name": "set_wake_config",
             "description": (
-                "设置你自己的唤醒/潜水策略。"
-                "当你不想被打扰时,设 diving 模式并指定 sleep_seconds;"
-                "triggers 决定什么事件会叫醒你(被 @、叫名字、提问、戳一下、命中关键词,以及普通消息的随机唤醒概率)。"
-                "想回到 active 模式时,调 cancel_wake。"
+                "设置你自己的潜水/唤醒策略：不想被打扰时设 diving 并给 "
+                "sleep_seconds；triggers 决定什么事件能叫醒你（@/叫名/提问/"
+                "戳一下/关键词/随机概率）。"
             ),
             "input_schema": {
                 "type": "object",
@@ -338,78 +337,56 @@ def get_tool_definitions() -> list:
                     "mode": {
                         "type": "string",
                         "enum": ["active", "diving", "infinite"],
-                        "description": "active=正常参与;diving=潜水但能被触发条件叫醒;infinite=无限期潜水",
+                        "description": "active=正常参与;diving=潜水可被叫醒;infinite=无限潜水",
                     },
                     "sleep_seconds": {
                         "type": "integer",
-                        "description": "潜水秒数,0=不设时间限制(由 triggers 决定何时醒)",
+                        "description": "潜水秒数,0=不限(由 triggers 决定)",
                     },
                     "triggers": {
                         "type": "object",
-                        "description": "触发条件字典",
+                        "description": "唤醒条件",
                         "properties": {
                             "at_mention": {"type": "boolean", "description": "@ 我时醒"},
                             "name_mention": {"type": "boolean", "description": "叫我名字时醒"},
                             "question": {"type": "boolean", "description": "提问时醒"},
                             "poke": {"type": "boolean", "description": "戳一顿时醒"},
-                            "probability": {"type": "number", "description": "普通消息随机唤醒概率,0~1"},
+                            "probability": {"type": "number", "description": "普通消息随机唤醒概率 0~1"},
                             "keywords": {"type": "array", "items": {"type": "string"}, "description": "命中关键词时醒"},
                         },
                     },
-                    "reason": {
-                        "type": "string",
-                        "description": "为什么这么设(供日志/自进化分析)",
-                    },
+                    "reason": {"type": "string", "description": "为什么这么设(日志用)"},
                 },
                 "required": ["mode"],
             },
         },
         {
             "name": "cancel_wake",
-            "description": "立刻取消潜水,回到 active 模式(每个事件都会考虑要不要说话)。",
-            "input_schema": {
-                "type": "object",
-                "properties": {},
-            },
+            "description": "立刻取消潜水，回到 active 模式。",
+            "input_schema": {"type": "object", "properties": {}},
         },
         {
             "name": "request_speak",
             "description": (
-                "主动申请一次发言机会。"
-                "当你潜水了一会儿,觉得该说点什么了,调这个工具;"
-                "系统会给你一次 '自由发挥' 的机会(生成一段主动发言),用完即止。"
-                "如果你是因为看到 nudge(直播间状态变化)才想说话,可以传 nudge_reason 让系统记录。"
+                "主动申请一次发言机会（想说什么时调，生成一段 1~3 句的发言，"
+                "用完即止）。因系统契机想说时传 nudge_reason。"
             ),
             "input_schema": {
                 "type": "object",
                 "properties": {
-                    "topic_hint": {
-                        "type": "string",
-                        "description": "想聊什么话题(可选,不填就让系统挑)",
-                    },
-                    "reason": {
-                        "type": "string",
-                        "description": "为什么想说话(供日志)",
-                    },
-                    "nudge_reason": {
-                        "type": "string",
-                        "description": "如果是系统 nudge 触发的,填 nudge 原因(long_silence/many_unread/state_change/silent_too_long/burst 等)",
-                    },
+                    "topic_hint": {"type": "string", "description": "想聊什么(可空)"},
+                    "reason": {"type": "string", "description": "为什么想说(日志用)"},
+                    "nudge_reason": {"type": "string", "description": "契机触发时填(long_silence/burst 等)"},
                 },
             },
         },
         {
             "name": "nudge_check",
             "description": (
-                "主动检查现在是不是该说话的时机。"
-                "返回 should_speak=True 时,系统认为有契机(冷场/累积/状态变化/沉默太久/弹幕爆炸);"
-                "你可以接着调 request_speak,或者用 [SILENT] 拒绝。"
-                "LLM 也可以在每次想说话前调这个,作为'想自己评估时机'的工具。"
+                "检查现在是不是该说话的时机（冷场/未读/氛围/太久没说/爆发）；"
+                "should_speak=true 时可接着调 request_speak。"
             ),
-            "input_schema": {
-                "type": "object",
-                "properties": {},
-            },
+            "input_schema": {"type": "object", "properties": {}},
         },
     ]
 

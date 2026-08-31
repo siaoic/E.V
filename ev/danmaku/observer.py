@@ -5,7 +5,7 @@
   - **观察**：每条弹幕都进滚动缓冲（只看不回）——AI 回复优选弹幕时，
     把最近弹幕流作为背景上下文注入 prompt，让 AI「知道大家在聊什么/
     在刷什么」，但明确要求不逐条回应；
-  - **规律触发**：同一句话被刷屏（归一化后相同文本 N 次 / M 人）时，
+  - **规律触发**：同一句话被刷屏（归一化后相同文本 30 条 / 30 人）时，
     即使挑选器没选出优选，也主动触发一次回复（"大家都在刷 XX 啊"），
     经弹幕回复管线播报（忙碌自动避让 + 双重冷却防连发）。
 
@@ -58,11 +58,11 @@ class DanmakuObserver:
 
     def __init__(
         self,
-        buffer_window_sec: float = 90.0,
-        buffer_max_entries: int = 60,
-        flood_window_sec: float = 15.0,
-        flood_min_count: int = 5,
-        flood_min_users: int = 2,
+        buffer_window_sec: float = 15.0,      # 缓冲窗口扩大到120秒
+        buffer_max_entries: int = 200,         # 缓冲最大条目增加到200
+        flood_window_sec: float = 60.0,        # 检测窗口改为60秒（收集足够样本）
+        flood_min_count: int = 30,             # 最少30条
+        flood_min_users: int = 30,             # 最少30个不同用户
         flood_cooldown_sec: float = 180.0,
         flood_global_gap_sec: float = 60.0,
     ) -> None:
@@ -140,19 +140,24 @@ class DanmakuObserver:
             count += 1
             users.add(uname)
             samples.append((uname, raw))
+        
+        # 触发条件：超过30条 且 超过30个不同用户
         if count < self.flood_min_count or len(users) < self.flood_min_users:
             return None
+        
         # 冷却：同 pattern 间隔 + 任意 pattern 全局间隔（防连发刷屏回复）
         if now - self._fired_at.get(norm, 0.0) < self.flood_cooldown_sec:
             return None
         if now - self._last_any_fire < self.flood_global_gap_sec:
             return None
+        
         self._fired_at[norm] = now
         self._last_any_fire = now
         if len(self._fired_at) > 64:
             # 冷却表过大时清最旧的一半（保结构不膨胀）
             items = sorted(self._fired_at.items(), key=lambda kv: kv[1])
             self._fired_at = dict(items[len(items) // 2:])
+        
         return PatternHit(
             pattern=norm, count=count, users=len(users),
             window_sec=window, samples=samples[-3:],
@@ -210,12 +215,13 @@ def _build_from_config() -> DanmakuObserver:
         except Exception:
             return default
     return DanmakuObserver(
-        buffer_window_sec=float(cfg_val("DANMAKU_OBSERVE_CONTEXT_SEC", 60.0) * 1.5),
-        buffer_max_entries=int(cfg_val("DANMAKU_OBSERVE_BUFFER_MAX", 60)),
-        flood_window_sec=float(cfg_val("DANMAKU_FLOOD_WINDOW_SEC", 15.0)),
-        flood_min_count=int(cfg_val("DANMAKU_FLOOD_MIN_COUNT", 5)),
-        flood_min_users=int(cfg_val("DANMAKU_FLOOD_MIN_USERS", 2)),
+        buffer_window_sec=float(cfg_val("DANMAKU_OBSERVE_CONTEXT_SEC", 120.0)),
+        buffer_max_entries=int(cfg_val("DANMAKU_OBSERVE_BUFFER_MAX", 200)),
+        flood_window_sec=float(cfg_val("DANMAKU_FLOOD_WINDOW_SEC", 60.0)),
+        flood_min_count=int(cfg_val("DANMAKU_FLOOD_MIN_COUNT", 30)),
+        flood_min_users=int(cfg_val("DANMAKU_FLOOD_MIN_USERS", 30)),
         flood_cooldown_sec=float(cfg_val("DANMAKU_FLOOD_COOLDOWN_SEC", 180.0)),
+        flood_global_gap_sec=float(cfg_val("DANMAKU_FLOOD_GLOBAL_GAP_SEC", 60.0)),
     )
 
 

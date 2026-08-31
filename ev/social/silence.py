@@ -168,25 +168,11 @@ def build_silence_prompt_patch(target_rate: float = 0.20) -> str:
     调用方(ev/llm/history/inject.py:build_system_prompt)在最后追加:
         return base_prompt + "\n\n" + build_silence_prompt_patch(target_rate=...)
     """
-    return f"""## 拟人化协议(Anthropomorphic Protocol)
-
-### 沉默标记
-当你不应该说话时(潜水/不感兴趣/避免复读),在 final 段输出 `[SILENT]`:
-- 例: "嗯嗯 [SILENT]" → 静默,不播报
-- 同一段对话里,连续 [SILENT] 最多 {max(3, int(1/target_rate))} 次,之后必须回 1 条
-- 用户 @ 机器人 / 醒目留言(SC) / 礼物 → 禁止 [SILENT],必须正面回应
-- 你的目标 [SILENT] 率约为 {target_rate*100:.0f}%(太高会变哑巴,太低会变话痨)
-
-### 收尾标记
-当一段话题聊完、你想主动结束(试探/退场态时尤其常用),输出 `[END]`:
-- 例: "那我去练琴啦,下次再聊 [END]"
-- [END] 之前的文本会被正常播报
-- 收尾要自然,话题性告别优于"我先走了"这种生硬的
-
-### 沉默 vs 收尾
-- [SILENT] → 完全不播报,无下文
-- [END] → 播报 + 标记"对话结束",UI 可能有提示
-""".strip()
+    max_silent = max(3, int(1 / target_rate))
+    return f"""## 沉默协议
+不想说话（潜水/不感兴趣/避免复读）→ 输出 `[SILENT]`，整段不播报；
+话题聊完想主动收尾 → 输出 `[END]`，前面的文本正常播报。
+连续 `[SILENT]` 最多 {max_silent} 次，之后必须回一条；被 @ / SC / 礼物时禁止沉默，目标沉默率约 {target_rate*100:.0f}%。""".strip()
 
 
 def teach_examples() -> str:

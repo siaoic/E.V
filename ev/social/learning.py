@@ -280,7 +280,7 @@ def _cap_lexicon_size(max_size: int) -> None:
 # ===== 主动召回(给 prompt 注入用)=====
 def recall_lexicon(
     current_emotion: str = "neutral",
-    top_k: int = 30,
+    top_k: int = 12,
 ) -> list[LexiconEntry]:
     """按"当前情绪匹配 + 近期使用 + 高频"召回 Top-K。
     
@@ -323,7 +323,7 @@ def build_lexicon_prompt_patch(current_emotion: str = "neutral") -> str:
     if not words:
         return ""
     
-    lines = ["## 你的可选词表(最近弹幕区流行的词,可视情况自然使用,不必硬塞)", ""]
+    lines = ["## 弹幕流行词（可视情况自然用，别硬塞）", ""]
     for w in words:
         if w.meaning:
             lines.append(f"- {w.word}:{w.meaning}({w.tone})")
