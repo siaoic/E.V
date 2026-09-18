@@ -1,0 +1,50 @@
+{
+  "manifest_version": 2,
+  "id": "maibot-live.world-pvz",
+  "version": "0.1.0",
+  "name": "植物大战僵尸世界",
+  "description": "让 AI 看着植物大战僵尸的画面做决策并操作游戏：截屏帧差做廉价变更检测，变化时才跑 OpenCV 模板匹配识别场景阶段 / 阳光数 / 每行僵尸 / 卡片冷却；AI 通过 pvz_plant / pvz_collect / pvz_shovel 操作游戏，提交即返回，结果以世界事件回传。",
+  "author": {
+    "name": "MaiBot Live",
+    "url": "https://github.com/MaiM-with-u/MaiBot"
+  },
+  "license": "AGPL-3.0-or-later",
+  "urls": {
+    "repository": "https://github.com/MaiM-with-u/MaiBot"
+  },
+  "host_application": {
+    "min_version": "1.0.0",
+    "max_version": "1.2.99"
+  },
+  "sdk": {
+    "min_version": "2.0.0",
+    "max_version": "2.99.99"
+  },
+  "dependencies": [
+    {
+      "type": "python_package",
+      "name": "mss",
+      "version_spec": ">=9.0.0"
+    },
+    {
+      "type": "python_package",
+      "name": "pywin32",
+      "version_spec": ">=306"
+    },
+    {
+      "type": "python_package",
+      "name": "opencv-python-headless",
+      "version_spec": ">=4.8.0"
+    },
+    {
+      "type": "python_package",
+      "name": "pydirectinput",
+      "version_spec": ">=1.0.4"
+    }
+  ],
+  "capabilities": ["world.register", "world.unregister", "world.event"],
+  "i18n": {
+    "default_locale": "zh-CN",
+    "supported_locales": ["zh-CN"]
+  }
+}

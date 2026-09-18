@@ -1,0 +1,675 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>AI 画画 · 一笔一画</title>
+<style>
+  :root {
+    color-scheme: dark;
+    --bg: #131619;
+    --stage: #171b1e;
+    --line: #30363b;
+    --fg: #eceeea;
+    --muted: #8d989e;
+    --accent: #bee6d5;
+    --mono: ui-monospace, SFMono-Regular, Consolas, "Liberation Mono", monospace;
+    --sans: Inter, -apple-system, BlinkMacSystemFont, "Segoe UI", "PingFang SC", "Microsoft YaHei", sans-serif;
+  }
+  * { box-sizing: border-box; }
+  html, body {
+    margin: 0;
+    height: 100%;
+    background: var(--bg);
+    color: var(--fg);
+    font: 13px/1.5 var(--sans);
+  }
+  body {
+    display: grid;
+    grid-template-rows: 64px minmax(0, 1fr) 56px;
+  }
+  .topbar {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    padding: 0 22px;
+    border-bottom: 1px solid var(--line);
+    gap: 16px;
+  }
+  .brand { display: flex; align-items: center; gap: 12px; min-width: 0; }
+  .mark {
+    width: 32px; height: 32px;
+    background: var(--accent);
+    color: #263b33;
+    border-radius: 9px;
+    display: grid; place-items: center;
+    font: 600 12px var(--mono);
+    letter-spacing: -1px;
+  }
+  .brand h1 { font-size: 16px; font-weight: 550; margin: 0; letter-spacing: .03em; }
+  .hint {
+    font-size: 12px;
+    color: var(--muted);
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+    max-width: 46vw;
+  }
+  .status {
+    font: 11px var(--mono);
+    color: var(--muted);
+    white-space: nowrap;
+  }
+  .stage {
+    background: var(--stage);
+    background-image: radial-gradient(#6475781c .7px, transparent .7px);
+    background-size: 20px 20px;
+    position: relative;
+    overflow: hidden;
+    display: grid;
+    place-items: center;
+  }
+  #stage {
+    width: min(90%, 720px);
+    aspect-ratio: 1 / 1;
+    max-height: 90%;
+  }
+  #stage svg { width: 100%; height: 100%; display: block; }
+  .footer {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    padding: 0 22px;
+    background: #1c2225;
+    border-top: 1px solid var(--line);
+    font-size: 12px;
+    color: var(--muted);
+  }
+  .footer .dot {
+    width: 7px; height: 7px;
+    border-radius: 50%;
+    background: var(--accent);
+    animation: breathe 1.8s ease-in-out infinite;
+  }
+  @keyframes breathe {
+    0%, 100% { opacity: .35; }
+    50% { opacity: 1; }
+  }
+</style>
+</head>
+<body>
+<header class="topbar">
+  <div class="brand">
+    <div class="mark">AI</div>
+    <h1>AI 画画 · 一笔一画</h1>
+  </div>
+  <div class="hint" title="__PROMPT_HINT__">__PROMPT_HINT__</div>
+  <div class="status" id="status">准备画布…</div>
+</header>
+<main class="stage">
+  <div id="stage">__SVG__</div>
+</main>
+<footer class="footer">
+  <span class="dot"></span>
+  <span id="footerText">画笔和橡皮都在 AI 手里，画歪了它会自己擦掉重画</span>
+</footer>
+<script>
+/* 实时绘画引擎
+ * 移植自 v3_code_drawing_demo.html 的核心算法：
+ *   - parseSegments(d)     : 解析 SVG d 字符串为段数组
+ *   - prepareOverlay(el)   : 克隆元素到叠加层，按 M 子路径拆分，初始化 dasharray
+ *   - renderPhase(st, ph)  : 按阶段推进 stroke-dashoffset，并回报笔尖坐标
+ *   - DrawingEngine        : RAF 主循环，边画边驱动画笔 / 橡皮
+ *
+ * 与 demo 的差异：去掉编辑器、源码同步、章节导航、镜头跟随、控制点等花哨功能，
+ * 也去掉播放器式的控件（暂停、倍速、进度条、一键重画）——这里是"实时作画"。
+ * 画笔和橡皮都归 AI：画歪的那一笔会先被自己擦掉，再重新画一遍。
+ */
+(function () {
+  'use strict';
+
+  var NS = 'http://www.w3.org/2000/svg';
+  var SHAPES = 'path,ellipse,circle,line,polyline,polygon,rect';
+  var ERASE_MASK_PREFIX = 'ai-erase-mask-';
+  var PEN_TILT = 28; // 笔身倾斜角（度），模拟右手持笔
+  var ERASER_TILT = -16; // 橡皮块倾斜角（度）
+  var MAX_RETRY = 2; // 一幅画最多返工几笔，太多会显得手忙脚乱
+
+  // ----- 工具函数 ---------------------------------------------------------- //
+
+  function $(id) {
+    return document.getElementById(id);
+  }
+  function E(tag, attrs) {
+    var el = document.createElementNS(NS, tag);
+    if (attrs) {
+      for (var k in attrs) el.setAttribute(k, String(attrs[k]));
+    }
+    return el;
+  }
+  function clamp(x, a, b) {
+    a = a === undefined ? 0 : a;
+    b = b === undefined ? 1 : b;
+    return Math.max(a, Math.min(b, x));
+  }
+  function ease(x) {
+    x = clamp(x);
+    return x * x * (3 - 2 * x);
+  }
+  // getTotalLength / getPointAtLength 对个别元素会抛错，取不到就当没有
+  function pointAt(el, distance) {
+    try {
+      return el.getPointAtLength(distance);
+    } catch (err) {
+      return null;
+    }
+  }
+  function measure(el) {
+    try {
+      var len = el.getTotalLength();
+      return Number.isFinite(len) && len > 0 ? len : 0;
+    } catch (err) {
+      return 0;
+    }
+  }
+
+  // ----- 核心算法 1：parseSegments ----------------------------------------- //
+  // 把 SVG d 字符串拆成段 [{cmd, start, end, ctrls, from, to}]
+  function parseSegments(d) {
+    var toks = d.match(/[MLCQZ]|[-+]?(?:\d*\.?\d+)(?:e[-+]?\d+)?/gi) || [];
+    var output = [];
+    var i = 0;
+    var cmd = '';
+    var cur = { x: 0, y: 0 };
+    var start = { x: 0, y: 0 };
+    var sum = 0;
+    while (i < toks.length) {
+      if (/^[MLCQZ]$/.test(toks[i])) cmd = toks[i++];
+      var n = { M: 2, L: 2, C: 6, Q: 4, Z: 0 }[cmd];
+      if (n === undefined) break;
+      var a = toks.slice(i, i + n).map(Number);
+      if (a.length < n || a.some(Number.isNaN)) break;
+      i += n;
+      if (cmd === 'M') {
+        cur = { x: a[0], y: a[1] };
+        start = { x: cur.x, y: cur.y };
+        cmd = 'L';
+        continue;
+      }
+      var end = cmd === 'Z' ? { x: start.x, y: start.y } : { x: a[a.length - 2], y: a[a.length - 1] };
+      var ctrls =
+        cmd === 'C'
+          ? [{ x: a[0], y: a[1] }, { x: a[2], y: a[3] }]
+          : cmd === 'Q'
+            ? [{ x: a[0], y: a[1] }]
+            : [];
+      var segPath = E('path', {
+        d: 'M' + cur.x + ' ' + cur.y + ' ' + (cmd === 'Z' ? 'L' + start.x + ' ' + start.y : cmd + a.join(' ')),
+      });
+      var len = measure(segPath);
+      output.push({ cmd: cmd, start: { x: cur.x, y: cur.y }, end: end, ctrls: ctrls, from: sum, to: sum + len });
+      sum += len;
+      cur = end;
+      if (cmd === 'Z') cmd = '';
+    }
+    return output;
+  }
+
+  // ----- 核心算法 2：prepareOverlay --------------------------------------- //
+  // 把一个目标元素克隆到叠加层，给所有图形设置 dasharray
+  function prepareOverlay(target, fallbackStroke) {
+    var overlay = E('g', {
+      'data-ai-trace': '',
+      'aria-hidden': 'true',
+      'pointer-events': 'none',
+    });
+    var clone = target.cloneNode(true);
+    // 清理 id / style，避免与原始元素冲突
+    var nodes = [clone].concat(Array.prototype.slice.call(clone.querySelectorAll('*')));
+    for (var idx = 0; idx < nodes.length; idx++) {
+      nodes[idx].removeAttribute('id');
+      nodes[idx].removeAttribute('style');
+    }
+    // 多子路径拆分：把每个 M… 子路径拆成独立 path，才能逐段描边
+    var paths = Array.prototype.slice.call(clone.querySelectorAll('path'));
+    for (var p = 0; p < paths.length; p++) {
+      var path = paths[p];
+      var rawD = path.getAttribute('d');
+      var pieces = rawD ? rawD.match(/M[^M]*/g) : null;
+      if (pieces && pieces.length > 1) {
+        var frag = document.createDocumentFragment();
+        for (var q = 0; q < pieces.length; q++) {
+          var c = path.cloneNode(false);
+          c.setAttribute('d', pieces[q]);
+          frag.appendChild(c);
+        }
+        path.replaceWith(frag);
+      }
+    }
+    overlay.appendChild(clone);
+    target.parentNode.insertBefore(overlay, target.nextSibling);
+
+    // 收集可绘制几何体
+    var geometries = [];
+    var totalLength = 0;
+    var shapes = Array.prototype.slice.call(overlay.querySelectorAll(SHAPES));
+    for (var s = 0; s < shapes.length; s++) {
+      var g = shapes[s];
+      var len = measure(g);
+      if (!len) continue;
+      var cs = window.getComputedStyle(g);
+      var hasStroke = cs.stroke && cs.stroke !== 'none';
+      var stroke = hasStroke ? cs.stroke : fallbackStroke || '#bee6d5';
+      var width = hasStroke ? parseFloat(cs.strokeWidth) || 1 : 1.08;
+      g.setAttribute('fill', 'none');
+      g.setAttribute('stroke', stroke);
+      g.setAttribute('stroke-width', String(width));
+      if (!hasStroke) g.setAttribute('vector-effect', 'non-scaling-stroke');
+      g.setAttribute('stroke-dasharray', len + ' ' + (len + 1));
+      g.setAttribute('stroke-dashoffset', String(len + 0.5));
+      g.style.visibility = 'hidden';
+      g.setAttribute('stroke-linecap', 'round');
+      g.setAttribute('stroke-linejoin', 'round');
+      var segments = g.localName === 'path' ? parseSegments(g.getAttribute('d') || '') : [];
+      geometries.push({ el: g, len: len, from: totalLength, to: totalLength + len, segments: segments });
+      totalLength += len;
+    }
+    return { overlay: overlay, clone: clone, geometries: geometries, length: totalLength };
+  }
+
+  // ----- 阶段渲染 ---------------------------------------------------------- //
+  // 一次"落笔"分三阶段：画歪（叠层带偏移）→ 擦掉（遮罩沿路径推进）→ 重画（正稿）
+  // 返回 { tip, tool, offset }：笔尖坐标、该用哪支工具、工具要不要跟着偏移
+  function renderPhase(step, phase, p) {
+    var overlay = step.overlay;
+    var tip = null;
+    var i;
+
+    if (phase.kind === 'erase') {
+      var wipes = ensureEraseMask(step);
+      var wiped = overlay.length * p; // 擦除刀口走过的总长度
+      for (i = 0; i < overlay.geometries.length; i++) {
+        var geom = overlay.geometries[i];
+        var local = clamp(wiped - geom.from, 0, geom.len);
+        wipes[i].setAttribute('stroke-dashoffset', String(Math.max(0, geom.len - local)));
+        if (local > 0) {
+          var wipePoint = pointAt(geom.el, local);
+          if (wipePoint) tip = { x: wipePoint.x, y: wipePoint.y };
+        }
+      }
+      return { tip: tip, tool: 'eraser', offset: step.tipOffset };
+    }
+
+    // 描边
+    var drawn = overlay.length * p;
+    for (i = 0; i < overlay.geometries.length; i++) {
+      var g = overlay.geometries[i];
+      var d = clamp(drawn - g.from, 0, g.len);
+      g.el.style.visibility = d > 0 ? 'visible' : 'hidden';
+      g.el.setAttribute('stroke-dashoffset', String(Math.max(0, g.len - d)));
+      if (d > 0) {
+        var penPoint = pointAt(g.el, d);
+        if (penPoint) tip = { x: penPoint.x, y: penPoint.y };
+      }
+    }
+
+    if (phase.final) {
+      // 末段：叠加层淡出、正稿浮现填色
+      var fill = ease((p - 0.78) / 0.22);
+      step.el.style.visibility = fill > 0 ? 'visible' : 'hidden';
+      step.el.style.opacity = String(step.baseOpacity * fill);
+      overlay.overlay.style.opacity = String(1 - ease((p - 0.82) / 0.18));
+    } else {
+      overlay.overlay.style.opacity = '1';
+    }
+    return { tip: tip, tool: 'pen', offset: step.tipOffset };
+  }
+
+  // 返工阶段前先把遮罩准备出来：一块白色底 + 若干条黑色擦除路径
+  function ensureEraseMask(step) {
+    if (step.wipes) return step.wipes;
+    var maskId = ERASE_MASK_PREFIX + step.index;
+    var mask = E('mask', {
+      id: maskId,
+      maskUnits: 'userSpaceOnUse',
+      x: -4000,
+      y: -4000,
+      width: 8000,
+      height: 8000,
+    });
+    mask.appendChild(E('rect', { x: -4000, y: -4000, width: 8000, height: 8000, fill: '#fff' }));
+    var group = E('g', {
+      fill: 'none',
+      stroke: '#000',
+      'stroke-linecap': 'round',
+      'stroke-linejoin': 'round',
+    });
+    var wipes = [];
+    for (var i = 0; i < step.overlay.geometries.length; i++) {
+      var geom = step.overlay.geometries[i];
+      var wipe = geom.el.cloneNode(false);
+      wipe.removeAttribute('style');
+      // 橡皮比笔宽，才擦得干净
+      wipe.setAttribute('stroke-width', String((parseFloat(geom.el.getAttribute('stroke-width')) || 1) * 3 + 3));
+      wipe.setAttribute('stroke-dasharray', geom.len + ' ' + (geom.len + 1));
+      wipe.setAttribute('stroke-dashoffset', String(geom.len));
+      group.appendChild(wipe);
+      wipes.push(wipe);
+    }
+    mask.appendChild(group);
+    defs.appendChild(mask);
+    step.overlay.overlay.setAttribute('mask', 'url(#' + maskId + ')');
+    step.wipes = wipes;
+    return wipes;
+  }
+
+  // 返工结束：擦痕清掉、偏移复位，画布上只留正稿
+  function settleRetry(step) {
+    if (!step.wipes) return;
+    step.overlay.overlay.removeAttribute('mask');
+    var mask = $(ERASE_MASK_PREFIX + step.index);
+    if (mask && mask.parentNode) mask.parentNode.removeChild(mask);
+    step.wipes = null;
+    step.overlay.overlay.removeAttribute('transform');
+    step.tipOffset = '';
+  }
+
+  // ----- 主引擎 ------------------------------------------------------------ //
+
+  function DrawingEngine(rootSvg) {
+    this.svg = rootSvg;
+    this.steps = []; // 每一步 = 一个待绘制的元素
+    this.playhead = 0; // 全局进度（毫秒）
+    this.playing = false;
+    this.speed = 1;
+    this.lastFrame = 0;
+    this.total = 0;
+    this._onProgress = null;
+    this._onFinish = null;
+    this._onTool = null;
+    this._loop = this._loop.bind(this);
+    this._collectSteps();
+  }
+
+  DrawingEngine.prototype.onProgress = function (fn) {
+    this._onProgress = fn;
+  };
+  DrawingEngine.prototype.onFinish = function (fn) {
+    this._onFinish = fn;
+  };
+  // 工具回调：{tip, tool, offset}，tip 为 null 表示已抬笔
+  DrawingEngine.prototype.onTool = function (fn) {
+    this._onTool = fn;
+  };
+
+  DrawingEngine.prototype._collectSteps = function () {
+    var candidates = Array.prototype.slice.call(this.svg.querySelectorAll(SHAPES));
+    for (var i = 0; i < candidates.length; i++) {
+      var el = candidates[i];
+      // 跳过 defs / clipPath / mask 内的元素，以及画笔、橡皮等界面装饰
+      if (el.closest('defs,clipPath,mask,[data-tool]')) continue;
+      var len = measure(el);
+      if (!len) continue;
+      // 单步时长：路径越长画得越久，限制在 0.6s ~ 3.5s
+      var duration = Math.max(600, Math.min(3500, 600 + len * 1.2));
+      var cs = window.getComputedStyle(el);
+      var baseOpacity = parseFloat(cs.opacity) || 1;
+      el.style.visibility = 'hidden';
+      el.style.opacity = '0';
+      this.steps.push({
+        el: el,
+        base: duration,
+        length: len,
+        baseOpacity: baseOpacity,
+        index: this.steps.length,
+        phases: [{ kind: 'draw', weight: 1, final: true }],
+        total: duration,
+        retry: false,
+        overlay: null,
+        tipOffset: '',
+        phaseIndex: -1,
+      });
+    }
+
+    // 抽几笔让它"画歪"：正常一幅画至少返工一笔，偶尔再多一笔
+    var plan = this.steps.length >= 4 ? 1 : 0;
+    if (Math.random() < 0.3) plan++;
+    plan = Math.min(plan, MAX_RETRY);
+    var pool = [];
+    for (var s = 1; s < this.steps.length; s++) pool.push(s);
+    // 洗牌后取前几个，避免总是返工开头那几笔
+    for (var k = pool.length - 1; k > 0; k--) {
+      var j = Math.floor(Math.random() * (k + 1));
+      var tmp = pool[k];
+      pool[k] = pool[j];
+      pool[j] = tmp;
+    }
+    for (var r = 0; r < plan && r < pool.length; r++) {
+      var retryStep = this.steps[pool[r]];
+      retryStep.retry = true;
+      retryStep.phases = [
+        { kind: 'draw', weight: 0.6, final: false }, // 手一抖，画歪了
+        { kind: 'erase', weight: 0.4 }, // 拿橡皮擦掉
+        { kind: 'draw', weight: 1.0, final: true }, // 重新画一遍
+      ];
+      retryStep.total = retryStep.base * 2.0;
+    }
+
+    this.total = this.steps.reduce(function (sum, x) {
+      return sum + x.total;
+    }, 0);
+  };
+
+  DrawingEngine.prototype.start = function () {
+    if (this.total <= 0) return;
+    // 为每一步准备叠加层；返工的那几笔先挪歪一点，等着被擦掉
+    for (var i = 0; i < this.steps.length; i++) {
+      var step = this.steps[i];
+      step.overlay = prepareOverlay(step.el, '#bee6d5');
+      if (step.retry) {
+        step.tipOffset = flawedTransform(step.overlay);
+        step.overlay.overlay.setAttribute('transform', step.tipOffset);
+      }
+    }
+    this.playhead = 0;
+    this.playing = true;
+    this.lastFrame = performance.now();
+    this._loop();
+  };
+
+  DrawingEngine.prototype._locateStep = function (t) {
+    var acc = 0;
+    for (var i = 0; i < this.steps.length; i++) {
+      acc += this.steps[i].total;
+      if (t < acc) return i;
+    }
+    return this.steps.length - 1;
+  };
+
+  DrawingEngine.prototype._renderAt = function (t) {
+    var acc = 0;
+    var tool = null;
+    for (var i = 0; i < this.steps.length; i++) {
+      var step = this.steps[i];
+      var localT = t - acc;
+      if (localT >= 0 && localT <= step.total) {
+        // 定位当前阶段并推进它
+        var phaseAcc = 0;
+        for (var p = 0; p < step.phases.length; p++) {
+          var phase = step.phases[p];
+          var span = phase.weight * step.base;
+          var isLast = p === step.phases.length - 1;
+          if (localT <= phaseAcc + span || isLast) {
+            if (step.phaseIndex !== p) {
+              step.phaseIndex = p;
+              if (phase.kind === 'erase') ensureEraseMask(step);
+              // 从"擦掉"切到"重画"：擦痕清空、偏移复位，重新落笔
+              if (phase.kind === 'draw' && step.wipes) settleRetry(step);
+            }
+            tool = renderPhase(step, phase, clamp((localT - phaseAcc) / span));
+            break;
+          }
+          phaseAcc += span;
+        }
+        break;
+      } else if (localT > step.total) {
+        // 已经绘制完成 → 恢复原元素显示
+        step.el.style.visibility = 'visible';
+        step.el.style.opacity = String(step.baseOpacity);
+        step.overlay.overlay.style.opacity = '0';
+      }
+      acc += step.total;
+    }
+    if (this._onTool) this._onTool(tool);
+    if (this._onProgress) this._onProgress(t / this.total, this._locateStep(t));
+  };
+
+  DrawingEngine.prototype._loop = function () {
+    var now = performance.now();
+    var delta = this.lastFrame ? Math.min(now - this.lastFrame, 250) : 0;
+    this.lastFrame = now;
+    if (this.playing) {
+      this.playhead += delta * this.speed;
+      if (this.playhead >= this.total) {
+        this.playhead = this.total;
+        this.playing = false;
+        this._renderAt(this.playhead);
+        if (this._onTool) this._onTool(null); // 画完了，笔抬离画布
+        if (this._onFinish) this._onFinish();
+        return;
+      }
+      this._renderAt(this.playhead);
+    }
+    requestAnimationFrame(this._loop);
+  };
+
+  // 给"画歪"的那一笔算一个偏移：挪一点、歪一点，像手抖
+  function flawedTransform(overlay) {
+    var first = overlay.geometries[0];
+    var anchor = first && first.segments.length ? first.segments[0].start : null;
+    if (!anchor) {
+      var box = overlay.overlay.getBBox();
+      anchor = { x: box.x + box.width / 2, y: box.y + box.height / 2 };
+    }
+    var tilt = (Math.random() < 0.5 ? -1 : 1) * (2.5 + Math.random() * 2);
+    var dx = (Math.random() * 2 - 1) * 9;
+    var dy = (Math.random() * 2 - 1) * 9;
+    return 'translate(' + dx + ' ' + dy + ') rotate(' + tilt + ' ' + anchor.x + ' ' + anchor.y + ')';
+  }
+
+  // ----- 页面入口 ---------------------------------------------------------- //
+
+  var stageEl = $('stage');
+  var statusEl = $('status');
+  var footerEl = $('footerText');
+  var svg = stageEl ? stageEl.querySelector('svg') : null;
+
+  if (!svg) {
+    if (statusEl) statusEl.textContent = '✗ 未找到 SVG';
+    return;
+  }
+
+  // 强制响应式铺满舞台
+  svg.removeAttribute('width');
+  svg.removeAttribute('height');
+  if (!svg.getAttribute('viewBox')) svg.setAttribute('viewBox', '0 0 400 400');
+  svg.style.width = '100%';
+  svg.style.height = '100%';
+  svg.style.display = 'block';
+
+  // 用一个组包住所有绘图内容，方便给单笔挂橡皮遮罩；defs / title 留在外面
+  var artLayer = E('g', { 'data-art': '' });
+  var movable = [];
+  for (var child = svg.firstChild; child; child = child.nextSibling) {
+    if (child.nodeType === 1 && /^(defs|title|desc)$/i.test(child.localName)) continue;
+    movable.push(child);
+  }
+  for (var m = 0; m < movable.length; m++) artLayer.appendChild(movable[m]);
+  svg.appendChild(artLayer);
+
+  var defs = E('defs');
+  svg.insertBefore(defs, svg.firstChild);
+
+  // 工具层：一支铅笔 + 一块橡皮，按当前阶段切着用
+  var toolGroup = E('g', { 'data-tool': '', 'aria-hidden': 'true', 'pointer-events': 'none', opacity: '0' });
+  var toolScale = E('g', { 'data-tool-scale': '' });
+
+  var pen = E('g', { 'data-pen': '' });
+  pen.appendChild(E('ellipse', { cx: 2, cy: 3, rx: 7, ry: 3, fill: '#000', opacity: '.3' }));
+  var penBody = E('g', { transform: 'rotate(' + PEN_TILT + ')' });
+  penBody.appendChild(
+    E('path', {
+      d: 'M-4.6 -30 L4.6 -30 L3.2 -7 L-3.2 -7 Z',
+      fill: '#39454b',
+      stroke: '#8d989e',
+      'stroke-width': '1',
+    })
+  );
+  penBody.appendChild(E('path', { d: 'M-3.2 -7 L3.2 -7 L2.2 -3.6 L-2.2 -3.6 Z', fill: '#e7efea' }));
+  penBody.appendChild(E('path', { d: 'M-2.2 -3.6 L2.2 -3.6 L0 0 Z', fill: '#26333a' }));
+  pen.appendChild(penBody);
+  pen.appendChild(E('circle', { cx: 0, cy: 0, r: 1.8, fill: '#bee6d5' }));
+
+  var eraser = E('g', { 'data-eraser': '', opacity: '0' });
+  var eraserBody = E('g', { transform: 'rotate(' + ERASER_TILT + ')' });
+  eraserBody.appendChild(
+    E('path', { d: 'M-9 -17 L9 -17 L9 -6 L-9 -6 Z', fill: '#c98ea6', stroke: '#7d5b68', 'stroke-width': '1' })
+  );
+  eraserBody.appendChild(E('path', { d: 'M-9 -6 L9 -6 L9 0 L-9 0 Z', fill: '#f0e4e9' }));
+  eraser.appendChild(eraserBody);
+  eraser.appendChild(E('ellipse', { cx: 1, cy: 2, rx: 11, ry: 3, fill: '#000', opacity: '.28' }));
+
+  toolScale.appendChild(pen);
+  toolScale.appendChild(eraser);
+  toolGroup.appendChild(toolScale);
+  toolGroup.style.transition = 'opacity .35s ease';
+  svg.appendChild(toolGroup);
+
+  // 工具尺寸按 viewBox 缩放，避免画布尺寸不同导致工具过大或过小
+  var viewBoxAttr = (svg.getAttribute('viewBox') || '0 0 400 400').split(/[\s,]+/).map(Number);
+  var viewBoxSize = Math.max(viewBoxAttr[2] || 400, viewBoxAttr[3] || 400);
+  toolScale.setAttribute('transform', 'scale(' + clamp(viewBoxSize / 420, 0.55, 2.4) + ')');
+
+  // ----- 开画 -------------------------------------------------------------- //
+
+  var engine = new DrawingEngine(svg);
+  var defaultSpeed = __DRAWING_SPEED__;
+  engine.speed = defaultSpeed > 0 ? defaultSpeed : 2.0;
+
+  var lastFooter = '';
+  engine.onTool(function (state) {
+    if (!state || !state.tip) {
+      toolGroup.setAttribute('opacity', '0');
+      return;
+    }
+    // 工具要跟着"画歪"的那一笔一起偏移，所以偏移量拼在手势坐标前面
+    var prefix = state.offset ? state.offset + ' ' : '';
+    toolGroup.setAttribute('transform', prefix + 'translate(' + state.tip.x + ' ' + state.tip.y + ')');
+    toolGroup.setAttribute('opacity', '1');
+    pen.setAttribute('opacity', state.tool === 'pen' ? '1' : '0');
+    eraser.setAttribute('opacity', state.tool === 'eraser' ? '1' : '0');
+    if (footerEl) {
+      var text = state.tool === 'eraser' ? '画歪了，它正拿橡皮擦掉重画…' : '正在落笔…';
+      if (text !== lastFooter) {
+        lastFooter = text;
+        footerEl.textContent = text;
+      }
+    }
+  });
+  engine.onProgress(function (ratio, idx) {
+    if (statusEl) statusEl.textContent = '绘制中 · 第 ' + (idx + 1) + '/' + engine.steps.length + ' 笔';
+  });
+  engine.onFinish(function () {
+    if (statusEl) statusEl.textContent = '✓ 绘制完成';
+    if (footerEl) footerEl.textContent = '画好了 —— 画笔和橡皮都归它自己管';
+  });
+
+  if (engine.total > 0) {
+    engine.start();
+  } else if (statusEl) {
+    statusEl.textContent = '✗ 没有可绘制的路径';
+  }
+})();
+</script>
+</body>
+</html>

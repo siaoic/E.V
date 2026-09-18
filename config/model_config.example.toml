@@ -1,0 +1,204 @@
+
+
+[inner]
+version = "1.17.9"
+
+[[models]]
+model_identifier = "deepseek-flash"
+name = "deepseek-flash"
+api_provider = "DeepSeek"
+price_in = 1
+price_out = 2
+cache = false
+cache_price_in = 0
+send_temperature = true
+visual = false
+force_stream_mode = true
+
+[models.extra_params.thinking]
+type = "disabled"
+
+[[models]]
+model_identifier = "Qwen3-Embedding-0.6B"
+name = "qwen3-embedding"
+api_provider = "local-embedding"
+price_in = 0
+price_out = 0
+cache = false
+cache_price_in = 0
+send_temperature = false
+visual = false
+force_stream_mode = false
+
+[models.extra_params]
+
+[[models]]
+model_identifier = "Qwen/Qwen3.5-27B"
+name = "Qwen/Qwen3.5-27B"
+api_provider = "siliconflow"
+price_in = 0
+price_out = 0
+cache = false
+cache_price_in = 0
+send_temperature = true
+visual = true
+force_stream_mode = true
+
+[models.extra_params]
+enable_thinking = false
+[model_task_config.replyer]
+model_list = ["Qwen/Qwen3.5-27B"]  # 使用的模型列表
+max_tokens = 2048                # 最大生成 token 数
+temperature = 1                  # 采样温度，越高越随机
+slow_threshold = 120             # 慢请求阈值（秒），超过会记录慢请求日志
+selection_strategy = "random"    # 多个模型时的选择策略：随机
+hard_timeout = 240               # 硬超时（秒），需覆盖上游排队+长上下文首包延迟
+
+# ---------- planner：规划任务 ----------
+
+[model_task_config.planner]
+model_list = ["Qwen/Qwen3.5-27B"]
+max_tokens = 2000
+temperature = 0.7
+slow_threshold = 12
+selection_strategy = "random"
+hard_timeout = 90
+
+# ---------- memory：长期记忆任务 ----------
+# model_list 为空，表示未配置模型；如果程序需要该任务，可能会报错或跳过。
+
+[model_task_config.memory]
+model_list = ["Qwen/Qwen3.5-27B"]
+max_tokens = 8192
+temperature = 0.5
+slow_threshold = 30
+selection_strategy = "random"
+hard_timeout = 240
+
+# ---------- mid_memory：中期记忆任务 ----------
+
+[model_task_config.mid_memory]
+model_list = ["Qwen/Qwen3.5-27B"]
+max_tokens = 8000
+temperature = 0.7
+slow_threshold = 12
+selection_strategy = "random"
+hard_timeout = 180
+
+# ---------- utils：工具类任务 ----------
+
+[model_task_config.utils]
+model_list = ["Qwen/Qwen3.5-27B"]
+max_tokens = 4096
+temperature = 0.5
+slow_threshold = 15
+selection_strategy = "random"
+hard_timeout = 15                 # 注意：15 秒对 4096 token 可能偏短
+
+# ---------- learner：学习任务 ----------
+
+[model_task_config.learner]
+model_list = ["Qwen/Qwen3.5-27B"]
+max_tokens = 4096
+temperature = 0.3
+slow_threshold = 15
+selection_strategy = "balance"    # 多模型时按负载均衡选择
+hard_timeout = 60
+
+# ---------- expression_use：表达使用任务 ----------
+
+[model_task_config.expression_use]
+model_list = ["Qwen/Qwen3.5-27B"]
+max_tokens = 1024
+temperature = 0.3
+slow_threshold = 15
+selection_strategy = "balance"
+hard_timeout = 15
+
+# ---------- vlm：视觉语言模型任务 ----------
+
+[model_task_config.vlm]
+model_list = ["Qwen/Qwen3.5-27B"]
+max_tokens = 4096
+temperature = 0.3
+slow_threshold = 15
+selection_strategy = "balance"
+hard_timeout = 15
+
+# ---------- voice：语音任务 ----------
+
+[model_task_config.voice]
+model_list = []
+max_tokens = 4096
+temperature = 0.3
+slow_threshold = 15
+selection_strategy = "balance"
+hard_timeout = 15
+
+# ---------- embedding：向量嵌入任务 ----------
+
+[model_task_config.embedding]
+model_list = ["qwen3-embedding"]
+max_tokens = 4096
+temperature = 0.3
+slow_threshold = 15
+selection_strategy = "balance"
+hard_timeout = 60
+
+# ============================================================
+# API Provider 配置（api_providers）
+# 每个 provider 代表一个可调用的模型服务商。
+# 注意：api_key 属于敏感信息，建议不要直接提交到公开仓库。
+# ============================================================
+
+# ---------- 智谱 BigModel provider ----------
+# 注释说“新增：用于修复 deepseek-flash 引用不存在的 provider 报错”，
+# 但实际上 deepseek-flash 的 api_provider 写的是 "deepseek"，
+# 所以这个 bigmodel provider 目前可能并没有被模型引用。
+
+[[api_providers]]
+name = "local-embedding"
+base_url = "http://127.0.0.1:8081/v1"
+api_key = "YOUR_API_KEY"
+client_type = "openai"
+auth_type = "none"
+auth_header_name = "Authorization"
+auth_header_prefix = "Bearer"
+auth_query_name = "api_key"
+model_list_endpoint = "/models"
+reasoning_parse_mode = "auto"
+tool_argument_parse_mode = "auto"
+max_retry = 3
+timeout = 30
+retry_interval = 5
+
+[api_providers.default_headers]
+
+[[api_providers]]
+name = "siliconflow"
+base_url = "https://api.siliconflow.cn/v1"
+api_key = "YOUR_API_KEY"
+client_type = "openai"
+auth_type = "bearer"
+auth_header_name = "Authorization"
+auth_header_prefix = "Bearer"
+auth_query_name = "api_key"
+model_list_endpoint = "/models"
+reasoning_parse_mode = "auto"
+tool_argument_parse_mode = "auto"
+max_retry = 3
+timeout = 60
+retry_interval = 5
+
+[api_providers.default_headers]
+
+[[api_providers]]
+name = "DeepSeek"
+base_url = "https://api.deepseek.com"
+api_key = "YOUR_API_KEY"
+client_type = "openai"
+max_retry = 3
+timeout = 120
+retry_interval = 5
+
+[api_providers.default_headers]

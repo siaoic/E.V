@@ -1,0 +1,29 @@
+{
+  "manifest_version": 2,
+  "id": "maibot-live.world-minecraft",
+  "version": "0.1.0",
+  "name": "Minecraft 世界",
+  "description": "让 AI 感知自己在 Minecraft 里的真实处境并操作游戏：mineflayer 桥（mc-node 子进程，stdio NDJSON 协议）上报位置 / 血量 / 周围生物 / 背包等结构化状态，掉血、死亡、敌对生物靠近、玩家进出按显著性立即上报事件；AI 通过 minecraft_do / minecraft_scout / minecraft_check 对游戏下动作，提交即返回，结果以世界事件回传。",
+  "author": {
+    "name": "MaiBot Live",
+    "url": "https://github.com/MaiM-with-u/MaiBot"
+  },
+  "license": "AGPL-3.0-or-later",
+  "urls": {
+    "repository": "https://github.com/MaiM-with-u/MaiBot"
+  },
+  "host_application": {
+    "min_version": "1.0.0",
+    "max_version": "1.2.99"
+  },
+  "sdk": {
+    "min_version": "2.0.0",
+    "max_version": "2.99.99"
+  },
+  "dependencies": [],
+  "capabilities": ["world.register", "world.unregister", "world.event", "world.state", "config.get"],
+  "i18n": {
+    "default_locale": "zh-CN",
+    "supported_locales": ["zh-CN"]
+  }
+}

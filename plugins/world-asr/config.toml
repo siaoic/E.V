@@ -1,0 +1,24 @@
+[plugin]
+enabled = true
+config_version = "0.1.0"
+
+[asr]
+# ASR 世界开关（三重开关之一；另两个是主配置 worlds.enabled 与 voice.enable_asr）。
+enabled = true
+# 麦克风输入设备名（模糊匹配）。留空用系统默认输入设备；
+# 与直播语音的【输出】设备互不干扰。
+device = ""
+# 安静多久判定一句说完（秒）。太短会把句间停顿切碎，太长会拖慢响应。
+silence_seconds = 1.2
+# 语音能量门限（int16 RMS）。环境嘈杂时调高，安静房间可降到 200 左右。
+silence_threshold_rms = 320.0
+# 短于该时长的声响按噪声丢弃（秒）。
+min_speech_seconds = 0.3
+# 单段语音最长时长，超过强制切分（秒）。
+max_segment_seconds = 15.0
+# 采集采样率；语音识别模型通常为 16000。
+sample_rate = 16000
+# 世界机器名，全局唯一；AI 调用 world_observe 时用它定位本世界。
+name = "asr"
+display_name = "麦克风"
+env_prompt = "你的直播间旁有一支打开的麦克风，主播（用户）对着麦克风说的话会被语音识别转写成文本，以「你听到：……」的形式作为世界事件出现在你的上下文里；这是主播在直接对你说话。"

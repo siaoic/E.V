@@ -1,0 +1,17 @@
+diff --git a/index.js b/index.js
+index b38bd30c0c1babb4d7d3d396067ed828d9dc9f6a..0aab92b17f1f75b01006dc4b9af49ee64a9d5a0b 100644
+--- a/index.js
++++ b/index.js
+@@ -567,6 +567,12 @@ function inject (bot) {
+                 placing = false
+                 lastNodeTime = performance.now()
+               })
++          }, function (_ignoreError) {
++            // Release the equip lock on rejection, retaining placement state
++            // so the next tick can retry. Handle rejection in then's second
++            // argument: the trailing catch also receives fulfilled-handler
++            // errors, which must not release the lock twice.
++            lockEquipItem.release()
+           })
+           .catch(_ignoreError => {})
+       }

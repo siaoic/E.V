@@ -1,0 +1,16 @@
+[plugin]
+enabled = true
+config_version = "1.0.0"
+
+[generation]
+task_name = "utils"
+model = ""
+temperature = 0.6
+llm_timeout_seconds = 60
+
+[message]
+action_intro = "🎨 让我来画给你看……"
+action_outro = "用浏览器打开上面的文件，就能看到一笔一画的绘制过程。"
+
+[animation]
+animation_speed = 2.0

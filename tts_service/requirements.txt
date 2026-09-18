@@ -1,0 +1,7 @@
+# GSV-TTS-Lite 流式合成服务依赖
+# 注意：运行前请先按 GSV-TTS-Lite 官方说明安装 torch 及对应推理后端（CUDA/MPS/CPU）
+fastapi>=0.110
+uvicorn>=0.29
+numpy
+soundfile
+gsv-tts-lite>=0.4.7

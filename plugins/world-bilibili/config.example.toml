@@ -1,0 +1,18 @@
+[plugin]
+enabled = true
+config_version = "0.1.0"
+
+[bilibili]
+# B 站直播间房间号（支持短号）。必填，填 0 插件会拒绝加载。
+room_id = 30655190
+# B 站账号 SESSDATA，用于获取真实用户身份；留空则匿名连接（弹幕 uid 为 0、昵称打码）。
+sessdata = ""
+# 世界机器名，全局唯一；AI 调用 world_observe 时用它定位本世界。
+name = "bilibili"
+display_name = "B站直播间"
+env_prompt = "你正在 B 站直播，直播间里有观众在送礼、上舰和进出直播间；这些互动会作为世界事件与状态出现，弹幕与醒目留言则作为普通聊天消息出现。"
+# 进场 / 关注的投递语义：flush 会立即唤醒一轮（适合小房间打招呼），
+# debounce 只落上下文不唤醒（默认，避免大房间进场刷屏唤醒）。
+interact_trigger = "debounce"
+# 状态快照里保留互动事件的时长（秒）。弹幕与醒目留言走聊天流，不进快照。
+recent_window_seconds = 20.0

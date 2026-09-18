@@ -1,0 +1,24 @@
+# ===== Python =====
+.venv/
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.ruff_cache/
+
+# ===== Node =====
+node_modules/
+
+# ===== 构建产物 =====
+dashboard/dist/
+
+# ===== 运行时数据（用户数据红线，不入库）=====
+data/
+logs/
+*.log
+temp/
+tts_service/models/
+
+# ===== 凭据文件（公开仓库禁推；同目录附 *.example 模板）=====
+config/model_config.toml
+plugins/world-bilibili/config.toml
+plugins/world-bilibili/config_back/

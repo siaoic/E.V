@@ -1,0 +1,22 @@
+[plugin]
+enabled = true
+config_version = "0.1.0"
+
+[minecraft]
+# MC 服务器地址与端口。
+host = "127.0.0.1"
+port = 25565
+# 进服用户名（离线模式账号）。
+username = "MaiBot"
+# MC 协议版本；留空由 mineflayer 自动协商（服务器版本较新或较旧时显式填写）。
+version = ""
+# 敌对生物警戒半径（格）：敌对生物进入该范围按「显著事件」立即打断上报。
+threat_radius = 8.0
+# Node 可执行文件路径；留空用 PATH 上的 node（需要 Node ≥ 18）。
+node_executable = ""
+# 等待进服完成的超时（秒），超时插件拒绝加载并明确报错。
+ready_timeout_seconds = 30.0
+# 世界机器名，全局唯一；AI 调用 world_observe 时用它定位本世界。
+name = "minecraft"
+display_name = "Minecraft 世界"
+env_prompt = "你正在 Minecraft 服务器里玩游戏，你的真实处境（位置 / 血量 / 饥饿 / 周围生物 / 背包）会作为世界状态注入，掉血、死亡、敌对生物靠近、玩家进出会立刻以世界事件通知你；你可以用 minecraft_do / minecraft_scout / minecraft_check 对游戏下动作，动作提交后真实结果会以世界事件回传。"

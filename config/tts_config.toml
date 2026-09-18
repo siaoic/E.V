@@ -1,0 +1,27 @@
+# MaiBot TTS 流式朗读配置
+# 用于把 AI 对外发送的文本回复，交给独立的 GSV-TTS-Lite 流式服务合成并播放到本机（虚拟）扬声器。
+
+# 是否启用流式朗读。false 时完全不产生任何 TTS 行为
+enabled = false
+
+# GSV-TTS-Lite 流式服务地址（见 tts_service/app.py，默认 127.0.0.1:8095）
+# 如下配置 spk_audio/prompt_audio/prompt_text 为空，则使用服务端 tts_service/refs 下的默认参考音频
+base_url = "http://127.0.0.1:8095"
+
+# 音色参考音频路径（服务端可访问的路径或 URL）；留空表示使用服务端默认配置
+spk_audio = ""
+# 风格参考音频路径；留空表示使用服务端默认配置
+prompt_audio = ""
+# 风格参考音频对应的文本；留空表示使用服务端默认配置
+prompt_text = ""
+
+# 流式合成分块参数（透传给服务端）
+stream_chunk = 25
+overlap_len = 5
+
+# 未知 meta 时的兜底采样率（GSV-TTS-Lite 默认 32000，一般无需改动）
+sample_rate = 32000
+
+# sounddevice 输出设备：可为设备名或索引；留空表示系统默认设备。
+# 若要发到虚拟扬声器（如 VB-CABLE），这里填对应设备名（可用 python -m sounddevice 查看设备列表）
+output_device = ""

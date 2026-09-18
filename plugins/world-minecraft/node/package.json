@@ -1,0 +1,14 @@
+{
+  "name": "world-minecraft-node",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Minecraft World 的 mineflayer 桥（stdout 只走 NDJSON 协议帧，日志全部走 stderr）",
+  "main": "index.js",
+  "engines": {
+    "node": ">=18"
+  },
+  "dependencies": {
+    "mineflayer": "^4.20.0",
+    "mineflayer-pathfinder": "^2.4.5"
+  }
+}

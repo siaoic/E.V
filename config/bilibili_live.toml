@@ -1,0 +1,66 @@
+# MaiBot B站直播语音配置
+#
+# 弹幕接入（房间号、SESSDATA、启停）已由 world-bilibili 插件负责，
+# 见 plugins/world-bilibili/config.toml 与 WebUI「插件管理」。
+# 本文件只保留直播语音朗读路径的配置。
+
+# ===== 直播语音（独立朗读路径）=====
+# 让麦麦对直播间弹幕的回复，合成语音并播放到主播扬声器 / 直播间采集设备（如 OBS 捕获“扬声器/立体声混音”）。
+# 注意：直播回复走这套独立语音路径，不再触发通用「朗读 AI 回复」（见 chat.tts_read），避免同一句播两遍。
+[voice]
+# 是否启用直播语音朗读。false 时直播回复不触发任何语音。
+enabled = false
+
+# GSV-TTS-Lite 流式服务地址（见 tts_service/app.py，默认 127.0.0.1:8095）。
+base_url = "http://127.0.0.1:8095"
+
+# 主参考音频（决定 AI 的音色与说话风格），留空则回退 WebUI「聊天 → 语音朗读」的配置。
+# 相对路径以项目根目录为基准（即直播目录下的 tts_service/refs/...）。
+spk_audio = "tts_service/refs/upload_30006ac6eff940c6b74795a924d0a75f.wav"
+# 主参考音频对应的文本，帮助模型对齐语气与情感；留空则回退通用配置。
+spk_audio_text = "这个短暂的生命是吧，要珍惜起来，珍惜每一天的时间。"
+# 追加音色参考（可多个、无需文本），留空则回退通用配置。
+spk_audio_additional = ["tts_service/refs/upload_53abd6ad5ec642d887be5dc04d7390f3.wav", "tts_service/refs/upload_51b52415033d44cfbcd5023f23c3ce02.wav", "tts_service/refs/upload_3d48a16b89144caebee568aee4792838.wav", "tts_service/refs/upload_e849ea1d844d473b8c65bccb63814430.wav"]
+
+# 输出设备：建议用虚拟扬声器（如 VB-CABLE）或立体声混音，确保 OBS 能采集到；
+# 留空则回退通用朗读的扬声器配置。
+output_device = ""
+
+# 流式合成分块参数（与 tts_service 对齐，一般无需改动）。
+stream_chunk = 25
+overlap_len = 5
+
+# ===== VTuber 表演层（W4 口型 + 表情；将来的 V 引擎共用本节）=====
+[vtuber]
+# VTuber 引擎总开关（src/vtuber/ 子进程，V0–V5 实施后生效）。
+# 与 lipsync_enabled 互斥：同一时刻只允许一个 VTube Studio 注入方，同真启动会直接报错。
+enabled = false
+
+# W4 口型 + 表情桥开关：AI 说话时 Live2D 模型的嘴随音量开合，并可用 vtuber_emote 做表情。
+lipsync_enabled = false
+
+# VTube Studio API 地址（需 VTS 已启动并加载 Live2D 模型）。
+vts_ws_url = "ws://127.0.0.1:8001"
+# VTS 插件名与开发者名（首次连接会在 VTS 弹授权窗，点「允许」后 token 自动写回本文件）。
+vts_plugin_name = "MaiBot Live"
+vts_plugin_developer = "MaiBot"
+vts_auth_token = ""
+
+# 口型参数与曲线：MouthOpen 量程 0..1；gain 是 RMS→开合度的增益，说话嘴太小就调大。
+mouth_param = "MouthOpen"
+mouth_gain = 8.0
+mouth_max = 1.0
+inject_hz = 30
+
+# 表情保持时长（秒），到时自动恢复。
+emote_hold_seconds = 3.0
+# 表情映射表：中文名 = VTS 表情文件名（不带 .exp3.json 后缀也可以）。
+# vtuber_emote 工具只暴露这里配置的表情；示例（按你的模型实际表情文件修改）：
+# expressions = { "微笑" = "smile", "害羞" = "blush" }
+expressions = { }
+
+# ——以下为 V 引擎专属键（V0–V5 实施后生效，口型桥不读）——
+engine_url = "http://127.0.0.1:8096"
+overlay_port = 7792
+live2d_dir = ""
+model_profile = ""

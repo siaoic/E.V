@@ -1,0 +1,29 @@
+{
+  "manifest_version": 2,
+  "id": "maibot-live.world-asr",
+  "version": "0.1.0",
+  "name": "麦克风语音世界",
+  "description": "麦克风常驻采集：能量 VAD 分段，把分段音频经主程序的语音识别转写成文本，再作为世界事件进入 AI 上下文。主播对着麦克风说的话会变成「你听到：……」形式的世界事件。",
+  "author": {
+    "name": "MaiBot Live",
+    "url": "https://github.com/MaiM-with-u/MaiBot"
+  },
+  "license": "AGPL-3.0-or-later",
+  "urls": {
+    "repository": "https://github.com/MaiM-with-u/MaiBot"
+  },
+  "host_application": {
+    "min_version": "1.0.0",
+    "max_version": "1.2.99"
+  },
+  "sdk": {
+    "min_version": "2.0.0",
+    "max_version": "2.99.99"
+  },
+  "dependencies": [],
+  "capabilities": ["world.register", "world.unregister", "world.event", "config.get"],
+  "i18n": {
+    "default_locale": "zh-CN",
+    "supported_locales": ["zh-CN"]
+  }
+}

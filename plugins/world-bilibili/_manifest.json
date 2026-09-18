@@ -1,0 +1,35 @@
+{
+  "manifest_version": 2,
+  "id": "maibot-live.world-bilibili",
+  "version": "0.3.0",
+  "name": "B站直播间世界",
+  "description": "B 站直播的唯一入口：弹幕与醒目留言注入成聊天消息，礼物 / 上舰 / 进场关注作为「世界框架基座」的世界事件与状态供 AI 感知；麦麦的回复由本插件的发送网关承接（只记日志，不回发直播间）。插件自连 B 站，不依赖主程序适配器。",
+  "author": {
+    "name": "MaiBot Live",
+    "url": "https://github.com/MaiM-with-u/MaiBot"
+  },
+  "license": "AGPL-3.0-or-later",
+  "urls": {
+    "repository": "https://github.com/MaiM-with-u/MaiBot"
+  },
+  "host_application": {
+    "min_version": "1.0.0",
+    "max_version": "1.2.99"
+  },
+  "sdk": {
+    "min_version": "2.0.0",
+    "max_version": "2.99.99"
+  },
+  "dependencies": [
+    {
+      "type": "python_package",
+      "name": "blivedm",
+      "version_spec": ">=1.1.7"
+    }
+  ],
+  "capabilities": ["message.inject_inbound", "world.register", "world.unregister", "world.event"],
+  "i18n": {
+    "default_locale": "zh-CN",
+    "supported_locales": ["zh-CN"]
+  }
+}

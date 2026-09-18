@@ -1,0 +1,34 @@
+{
+  "manifest_version": 2,
+  "version": "1.0.0",
+  "name": "AI 画画",
+  "description": "让 LLM 在对话中调用此插件生成可逐笔绘制的 SVG，并通过核心描边动画引擎呈现一笔一画的绘制过程。",
+  "author": {
+    "name": "MaiBot Team",
+    "url": "https://github.com/MaiM-with-u/MaiBot"
+  },
+  "license": "GPL-v3.0-or-later",
+  "urls": {
+    "repository": "https://github.com/MaiM-with-u/MaiBot"
+  },
+  "changelog": "CHANGELOG.md",
+  "host_application": {
+    "min_version": "1.0.0",
+    "max_version": "1.2.99"
+  },
+  "sdk": {
+    "min_version": "2.0.0",
+    "max_version": "2.99.99"
+  },
+  "dependencies": [],
+  "capabilities": [
+    "llm.generate",
+    "send.text"
+  ],
+  "i18n": {
+    "default_locale": "zh-CN",
+    "locales_path": "_locales",
+    "supported_locales": ["zh-CN"]
+  },
+  "id": "maibot-team.ai-drawing-plugin"
+}
