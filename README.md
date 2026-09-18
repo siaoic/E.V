@@ -21,6 +21,23 @@ VTuber 表演层桥接：
 | `data/`、`logs/`、`tts_service/models/` | 用户数据 / 运行时产物 / 模型权重 | 首次运行自动生成 |
 | `.venv/`、`node_modules/`、`dashboard/dist/` | 可重建的虚拟环境 / 依赖 / 构建产物 | `uv sync`、`npm install`、`cd dashboard && npm run build` |
 
+## TS 侧重构（进行中）
+
+`server/` 是 TypeScript 应用层（迁移方案 B：TS 接管 HTTP/WS/鉴权/数据层；Python 保留
+AI 推理 / 向量 / TTS / 插件 Runner，见 `迁移前置调研.md`）。阶段①已落地：
+
+- `server/src/auth/`：webui.json Token 管理 + Cookie + WS 临时 token（与 Python 逐字对齐，29 项契约测试锁定）
+- `server/src/db/`：真实 DDL（`schema.sql` 只读导出）+ Drizzle schema（由 `scripts/generate_drizzle_schema.py` 生成）
+- `server/src/http/`：/api/webui 默认鉴权守卫 + health / version-compatibility / auth / ws-token 路由
+- `server/src/main.ts`：进程入口，退出码 42 = 重启（与 bot.py 对齐）
+
+```bash
+cd server
+npm install          # Node >= 22；原生模块脚本批准已写入 package.json 的 allowScripts
+npm test             # 29 项契约测试
+npm run dev          # MAIBOT_ROOT 可指定仓库根；MAIBOT_DB_FILE 可覆盖主库路径
+```
+
 ## 快速启动（概要）
 
 ```bash
