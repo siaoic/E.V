@@ -15,12 +15,15 @@ import fastifyStatic from "@fastify/static";
 import Fastify, { type FastifyInstance } from "fastify";
 import type { FastifyBaseLogger } from "fastify";
 
+import type { DbHandle } from "./db/client.js";
+
 import { WsTokenStore } from "./auth/ws-tokens.js";
 import { CookiePolicy } from "./auth/cookies.js";
 import type { TokenManager } from "./auth/token-manager.js";
 import type { WebUiSettings } from "./config/loader.js";
 import { registerApiGuard } from "./http/guard.js";
 import { registerAuthRoutes } from "./http/routes/auth-routes.js";
+import { registerPersonRoutes } from "./http/routes/person-routes.js";
 import { registerSystemRoutes } from "./http/routes/system-routes.js";
 
 export interface AppOptions {
@@ -29,6 +32,8 @@ export interface AppOptions {
   logger: FastifyBaseLogger;
   /** 仓库根：静态资源（dashboard/dist）与 pyproject 读取的基准目录。 */
   rootDir: string;
+  /** 数据库句柄（person 等数据路由的数据源）；不传则数据路由不注册。 */
+  db?: DbHandle;
   /** 真机前端还在 Python 侧时允许完全关闭静态托管（测试/并行运行用）。 */
   serveDashboard?: boolean;
   /** 注入 WS 临时 token 存储（测试用）；缺省时自建。 */
@@ -86,6 +91,9 @@ export function buildApp(options: AppOptions): FastifyInstance {
   });
 
   registerSystemRoutes(app, { settings, rootDir });
+  if (options.db) {
+    registerPersonRoutes(app, options.db);
+  }
   registerAuthRoutes(app, {
     tokenManager,
     cookiePolicy,

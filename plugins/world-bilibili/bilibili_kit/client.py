@@ -49,9 +49,10 @@ class _LiveHandler(blivedm.BaseHandler):
         self._owner = owner
 
     def _on_heartbeat(self, client: blivedm.BLiveClient, message: web_models.HeartbeatMessage) -> None:
-        """心跳到达意味着连接确实建立了。"""
+        """心跳到达意味着连接确实建立了；人气值作为拥挤信号交给准入预算。"""
 
         self._owner.mark_connected()
+        self._owner.observe_crowd(int(message.popularity or 0))
 
     def _on_danmaku(self, client: blivedm.BLiveClient, message: web_models.DanmakuMessage) -> None:
         """弹幕。``dm_type`` 为 0 是文本弹幕，其余是表情 / 语音，没有可读正文。"""
@@ -100,7 +101,15 @@ class _LiveHandler(blivedm.BaseHandler):
 class BiliDanmakuClient:
     """B 站直播间弹幕客户端。"""
 
-    def __init__(self, *, room_id: int, sessdata: str, push_event: Any, logger: Any) -> None:
+    def __init__(
+        self,
+        *,
+        room_id: int,
+        sessdata: str,
+        push_event: Any,
+        logger: Any,
+        on_crowd: Any = None,
+    ) -> None:
         """初始化客户端。
 
         Args:
@@ -109,12 +118,14 @@ class BiliDanmakuClient:
             push_event: 接收 :class:`LiveEvent` / :class:`LiveChatMessage` 的可调用对象
                 （同步、不得阻塞），通常是 ``Queue.put_nowait``。
             logger: 插件的 ``ctx.logger``。
+            on_crowd: 心跳人气值回调 ``on_crowd(popularity: int)``（拥挤信号，可空）。
         """
 
         self._room_id = int(room_id)
         self._sessdata = str(sessdata or "")
         self._push_event = push_event
         self._logger = logger
+        self._on_crowd = on_crowd
 
         self._session: Optional[aiohttp.ClientSession] = None
         self._client: Optional[blivedm.BLiveClient] = None
@@ -147,6 +158,15 @@ class BiliDanmakuClient:
 
         self._connected = True
         self._last_error = ""
+
+    def observe_crowd(self, popularity: int) -> None:
+        """把心跳人气值交给拥挤信号回调（同步、不得阻塞）。"""
+
+        if self._on_crowd is not None:
+            try:
+                self._on_crowd(int(popularity))
+            except Exception as exc:  # noqa: BLE001 - 信号失败不影响连接
+                self._logger.debug(f"拥挤信号回调失败: {exc!r}")
 
     def mark_disconnected(self, exception: Optional[Exception]) -> None:
         """标记连接已断开；``exception`` 为 ``None`` 表示是按请求正常停止。"""

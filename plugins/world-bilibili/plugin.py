@@ -23,11 +23,13 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import time
+from pathlib import Path
 from typing import Any, Dict, Literal, Optional, Union
 
 from maibot_sdk import API, Field as PluginField, MaiBotPlugin, MessageGateway, PluginConfigBase
 from pydantic import Field
 
+from .admission import AudienceAdmission, AudienceTuning
 from .bilibili_kit import BiliDanmakuClient, LiveChatMessage, LiveEvent, LiveEventKind, LiveRoomStats
 
 # 主程序世界框架能力名（基座实现在 src/worlds/，插件通过能力通道调用）。
@@ -107,6 +109,31 @@ class BilibiliConfig(PluginConfigBase):
     recent_window_seconds: float = PluginField(
         default=180.0, ge=5.0, le=3600.0, description="状态快照里保留互动事件的时长（秒）"
     )
+    admission_enabled: bool = PluginField(
+        default=False,
+        description="观众事件准入预算开关（默认关，行为与旧版完全一致）；开启后仅在拥挤时限流弹幕",
+    )
+    admission_line_budget: int = PluginField(
+        default=114, ge=1, le=5000, description="准入预算：每个时间窗口最多放行的弹幕行数"
+    )
+    admission_token_budget: int = PluginField(
+        default=1061, ge=1, le=100000, description="准入预算：每个时间窗口最多放行的估算 token 数"
+    )
+    admission_important_share: float = PluginField(
+        default=0.5, ge=0.05, le=1.0, description="重要观众（舰队/SC/互动达标）最多占总预算的比例"
+    )
+    admission_window_seconds: float = PluginField(
+        default=10.0, ge=2.0, le=120.0, description="预算窗口时长（秒），窗口之间计数清零"
+    )
+    admission_crowded_on: float = PluginField(
+        default=200.0, ge=0.0, description="人气值 ≥ 该值判定「拥挤」，限流生效"
+    )
+    admission_crowded_off: float = PluginField(
+        default=170.0, ge=0.0, description="人气值 ≤ 该值并持续一段时间后解除拥挤（滞回下限）"
+    )
+    admission_crowd_release_seconds: float = PluginField(
+        default=120.0, ge=10.0, le=3600.0, description="人气值低于滞回下限持续多久后解除拥挤（秒）"
+    )
 
 
 class WorldBilibiliConfig(PluginConfigBase):
@@ -135,6 +162,9 @@ class WorldBilibiliPlugin(MaiBotPlugin):
         self._registered_name = ""
         # 上次轮询报告出去的版本号；初值 -1 让首次轮询必定报告变化，把初始状态推给框架。
         self._polled_revision = -1
+        self._admission: Optional[AudienceAdmission] = None
+        self._admission_persist_task: Optional[asyncio.Task[None]] = None
+        self._admission_dropped_since_log = 0
 
     # ------------------------------------------------------------------ 生命周期
 
@@ -154,6 +184,7 @@ class WorldBilibiliPlugin(MaiBotPlugin):
         settings = self.config.bilibili
         self._stats = LiveRoomStats(recent_window_seconds=settings.recent_window_seconds)
         self._polled_revision = -1
+        self._setup_admission()
 
         await self._register_to_core()
         try:
@@ -177,6 +208,7 @@ class WorldBilibiliPlugin(MaiBotPlugin):
         await self._stop_consume_task()
         await self._stop_client()
         await self._publish_gateway_state(ready=False)
+        await self._stop_admission()
         await self._unregister_from_core()
         # 统计属于本次连接：清掉它，卸载后再有人来取状态会直接报错而不是拿到旧数据
         self._stats = None
@@ -355,6 +387,7 @@ class WorldBilibiliPlugin(MaiBotPlugin):
             # blivedm 回调是同步分发的，只能入队，不能在回调里 await
             push_event=self._queue.put_nowait,
             logger=self.ctx.logger,
+            on_crowd=self._observe_crowd,
         )
         await self._client.start()
         self._consume_task = asyncio.create_task(self._consume_loop())
@@ -403,9 +436,113 @@ class WorldBilibiliPlugin(MaiBotPlugin):
         """按产出类型分派：聊天消息注入聊天流，世界事件上报框架基座。"""
 
         if isinstance(item, LiveChatMessage):
-            await self._inject_chat_message(item)
+            if self._admit_chat(item):
+                await self._inject_chat_message(item)
         else:
+            self._observe_world_event(item)
             await self._report_event(item)
+
+    # ------------------------------------------------------------------ 观众准入预算
+
+    def _setup_admission(self) -> None:
+        """按配置构建准入控制器；未开启时为 ``None``，行为与旧版完全一致。"""
+
+        settings = self.config.bilibili
+        if not settings.admission_enabled:
+            self._admission = None
+            return
+        tuning = AudienceTuning(
+            line_budget=settings.admission_line_budget,
+            token_budget=settings.admission_token_budget,
+            important_budget_share=settings.admission_important_share,
+            window_seconds=settings.admission_window_seconds,
+            crowded_on=settings.admission_crowded_on,
+            crowded_off=settings.admission_crowded_off,
+            crowd_release_ms=settings.admission_crowd_release_seconds * 1000,
+        )
+        room_id = settings.room_id
+        ledger_file = Path(__file__).resolve().parent / "data" / f"audience-ledger-{room_id}.json"
+        self._admission = AudienceAdmission(room_id=room_id, file=ledger_file, tuning=tuning)
+        self._admission.start_stream()
+        self._admission_persist_task = asyncio.create_task(self._admission_persist_loop())
+        self.ctx.logger.info(
+            f"观众准入预算已开启：{tuning.line_budget} 行 / {tuning.token_budget} token 每 "
+            f"{tuning.window_seconds:g}s 窗口，重要观众占比 {tuning.important_budget_share:g}；"
+            f"拥挤阈值 {tuning.crowded_on:g}/{tuning.crowded_off:g}（人气值）"
+        )
+
+    def _observe_crowd(self, popularity: int) -> None:
+        """心跳人气值 → 拥挤信号（blivedm 同步回调线程，必须不阻塞）。"""
+
+        admission = self._admission
+        if admission is not None:
+            admission.observe_online_rank(popularity)
+
+    def _observe_world_event(self, event: LiveEvent) -> None:
+        """礼物 / 上舰 / 进场事件喂给准入台账（重要观众资格的来源）。"""
+
+        admission = self._admission
+        if admission is None:
+            return
+        if event.kind is LiveEventKind.GUARD:
+            admission.observe(str(event.uid), guard=True)
+        elif event.kind is LiveEventKind.INTERACT:
+            admission.observe(str(event.uid), interaction=True)
+
+    def _admit_chat(self, chat: LiveChatMessage) -> bool:
+        """聊天消息准入判定；返回 ``False`` 表示本条因预算被丢弃。"""
+
+        admission = self._admission
+        if admission is None:
+            return True
+        decision = admission.admit(
+            chat.text,
+            str(chat.uid),
+            critical=chat.superchat_yuan > 0,
+            superchat_yuan=chat.superchat_yuan if chat.superchat_yuan > 0 else None,
+        )
+        if decision["accepted"]:
+            if decision["limiting_active"]:
+                self.ctx.logger.debug(
+                    f"[准入] 放行（{decision['lane']}）：{chat.uname}: {chat.text[:40]}"
+                )
+            return True
+        self._admission_dropped_since_log += 1
+        if self._admission_dropped_since_log >= 20:
+            self.ctx.logger.info(
+                f"[准入] 拥挤限流中：已连续丢弃 {self._admission_dropped_since_log} 条弹幕"
+                f"（原因 {decision['dropped_reason']}）"
+            )
+            self._admission_dropped_since_log = 0
+        return False
+
+    async def _admission_persist_loop(self) -> None:
+        """定期把准入台账落盘（原子替换写）；退出时再 flush 一次。"""
+
+        admission = self._admission
+        if admission is None:
+            return
+        try:
+            while True:
+                await asyncio.sleep(max(admission.tuning.persist_seconds, 5.0))
+                if admission.maybe_persist():
+                    self.ctx.logger.debug("准入台账已落盘")
+        except asyncio.CancelledError:
+            raise
+
+    async def _stop_admission(self) -> None:
+        """停止持久化任务并 flush 台账。"""
+
+        task = self._admission_persist_task
+        self._admission_persist_task = None
+        if task is not None:
+            task.cancel()
+            with contextlib.suppress(asyncio.CancelledError):
+                await task
+        if self._admission is not None:
+            self._admission.end_stream()
+            self._admission.flush()
+            self._admission = None
 
     async def _inject_chat_message(self, chat: LiveChatMessage) -> None:
         """把弹幕 / 醒目留言注入主程序，成为直播间聊天流里的一条普通消息。
@@ -464,11 +601,15 @@ class WorldBilibiliPlugin(MaiBotPlugin):
         stats = self._require_stats()
         client = self._client
         connection = "未连接（插件刚启动或连接已被关停）" if client is None else client.status_text
-        return stats.render(
+        snapshot = stats.render(
             now=time.monotonic(),
             room_id=self.config.bilibili.room_id,
             connection=connection,
         )
+        admission = self._admission
+        if admission is not None:
+            snapshot = f"{snapshot}\n{admission.summary_text()}"
+        return snapshot
 
     def _require_stats(self) -> LiveRoomStats:
         """取直播间统计；插件尚未完成 ``on_load`` 时直接报错。

@@ -6,7 +6,9 @@ import path from "node:path";
 
 import pino from "pino";
 
+import { mkdtempSync } from "node:fs";
 import { buildApp } from "../src/app.js";
+import { ensureRuntimePerformanceIndexes, ensureSchema, openDatabase } from "../src/db/client.js";
 import { TokenManager } from "../src/auth/token-manager.js";
 import { WsTokenStore } from "../src/auth/ws-tokens.js";
 import type { WebUiSettings } from "../src/config/loader.js";
@@ -77,6 +79,12 @@ export function makeTestApp(options: TestAppOptions) {
   const tokenManager =
     options.tokenManager ?? TokenManager.open(options.repo.webuiJsonPath, silentLogger);
   const wsTokens = options.wsTokens ?? new WsTokenStore();
+
+  const dbFile = path.join(mkdtempSync(path.join(tmpdir(), "maibot-app-db-")), "MaiBot.db");
+  const db = openDatabase(dbFile, silentLogger);
+  ensureSchema(db, silentLogger);
+  ensureRuntimePerformanceIndexes(db, silentLogger);
+
   const app = buildApp({
     settings,
     tokenManager,
@@ -84,6 +92,7 @@ export function makeTestApp(options: TestAppOptions) {
     rootDir: options.repo.rootDir,
     serveDashboard: false,
     wsTokens,
+    db,
   });
-  return { app, tokenManager, wsTokens };
+  return { app, tokenManager, wsTokens, db };
 }

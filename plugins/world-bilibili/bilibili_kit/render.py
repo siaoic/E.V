@@ -71,6 +71,8 @@ class LiveChatMessage:
     text: str
     uid: int = 0
     uname: str = ""
+    superchat_yuan: float = 0.0
+    """醒目留言的人民币金额；普通弹幕为 0（供准入预算判定重要度）。"""
 
 
 @dataclass(frozen=True)
@@ -90,6 +92,8 @@ class LiveEvent:
     text: str
     uid: int = 0
     uname: str = ""
+    superchat_yuan: float = 0.0
+    """醒目留言的人民币金额；普通弹幕为 0（供准入预算判定重要度）。"""
     coin: int = 0
     payload: Dict[str, Any] = field(default_factory=dict)
 
@@ -187,6 +191,7 @@ def render_super_chat(message: Any) -> LiveChatMessage:
         text=f"[SC ¥{int(message.price or 0)}] {message.message}",
         uid=int(message.uid),
         uname=str(message.uname),
+        superchat_yuan=float(message.price or 0),
     )
 
 
