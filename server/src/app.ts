@@ -23,6 +23,7 @@ import type { TokenManager } from "./auth/token-manager.js";
 import type { WebUiSettings } from "./config/loader.js";
 import { registerApiGuard } from "./http/guard.js";
 import { registerAuthRoutes } from "./http/routes/auth-routes.js";
+import { registerJargonRoutes } from "./http/routes/jargon-routes.js";
 import { registerPersonRoutes } from "./http/routes/person-routes.js";
 import { registerSystemRoutes } from "./http/routes/system-routes.js";
 
@@ -93,6 +94,7 @@ export function buildApp(options: AppOptions): FastifyInstance {
   registerSystemRoutes(app, { settings, rootDir });
   if (options.db) {
     registerPersonRoutes(app, options.db);
+    registerJargonRoutes(app, options.db);
   }
   registerAuthRoutes(app, {
     tokenManager,
