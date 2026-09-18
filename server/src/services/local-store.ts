@@ -7,14 +7,14 @@
 
 import { readFileSync, writeFileSync, existsSync } from "node:fs";
 
-import type { Logger } from "pino";
+import type { FastifyBaseLogger } from "fastify";
 
 export class LocalStore {
   private store: Record<string, unknown>;
 
   private constructor(
     readonly filePath: string,
-    private readonly logger: Logger,
+    private readonly logger: FastifyBaseLogger,
   ) {
     if (existsSync(filePath)) {
       try {
@@ -28,7 +28,7 @@ export class LocalStore {
     }
   }
 
-  static open(filePath: string, logger: Logger): LocalStore {
+  static open(filePath: string, logger: FastifyBaseLogger): LocalStore {
     return new LocalStore(filePath, logger);
   }
 

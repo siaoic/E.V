@@ -140,7 +140,7 @@ def main() -> int:
                 if cols:
                     primary_key_column = cols[0].strip()
                 continue
-            if upper.startswith(("UNIQUE", "CONSTRAINT", "FOREIGN KEY", "CHECK")):
+            if upper.startswith(("UNIQUE", "CONSTRAINT", "FOREIGN KEY")) or re.match(r"^CHECK[\s(]", upper):
                 unique_constraints.append(definition)
                 continue
             match = re.match(r'^"?(\w+)"?\s+(\w+(?:\([^)]*\))?)(.*)$', definition)

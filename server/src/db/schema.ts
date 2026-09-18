@@ -115,9 +115,8 @@ export const expressions = sqliteTable("expressions", {
     lastActiveTime: text("last_active_time"),
     createTime: text("create_time"),
     sessionId: text("session_id"),
+    checked: integer("checked", { mode: "boolean" }).notNull(),
     modifiedBy: text("modified_by"),
-    // 表级约束（以 schema.sql 为准）：
-    //   checked BOOLEAN NOT NULL
 });
 
 export const highFrequencyTerms = sqliteTable("high_frequency_terms", {

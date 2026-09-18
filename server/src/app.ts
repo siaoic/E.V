@@ -18,6 +18,7 @@ import type pino from "pino";
 
 import type { DbHandle } from "./db/client.js";
 import { LocalStore } from "./services/local-store.js";
+import { ExpressionReviewStore } from "./services/expression-review-store.js";
 
 import { WsTokenStore } from "./auth/ws-tokens.js";
 import { CookiePolicy } from "./auth/cookies.js";
@@ -25,6 +26,7 @@ import type { TokenManager } from "./auth/token-manager.js";
 import type { WebUiSettings } from "./config/loader.js";
 import { registerApiGuard } from "./http/guard.js";
 import { registerAuthRoutes } from "./http/routes/auth-routes.js";
+import { registerExpressionRoutes } from "./http/routes/expression-routes.js";
 import { registerConfigRoutes } from "./http/routes/config-routes.js";
 import { registerJargonRoutes } from "./http/routes/jargon-routes.js";
 import { registerPersonRoutes } from "./http/routes/person-routes.js";
@@ -41,6 +43,8 @@ export interface AppOptions {
   db?: DbHandle;
   /** 本地 KV 存储（统计缓存等）；缺省时读写 data/local_store.json。 */
   localStore?: LocalStore;
+  /** 表达方式 AI 审核日志存储；缺省时读写 logs/expression_review/。 */
+  reviewStore?: ExpressionReviewStore;
   /** 真机前端还在 Python 侧时允许完全关闭静态托管（测试/并行运行用）。 */
   serveDashboard?: boolean;
   /** 注入 WS 临时 token 存储（测试用）；缺省时自建。 */
@@ -103,6 +107,11 @@ export function buildApp(options: AppOptions): FastifyInstance {
   if (options.db) {
     registerPersonRoutes(app, options.db);
     registerJargonRoutes(app, options.db);
+    registerExpressionRoutes(app, {
+      db: options.db,
+      rootDir,
+      reviewStore: options.reviewStore ?? ExpressionReviewStore.open(rootDir, options.localStore ?? LocalStore.open(path.join(rootDir, "data", "local_store.json"), logger), logger),
+    });
     registerStatisticsRoutes(app, {
       db: options.db,
       localStore: options.localStore ?? LocalStore.open(path.join(rootDir, "data", "local_store.json"), logger as pino.Logger),
