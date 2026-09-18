@@ -14,8 +14,10 @@ import fastifyCors from "@fastify/cors";
 import fastifyStatic from "@fastify/static";
 import Fastify, { type FastifyInstance } from "fastify";
 import type { FastifyBaseLogger } from "fastify";
+import type pino from "pino";
 
 import type { DbHandle } from "./db/client.js";
+import { LocalStore } from "./services/local-store.js";
 
 import { WsTokenStore } from "./auth/ws-tokens.js";
 import { CookiePolicy } from "./auth/cookies.js";
@@ -25,6 +27,7 @@ import { registerApiGuard } from "./http/guard.js";
 import { registerAuthRoutes } from "./http/routes/auth-routes.js";
 import { registerJargonRoutes } from "./http/routes/jargon-routes.js";
 import { registerPersonRoutes } from "./http/routes/person-routes.js";
+import { registerStatisticsRoutes } from "./http/routes/statistics-routes.js";
 import { registerSystemRoutes } from "./http/routes/system-routes.js";
 
 export interface AppOptions {
@@ -35,6 +38,8 @@ export interface AppOptions {
   rootDir: string;
   /** 数据库句柄（person 等数据路由的数据源）；不传则数据路由不注册。 */
   db?: DbHandle;
+  /** 本地 KV 存储（统计缓存等）；缺省时读写 data/local_store.json。 */
+  localStore?: LocalStore;
   /** 真机前端还在 Python 侧时允许完全关闭静态托管（测试/并行运行用）。 */
   serveDashboard?: boolean;
   /** 注入 WS 临时 token 存储（测试用）；缺省时自建。 */
@@ -95,6 +100,10 @@ export function buildApp(options: AppOptions): FastifyInstance {
   if (options.db) {
     registerPersonRoutes(app, options.db);
     registerJargonRoutes(app, options.db);
+    registerStatisticsRoutes(app, {
+      db: options.db,
+      localStore: options.localStore ?? LocalStore.open(path.join(rootDir, "data", "local_store.json"), logger as pino.Logger),
+    });
   }
   registerAuthRoutes(app, {
     tokenManager,
