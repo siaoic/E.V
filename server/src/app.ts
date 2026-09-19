@@ -54,6 +54,8 @@ export interface AppOptions {
   logBuffer?: LogRingBuffer;
   /** WS 网关注册后的实例（测试与运行期广播入口）。 */
   wsGateway?: WsGateway;
+  /** Chat 引擎桥接客户端（Python 内核 chat 管线代理）；缺省时 chat 受理不转发。 */
+  chatBridge?: import('./kernel/chat-bridge.js').ChatBridgeClient;
   /** 真机前端还在 Python 侧时允许完全关闭静态托管（测试/并行运行用）。 */
   serveDashboard?: boolean;
   /** 注入 WS 临时 token 存储（测试用）；缺省时自建。 */
@@ -117,6 +119,7 @@ export function buildApp(options: AppOptions): FastifyInstance {
       tokenManager,
       wsTokens,
       db: options.db ?? null,
+      chatBridge: options.chatBridge,
       logger,
     });
   const logBuffer = options.logBuffer;

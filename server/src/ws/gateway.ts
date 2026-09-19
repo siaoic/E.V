@@ -19,6 +19,7 @@ import type { RawData, WebSocket as WsSocket } from "ws";
 import type { FastifyBaseLogger } from "fastify";
 
 import type { DbHandle } from "../db/client.js";
+import type { ChatBridgeClient } from "../kernel/chat-bridge.js";
 import type { TokenManager } from "../auth/token-manager.js";
 import type { WsTokenStore } from "../auth/ws-tokens.js";
 import { COOKIE_NAME } from "../auth/cookies.js";
@@ -62,6 +63,7 @@ export class WsGateway {
       tokenManager: TokenManager;
       wsTokens: WsTokenStore;
       db: DbHandle | null;
+      chatBridge?: ChatBridgeClient;
       logger: FastifyBaseLogger;
     },
   ) {}
@@ -80,6 +82,10 @@ export class WsGateway {
 
   private get logger(): FastifyBaseLogger {
     return this.options.logger;
+  }
+
+  private get chatBridge(): ChatBridgeClient | undefined {
+    return this.options.chatBridge;
   }
 
   // ------------------------------------------------------------------ 连接生命周期
@@ -457,8 +463,22 @@ export class WsGateway {
       }
       const data = (message.data ?? {}) as Record<string, unknown>;
       this.sendResponse(connection.id, requestId, true, { accepted: true, session: clientSessionId });
-      // 处理引擎为 Python 内核（D1 二期接入）；当前接入点在此将 payload 转交
-      this.logger.debug({ sessionId: connection.chatSessions.get(clientSessionId)?.sessionId }, "chat message.send（引擎未接入，已受理）");
+      // 处理引擎为 Python 内核：经 bridge HTTP 转发（D1 二期接入完整管线后生效）
+      const internalSessionId = connection.chatSessions.get(clientSessionId)?.sessionId ?? "";
+      const chatData = (message.data ?? {}) as Record<string, unknown>;
+      const chatPayload = {
+        type: "message",
+        content: String(chatData.content ?? ""),
+        images: Array.isArray(chatData.images) ? chatData.images : [],
+        user_name: String(chatData.user_name ?? ""),
+      };
+      if (this.chatBridge) {
+        this.chatBridge.sendMessage(internalSessionId, chatPayload).catch((err) => {
+          this.logger.error({ error: err, sessionId: internalSessionId }, "chat message.send 转发失败");
+        });
+      } else {
+        this.logger.debug({ sessionId: internalSessionId }, "chat message.send（bridge 未接入，已受理）");
+      }
       return;
     }
 
