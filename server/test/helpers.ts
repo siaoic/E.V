@@ -9,6 +9,8 @@ import pino from "pino";
 import { mkdtempSync } from "node:fs";
 import { buildApp } from "../src/app.js";
 import { ensureRuntimePerformanceIndexes, ensureSchema, openDatabase } from "../src/db/client.js";
+import { LogRingBuffer } from "../src/logging/log-ring.js";
+import type { WsGateway } from "../src/ws/gateway.js";
 import { TokenManager } from "../src/auth/token-manager.js";
 import { WsTokenStore } from "../src/auth/ws-tokens.js";
 import type { WebUiSettings } from "../src/config/loader.js";
@@ -85,7 +87,8 @@ export function makeTestApp(options: TestAppOptions) {
   ensureSchema(db, silentLogger);
   ensureRuntimePerformanceIndexes(db, silentLogger);
 
-  const app = buildApp({
+  const logBuffer = new LogRingBuffer(500);
+  const buildOptions = {
     settings,
     tokenManager,
     logger: silentLogger,
@@ -93,6 +96,8 @@ export function makeTestApp(options: TestAppOptions) {
     serveDashboard: false,
     wsTokens,
     db,
-  });
-  return { app, tokenManager, wsTokens, db };
+    logBuffer,
+  };
+  const app = buildApp(buildOptions);
+  return { app, tokenManager, wsTokens, db, logBuffer, wsGateway: buildOptions.wsGateway as WsGateway };
 }

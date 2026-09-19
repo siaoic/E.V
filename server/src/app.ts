@@ -10,6 +10,9 @@ import { existsSync } from "node:fs";
 import path from "node:path";
 
 import fastifyCookie from "@fastify/cookie";
+import fastifyWebsocket from "@fastify/websocket";
+import type { RawData, WebSocket as WsSocket } from "ws";
+import type { FastifyRequest } from "fastify";
 import fastifyCors from "@fastify/cors";
 import fastifyStatic from "@fastify/static";
 import Fastify, { type FastifyInstance } from "fastify";
@@ -25,6 +28,8 @@ import { CookiePolicy } from "./auth/cookies.js";
 import type { TokenManager } from "./auth/token-manager.js";
 import type { WebUiSettings } from "./config/loader.js";
 import { registerApiGuard } from "./http/guard.js";
+import { WS_AUTH_FAILED_REASON, WsGateway, generateConnectionId } from "./ws/gateway.js";
+import type { LogRingBuffer } from "./logging/log-ring.js";
 import { registerAuthRoutes } from "./http/routes/auth-routes.js";
 import { registerExpressionRoutes } from "./http/routes/expression-routes.js";
 import { registerConfigRoutes } from "./http/routes/config-routes.js";
@@ -45,6 +50,10 @@ export interface AppOptions {
   localStore?: LocalStore;
   /** 表达方式 AI 审核日志存储；缺省时读写 logs/expression_review/。 */
   reviewStore?: ExpressionReviewStore;
+  /** 日志环形缓冲（logs:main 订阅的回放与广播源）。 */
+  logBuffer?: LogRingBuffer;
+  /** WS 网关注册后的实例（测试与运行期广播入口）。 */
+  wsGateway?: WsGateway;
   /** 真机前端还在 Python 侧时允许完全关闭静态托管（测试/并行运行用）。 */
   serveDashboard?: boolean;
   /** 注入 WS 临时 token 存储（测试用）；缺省时自建。 */
@@ -80,6 +89,7 @@ export function buildApp(options: AppOptions): FastifyInstance {
 
   void app.register(fastifyCookie);
 
+
   void app.register(fastifyCors, {
     origin: (origin, callback) => {
       if (origin === undefined || isAllowedOrigin(origin, settings.port)) {
@@ -99,6 +109,38 @@ export function buildApp(options: AppOptions): FastifyInstance {
   registerApiGuard(app, {
     tokenManager,
     spaIndexFile: serveDashboard ? "index.html" : undefined,
+  });
+
+  const wsGateway =
+    options.wsGateway ??
+    new WsGateway({
+      tokenManager,
+      wsTokens,
+      db: options.db ?? null,
+      logger,
+    });
+  const logBuffer = options.logBuffer;
+  if (logBuffer) {
+    wsGateway.logReplay = (limit: number) => logBuffer.recent(limit);
+    logBuffer.setListener((entry) => wsGateway.broadcastLog(entry));
+  }
+  options.wsGateway = wsGateway;
+
+  // @fastify/websocket 的路由 hook 必须与 /ws 路由同作用域且先加载，
+  // 因此整体放进一个 async 子插件（avvio 在 listen 时加载，顺序正确）
+  app.register(async function wsScope(scope) {
+    await scope.register(fastifyWebsocket, { options: { maxPayload: 1024 * 1024 } });
+    scope.get("/ws", { websocket: true }, (socket: WsSocket, request: FastifyRequest) => {
+      if (!wsGateway.authenticate({ url: request.url, cookies: request.cookies as Record<string, string | undefined> })) {
+        socket.close(4001, WS_AUTH_FAILED_REASON);
+        return;
+      }
+      const connectionId = generateConnectionId();
+      wsGateway.registerConnection(connectionId, socket);
+      wsGateway.sendReady(connectionId);
+      socket.on("message", (data: RawData) => wsGateway.handleMessage(connectionId, data));
+      socket.on("close", () => wsGateway.cleanupConnection(connectionId));
+    });
   });
 
   registerSystemRoutes(app, { settings, rootDir });

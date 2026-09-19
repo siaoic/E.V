@@ -9,6 +9,8 @@
 import path from "node:path";
 
 import pino from "pino";
+
+import { LogRingBuffer } from "./logging/log-ring.js";
 import type { FastifyBaseLogger } from "fastify";
 
 import { REPO_ROOT, readWebUiSettings } from "./config/loader.js";
@@ -29,12 +31,14 @@ async function runOnce(rootDir: string, logger: FastifyBaseLogger): Promise<numb
   ensureSchema(db, logger);
   ensureRuntimePerformanceIndexes(db, logger);
 
-  const app = buildApp({
+  const logBuffer = new LogRingBuffer(500);
+  const app = await buildApp({
     settings,
     tokenManager,
     logger,
     rootDir,
     serveDashboard: process.env.MAIBOT_SERVE_DASHBOARD !== "false",
+    logBuffer,
   });
 
   // runOnce 挂起到 finish() 被调用（关停/重启），保证监督循环语义正确
@@ -51,7 +55,7 @@ async function runOnce(rootDir: string, logger: FastifyBaseLogger): Promise<numb
     resolved = true;
     void app
       .close()
-      .catch((error) => logger.error({ error }, "WebUI 关停异常"))
+      .catch((error: unknown) => logger.error({ error }, "WebUI 关停异常"))
       .finally(() => {
         db.close();
         resolveDone(outcome);
@@ -93,7 +97,11 @@ async function runOnce(rootDir: string, logger: FastifyBaseLogger): Promise<numb
 
 async function main(): Promise<void> {
   const rootDir = process.env.MAIBOT_ROOT ?? REPO_ROOT;
-  const logger = pino({ name: "maibot-server", level: process.env.MAIBOT_LOG_LEVEL ?? "info" });
+  const logBuffer = new LogRingBuffer(500);
+  const logger = pino(
+    { name: "maibot-server", level: process.env.MAIBOT_LOG_LEVEL ?? "info" },
+    pino.multistream([process.stdout, logBuffer.asStream()]),
+  );
   logger.info({ rootDir }, "MaiBot TS 侧启动");
 
   // 外层监督循环：退出码 42 → 原位重启（D3）；其他退出码直接结束
