@@ -16,7 +16,7 @@
  * 保留在 Python 内核侧。
  */
 
-import { readFileSync } from "node:fs";
+import { existsSync, readFileSync } from "node:fs";
 import path from "node:path";
 
 import { and, desc, eq, gte, inArray, isNotNull, isNull, like, not, or, sql, type SQL } from "drizzle-orm";
@@ -28,6 +28,12 @@ import type { DbHandle } from "../../db/client.js";
 import { sqliteDatetime } from "../../db/datetime.js";
 import { chatSessions, expressions } from "../../db/schema.js";
 import type { ExpressionReviewStore } from "../../services/expression-review-store.js";
+import {
+  getExpressionConfigForChat,
+  getTargetSessionIdsWithWildcards,
+  readExpressionGroups,
+  readExpressionVectorIndexPath,
+} from "../../services/expression-config.js";
 
 type ExpressionRow = typeof expressions.$inferSelect;
 type ChatSessionRow = typeof chatSessions.$inferSelect;
@@ -291,21 +297,179 @@ export function registerExpressionRoutes(app: FastifyInstance, deps: ExpressionR
     return schema.safeParse(raw);
   };
 
-  // ------------------------------------------------------------------ 501（下一批/保留 Python）
+  // ------------------------------------------------------------------ 聊天信息（含每聊天流表达配置）
 
-  const groupsNotMigrated = async (_request: unknown, reply: FastifyReply) => {
-    return reply.code(501).send({
-      detail: "表达共享组依赖配置通配符展开（ChatConfigUtils），将在下一批迁移",
-    });
+  const buildChatInfo = (chatId: string, row?: ChatSessionRow) => {
+    const config = getExpressionConfigForChat(db, rootDir, chatId);
+    return {
+      chat_id: chatId,
+      chat_name: getChatName(db, chatId),
+      platform: row?.platform ?? null,
+      account_id: row?.accountId ?? null,
+      is_group: Boolean(row?.groupId),
+      use_expression: config.useExpression,
+      enable_learning: config.enableLearning,
+    };
   };
+
+  const normalizeText = (value: unknown): string =>
+    String(value ?? "")
+      .split(/\s+/)
+      .join(" ")
+      .trim();
+
+  // ------------------------------------------------------------------ 表达共享组
+
+  app.get("/api/webui/expression/groups", async (request, reply) => {
+    const includeLegacy = new URL(request.url, "http://local").searchParams.get("include_legacy") === "true";
+    return handle(reply, () => {
+      const allVisible = getVisibleExpressionChatIds(db, rootDir, includeLegacy);
+      const chatSessionsById = new Map<string, ChatSessionRow>();
+      if (allVisible.size > 0) {
+        for (const row of db.drizzle
+          .select()
+          .from(chatSessions)
+          .where(inArray(chatSessions.sessionId, [...allVisible]))
+          .all()) {
+          chatSessionsById.set(row.sessionId, row);
+        }
+      }
+      const groups = readExpressionGroups(rootDir).map((group, index) => {
+        const chatIds = new Set<string>();
+        let isGlobal = false;
+        for (const target of group.targets) {
+          const platform = String(target.platform ?? "").trim();
+          const itemId = String(target.item_id ?? "").trim();
+          if (!platform && !itemId) {
+            continue;
+          }
+          if (platform === "*" && itemId === "*") {
+            isGlobal = true;
+          }
+          for (const sessionId of getTargetSessionIdsWithWildcards(db, target)) {
+            chatIds.add(sessionId);
+          }
+        }
+        if (group.targets.length === 0) {
+          isGlobal = true;
+        }
+        const resolved = [...(isGlobal ? allVisible : new Set([...chatIds].filter((id) => allVisible.has(id))))].sort();
+        return {
+          index,
+          name: `共享组 ${index + 1}`,
+          chat_ids: resolved,
+          members: resolved.map((chatId) => buildChatInfo(chatId, chatSessionsById.get(chatId))),
+          is_global: isGlobal,
+        };
+      });
+      return { success: true, data: groups };
+    });
+  });
+
+  // ------------------------------------------------------------------ 表达向量聚类
+
+  const readVectorPayload = (): { path: string; payload: Record<string, unknown> | null } => {
+    const indexPath = readExpressionVectorIndexPath(rootDir);
+    if (!existsSync(indexPath)) {
+      return { path: indexPath, payload: null };
+    }
+    const payload = JSON.parse(readFileSync(indexPath, "utf8")) as Record<string, unknown>;
+    if (payload === null || typeof payload !== "object" || Array.isArray(payload)) {
+      throw HttpError(500, `表达向量索引格式异常: ${indexPath}`);
+    }
+    return { path: indexPath, payload };
+  };
+
+  const clusterSummaries = (payload: Record<string, unknown>) => {
+    const clusters = ((payload.clusters as Array<Record<string, unknown>> | undefined) ?? [])
+      .filter((raw) => raw !== null && typeof raw === "object")
+      .map((raw) => ({
+        embedding_profile_marker: normalizeText(raw.embedding_profile_marker),
+        cluster_id: Number(raw.cluster_id ?? 0),
+        size: Number(raw.size ?? 0),
+        members: [] as Array<Record<string, unknown>>,
+      }));
+    clusters.sort(
+      (a, b) =>
+        b.size - a.size ||
+        a.embedding_profile_marker.localeCompare(b.embedding_profile_marker) ||
+        a.cluster_id - b.cluster_id,
+    );
+    return clusters;
+  };
+
+  const clusterMember = (raw: Record<string, unknown>) => {
+    const chatId = normalizeText(raw.session_id) || null;
+    return {
+      id: Number(raw.id ?? 0),
+      situation: normalizeText(raw.situation),
+      style: normalizeText(raw.style),
+      count: Number(raw.count ?? 0),
+      chat_id: chatId,
+      chat_name: chatId ? getChatName(db, chatId) : null,
+      checked: Boolean(raw.checked),
+      modified_by: normalizeText(raw.modified_by).toLowerCase() || null,
+    };
+  };
+
+  app.get("/api/webui/expression/clusters", async (_request, reply) => {
+    return handle(reply, () => {
+      const { path: indexPath, payload } = readVectorPayload();
+      if (payload === null) {
+        return { success: true, index_exists: false, index_path: indexPath };
+      }
+      return {
+        success: true,
+        index_exists: true,
+        index_path: indexPath,
+        generated_at: normalizeText(payload.generated_at) || null,
+        updated_at: normalizeText(payload.updated_at) || null,
+        embedding_model: normalizeText(payload.embedding_model) || null,
+        embedding_dimension: Number(payload.embedding_dimension ?? 0) || null,
+        sample_count: Number(payload.sample_count ?? 0),
+        clusters: clusterSummaries(payload),
+      };
+    });
+  });
+
+  app.get("/api/webui/expression/clusters/:cluster_id/members", async (request, reply) => {
+    const clusterId = Number.parseInt((request.params as { cluster_id: string }).cluster_id, 10);
+    const profileMarker = new URL(request.url, "http://local").searchParams.get("profile_marker");
+    return handle(reply, () => {
+      const { payload } = readVectorPayload();
+      if (payload === null) {
+        return { cluster: null, data: [] };
+      }
+      const clusters = clusterSummaries(payload);
+      const normalizedMarker = normalizeText(profileMarker);
+      const cluster = clusters.find(
+        (item) =>
+          item.cluster_id === clusterId &&
+          (!normalizedMarker || item.embedding_profile_marker === normalizedMarker),
+      );
+      if (!cluster) {
+        throw HttpError(404, `未找到表达聚类: ${clusterId}`);
+      }
+      const members = ((payload.expressions as Array<Record<string, unknown>> | undefined) ?? [])
+        .filter(
+          (raw) =>
+            raw !== null &&
+            typeof raw === "object" &&
+            Number(raw.cluster_id ?? 0) === clusterId &&
+            (!cluster.embedding_profile_marker ||
+              normalizeText(raw.embedding_profile_marker) === cluster.embedding_profile_marker),
+        )
+        .map(clusterMember)
+        .sort((a, b) => b.count - a.count || a.id - b.id);
+      return { cluster, data: members };
+    });
+  });
+
   const legacyNotMigrated = async (_request: unknown, reply: FastifyReply) => {
     return reply.code(501).send({
       detail: "旧版导入依赖 chat_manager 运行时会话解析，按迁移边界保留在 Python 内核侧",
     });
   };
-  app.get("/api/webui/expression/groups", groupsNotMigrated);
-  app.get("/api/webui/expression/clusters", groupsNotMigrated);
-  app.get("/api/webui/expression/clusters/:cluster_id/members", groupsNotMigrated);
   app.post("/api/webui/expression/legacy-import/preview", legacyNotMigrated);
   app.post("/api/webui/expression/legacy-import/preview-file", legacyNotMigrated);
   app.post("/api/webui/expression/legacy-import/import", legacyNotMigrated);
@@ -319,12 +483,7 @@ export function registerExpressionRoutes(app: FastifyInstance, deps: ExpressionR
       const list: Array<Record<string, unknown>> = [];
       for (const sessionId of visible) {
         const row = db.drizzle.select().from(chatSessions).where(eq(chatSessions.sessionId, sessionId)).limit(1).get();
-        const chatName = row
-          ? row.groupId
-            ? row.groupName || `群聊${row.groupId}`
-            : row.userNickname || row.userCardname || `用户${row.userId}的私聊`
-          : sessionId;
-        list.push({ session_id: sessionId, chat_name: chatName, platform: row?.platform ?? null, account_id: row?.accountId ?? null, is_group: Boolean(row?.groupId) });
+        list.push(buildChatInfo(sessionId, row));
       }
       list.sort((a, b) => String(a.chat_name).localeCompare(String(b.chat_name)));
       return { success: true, data: list };
@@ -340,13 +499,7 @@ export function registerExpressionRoutes(app: FastifyInstance, deps: ExpressionR
         if (!includeLegacy && !isCurrentAccountSession(row, pairs)) {
           continue;
         }
-        list.push({
-          session_id: row.sessionId,
-          chat_name: chatSessionDisplayName(row),
-          platform: row.platform,
-          account_id: row.accountId,
-          is_group: Boolean(row.groupId),
-        });
+        list.push(buildChatInfo(row.sessionId, row));
       }
       list.sort((a, b) => String(a.chat_name).localeCompare(String(b.chat_name)));
       return { success: true, data: list };
