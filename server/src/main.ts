@@ -39,6 +39,7 @@ async function runOnce(rootDir: string, logger: FastifyBaseLogger): Promise<numb
     rootDir,
     serveDashboard: process.env.MAIBOT_SERVE_DASHBOARD !== "false",
     logBuffer,
+    db,
   });
 
   // runOnce 挂起到 finish() 被调用（关停/重启），保证监督循环语义正确
