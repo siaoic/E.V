@@ -1,0 +1,29 @@
+{
+  "request_envelope": {
+    "message_type": "request",
+    "method": "plugin.invoke",
+    "plugin_id": "maibot-live.world-bilibili",
+    "request_id": 42,
+    "protocol_version": "1.0.0",
+    "timeout_ms": 30000,
+    "byte_len": 388
+  },
+  "response_error": {
+    "message_type": "response",
+    "method": "capability.request",
+    "plugin_id": "maibot-live.world-minecraft",
+    "request_id": 7,
+    "protocol_version": "1.0.0",
+    "timeout_ms": 5000,
+    "byte_len": 258
+  },
+  "broadcast_envelope": {
+    "message_type": "broadcast",
+    "method": "",
+    "plugin_id": "",
+    "request_id": 1,
+    "protocol_version": "1.0.0",
+    "timeout_ms": 30000,
+    "byte_len": 158
+  }
+}
