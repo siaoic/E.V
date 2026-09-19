@@ -98,7 +98,49 @@ export function registerConfigRoutes(app: FastifyInstance, deps: ConfigRouteDeps
     return { success: true, message: "配置已保存" };
   });
 
-  // ===== 结构化写入与 schema（501：待阶段④配置校验服务） =====
+  // ===== schema 端点（读 schema-dump.json，Python pydantic 模型的 JSON 投影） =====
+
+  let schemaDump: Record<string, unknown> | undefined;
+
+  const loadSchemaDump = (): Record<string, unknown> => {
+    if (schemaDump) return schemaDump;
+    const dumpPath = path.join(rootDir, "server", "src", "config", "schema-dump.json");
+    if (existsSync(dumpPath)) {
+      schemaDump = JSON.parse(readFileSync(dumpPath, "utf8")) as Record<string, unknown>;
+    }
+    return schemaDump ?? {};
+  };
+
+  app.get("/api/webui/config/schema/bot", async (_request, reply) => {
+    const dump = loadSchemaDump() as Record<string, Record<string, unknown>>;
+    const bot = dump.bot;
+    if (!bot) {
+      return reply.code(501).send({ detail: "schema-dump.json 缺少 bot schema，请运行 dump_config_schema.py" });
+    }
+    return { success: true, schema: bot.schema };
+  });
+
+  app.get("/api/webui/config/schema/model", async (_request, reply) => {
+    const dump = loadSchemaDump() as Record<string, Record<string, unknown>>;
+    const model = dump.model;
+    if (!model) {
+      return reply.code(501).send({ detail: "schema-dump.json 缺少 model schema" });
+    }
+    return { success: true, schema: model.schema };
+  });
+
+  app.get("/api/webui/config/schema/section/:section_name", async (request, reply) => {
+    const sectionName = (request.params as { section_name: string }).section_name;
+    const dump = loadSchemaDump() as Record<string, unknown>;
+    const sections = (dump.sections ?? {}) as Record<string, { schema: unknown }>;
+    const section = sections[sectionName];
+    if (!section) {
+      return reply.code(404).send({ detail: `配置节 '${sectionName}' 不存在` });
+    }
+    return { success: true, schema: section.schema };
+  });
+
+  // ===== 结构化写入（依赖 schema 做类型校验；当前依赖尚未闭环 → 显式 501） =====
 
   const notMigrated = async (_request: unknown, reply: FastifyReply) => {
     return reply.code(501).send({ detail: NOT_MIGRATED_DETAIL });
@@ -112,9 +154,6 @@ export function registerConfigRoutes(app: FastifyInstance, deps: ConfigRouteDeps
   app.patch("/api/webui/config/model/versions/:version_id", notMigrated);
   app.delete("/api/webui/config/model/versions/:version_id", notMigrated);
   app.post("/api/webui/config/model/versions/:version_id/activate", notMigrated);
-  app.get("/api/webui/config/schema/bot", notMigrated);
-  app.get("/api/webui/config/schema/model", notMigrated);
-  app.get("/api/webui/config/schema/section/:section_name", notMigrated);
   app.get("/api/webui/config/tts-audio-devices", notMigrated);
   app.post("/api/webui/config/tts-audio/upload", notMigrated);
   app.get("/api/webui/config/adapter-config", notMigrated);
