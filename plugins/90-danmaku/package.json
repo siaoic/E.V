@@ -1,0 +1,6 @@
+{
+  "name": "live-90-danmaku",
+  "main": "./plugin.ts",
+  "private": true,
+  "type": "module"
+}

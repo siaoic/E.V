@@ -1,0 +1,6 @@
+{
+  "name": "live-15-tts",
+  "main": "./tts-plugin.ts",
+  "private": true,
+  "type": "module"
+}

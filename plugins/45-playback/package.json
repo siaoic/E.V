@@ -1,0 +1,6 @@
+{
+  "name": "live-45-playback",
+  "main": "./plugin.ts",
+  "private": true,
+  "type": "module"
+}

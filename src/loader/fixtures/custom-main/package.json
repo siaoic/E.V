@@ -1,0 +1,1 @@
+{ "name": "custom-main", "main": "./src/entry.ts" }

@@ -1,0 +1,6 @@
+{
+  "name": "live-50-console-log",
+  "main": "./index.ts",
+  "private": true,
+  "type": "module"
+}

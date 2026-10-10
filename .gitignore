@@ -1,0 +1,7 @@
+node_modules/
+.env
+workspace/
+.claude/
+.scratch/
+1.txt
+*.log
