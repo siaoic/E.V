@@ -27,7 +27,9 @@ export const apply = Object.assign(
     const { hooks: game } = createGame<SudokuToolkit>(process.env.GAME ?? 'sudoku', {
       onChange: () => viewer.broadcaster.send('board', game.snapshot()),
     });
-    game.prompt += catalogLine('sudoku');
+    // 规则书只在开局后注入；未开局只给一行"有得玩"的菜单（开局工具由 toolkit 的 openers 声明），
+    // 免得模型一启动就被规则书和盘面描述推着开一局（只有她想玩时才自己 sudoku_new）
+    game.menu = catalogLine('sudoku');
     ctx.provide('game', game);
     ctx.effect(() => () => viewer.close());
   },

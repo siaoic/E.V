@@ -1,34 +1,12 @@
 import { appendFile, mkdir, readFile, writeFile } from 'node:fs/promises';
 import path from 'node:path';
 import type { Embedder } from './embedding.ts';
+import { bigrams, cosine, dice } from '../text/similarity.ts';
 
 export type MemoryRecord = { id: number; text: string; kind: string; createdAt: number; vector?: number[]; image?: string };
 
-function bigrams(text: string): Set<string> {
-  const set = new Set<string>();
-  for (let i = 0; i < text.length - 1; i += 1) set.add(text.slice(i, i + 2));
-  return set;
-}
-
-function dice(a: Set<string>, b: Set<string>): number {
-  if (a.size === 0 || b.size === 0) return 0;
-  let overlap = 0;
-  for (const item of a) if (b.has(item)) overlap += 1;
-  return (2 * overlap) / (a.size + b.size);
-}
-
-function cosine(a: number[], b: number[]): number {
-  let dot = 0;
-  let normA = 0;
-  let normB = 0;
-  for (let i = 0; i < a.length; i += 1) {
-    dot += a[i] * b[i];
-    normA += a[i] * a[i];
-    normB += b[i] * b[i];
-  }
-  if (normA === 0 || normB === 0) return 0;
-  return dot / (Math.sqrt(normA) * Math.sqrt(normB));
-}
+// bigrams / dice / cosine 搬到 src/text/similarity.ts：弹幕分层（src/llm/danmaku.ts）用同一套口径，
+// 免得同一个阈值在两处各有一套"大概是什么感觉"。
 
 // 文件工作区是人格权威：JSONL 追加存储。
 // 检索优先语义向量（llama.cpp 嵌入），嵌入服务缺席或记录无向量时回退朴素 bigram 匹配；

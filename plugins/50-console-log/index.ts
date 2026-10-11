@@ -11,6 +11,10 @@ export const apply = Object.assign(
       if (event.type === 'danmaku') console.log(`[弹幕] ${event.uname}: ${event.text}`);
       else if (event.type === 'gift') console.log(`[礼物] ${event.uname} ${event.giftName}×${event.num}`);
       else if (event.type === 'super-chat') console.log(`[SC ¥${event.price}] ${event.uname}: ${event.text}`);
+      else if (event.type === 'guard') {
+        const label = { 1: '总督', 2: '提督', 3: '舰长' }[event.guardLevel] ?? '舰长';
+        console.log(`[上舰] ${event.uname} ${label}${event.num > 1 ? `×${event.num}` : ''}`);
+      }
     });
     ctx.on('agent/reply', (reply: AgentReply) => {
       console.log(`  -> ${reply.text}`);

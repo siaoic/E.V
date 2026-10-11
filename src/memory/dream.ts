@@ -65,9 +65,19 @@ export function createDream({ llm, notes, persona, every = 30, logger }: DreamOp
     const summary = lines.find((line) => line.startsWith('SUMMARY:'))?.slice('SUMMARY:'.length).trim() ?? '';
     const entries = lines.filter((line) => !line.startsWith('SUMMARY:') && !line.startsWith('#'));
     if (entries.length === 0 && !summary) return;
-    if (entries.length > 0) await persona.replace(entries);
-    lastSummary = summary || lastSummary;
-    logger?.(summary || '（没有摘要）');
+    let warning = '';
+    if (entries.length > 0) {
+      const { shrinkNote } = await persona.replace(entries);
+      // 不拦写入（对齐 Cortico：写入照常完成，缩水只告警），但要让缩水可见——
+      // 日志点名，摘要带进下一窗，她自己能用 git_log/git_show 把旧版抄回来。
+      if (shrinkNote) {
+        warning = `注意：${shrinkNote}`;
+        logger?.(`整理后自我认知大幅缩短：${shrinkNote}`);
+      }
+    }
+    if (summary) lastSummary = warning ? `${summary}（${warning}）` : summary;
+    else if (warning) lastSummary = warning;
+    if (!warning) logger?.(summary || '（没有摘要）');
   };
 
   const schedule = (): Promise<void> => {

@@ -19,12 +19,29 @@ declare module '@deepseek-ai/cordis' {
   }
 }
 
+/** 解析 LLM_EXTRA_BODY；空串视为未配置。 */
+export function parseExtraBody(raw: string | undefined): Record<string, unknown> | undefined {
+  if (typeof raw !== 'string' || !raw.trim()) return undefined;
+  return JSON.parse(raw) as Record<string, unknown>;
+}
+
+/**
+ * 智谱端点在 thinking 打开时响应常超过 7 秒（实测不关时几乎每个窗口都撞超时），必须显式关掉。
+ * run-live.bat 只在 base URL 含 bigmodel.cn 时补这份默认值；直接用 `node src/main.ts` 起进程就没有
+ * 那层兜底，于是每个窗口都超时、连着几次空窗口后链条停摆。非智谱端点一律不塞（会回 400 unsupported_parameter，
+ * client 侧有"去掉 extraBody 重发一次"的兜底，但仍不该主动塞）。
+ */
+export function defaultExtraBody(baseUrl: string): Record<string, unknown> | undefined {
+  return /bigmodel\.cn/i.test(baseUrl) ? { thinking: { type: 'disabled' } } : undefined;
+}
+
 export const apply = Object.assign(
   function llmClient(ctx: Context, config: LlmClientPluginConfig) {
     const missing = (['baseUrl', 'apiKey', 'model'] as const).filter((key) => !String(config[key] ?? '').trim());
     if (missing.length > 0) throw new Error(`缺少必填配置：${missing.join(', ')}`);
-    let extraBody: Record<string, unknown> | undefined;
-    if (typeof config.extraBody === 'string' && config.extraBody.trim()) extraBody = JSON.parse(config.extraBody);
+    const configured = parseExtraBody(config.extraBody);
+    const extraBody = configured ?? defaultExtraBody(config.baseUrl);
+    if (!configured && extraBody) console.log('[llm] 未配置 LLM_EXTRA_BODY，按智谱端点默认关闭 thinking');
     const visionModel = config.visionModel?.trim() || undefined;
     const visionBaseUrl = config.visionBaseUrl?.trim() || undefined;
     ctx.provide(

@@ -10,7 +10,10 @@ describe('sudoku plugin', () => {
     const game = root.get('game')!;
     expect(game.tools.map((tool) => tool.function.name)).toContain('sudoku_new');
     expect(game.prompt).toContain('sudoku_place');
-    expect(game.prompt).toContain('本场可以玩的游戏');
+    // 菜单与开局工具分开：未开局只提"有得玩"，规则书要等开局后才注入
+    expect(game.menu).toContain('本场可以玩的游戏');
+    expect(game.menu).toContain('不玩也没关系');
+    expect(game.openers).toEqual(['sudoku_new']);
     expect(game.isActive()).toBe(false);
 
     await expect(fiber.dispose()).resolves.toBeUndefined();

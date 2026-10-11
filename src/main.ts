@@ -2,6 +2,7 @@
 // 插件 = 文件夹包（对齐 Cortico extensions 风格）：<name>/package.json 的 main 指入口（默认 index.ts），
 // 实现文件全部住在文件夹里，自包含。停用 = 文件夹改名加 .disabled；也兼容单文件 .ts 插件。
 // 文件名排序 = 加载顺序：00-19 服务 provider、20-79 消费者/观察者、80+ 事件生产者（弹幕源）。
+import { fileURLToPath } from 'node:url';
 import { Context, Logger } from '@deepseek-ai/cordis';
 import type { Exporter } from '@deepseek-ai/cordis';
 import { apply as llmClientApply, config as llmClientConfig } from './llm/client-plugin.ts';
@@ -9,7 +10,20 @@ import { apply as llmApply } from './llm/plugin.ts';
 import { apply as sudokuApply, config as sudokuConfig } from './games/sudoku/plugin.ts';
 import { apply as memoryApply, config as memoryConfig } from './memory/plugin.ts';
 import { substituteEnv } from './loader/config.ts';
+import { loadEnvFile } from './loader/env-file.ts';
 import { loadPlugins } from './loader/load.ts';
+
+// .env 是运行时配置的落点（不入 git，见 .gitignore）。必须在装配任何插件之前加载，
+// 插件配置里的 ${VAR} 才替换得到。已存在且非空的环境变量优先，所以 run-live.bat 里 set 的值仍盖过文件。
+// 换配置文件用 ENV_FILE 指路（相对当前工作目录）。
+const envFile = process.env.ENV_FILE ?? fileURLToPath(new URL('../.env', import.meta.url));
+const envFileResult = loadEnvFile(envFile);
+if (envFileResult.found) {
+  const detail = [`补入 ${envFileResult.applied.length} 项`];
+  if (envFileResult.applied.length > 0) detail.push(envFileResult.applied.join('、'));
+  if (envFileResult.kept.length > 0) detail.push(`环境变量优先保留 ${envFileResult.kept.join('、')}`);
+  console.log(`[env] ${envFileResult.path} → ${detail.join('；')}`);
+}
 
 const pluginsDir = process.argv[2] ?? 'plugins';
 

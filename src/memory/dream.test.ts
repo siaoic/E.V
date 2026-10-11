@@ -8,7 +8,8 @@ import { openPersonaStore } from './persona.ts';
 
 const setup = async () => {
   const dir = await mkdtemp(path.join(tmpdir(), 'dream-'));
-  return { dir, notes: await openNoteWorkspace(dir), persona: await openPersonaStore(dir) };
+  const notes = await openNoteWorkspace(dir);
+  return { dir, notes, persona: await openPersonaStore(notes) };
 };
 
 describe('dream', () => {
@@ -27,7 +28,8 @@ describe('dream', () => {
     dream.tick();
     await vi.waitFor(() => expect(complete).toHaveBeenCalledTimes(1));
 
-    expect(dream.summary()).toBe('合并了重复的剪片偏好');
+    // 整理写完 PERSONA.md 要走一次 Git 提交，摘要要等这一步结束才成型
+    await vi.waitFor(() => expect(dream.summary()).toBe('合并了重复的剪片偏好'));
     expect(persona.prompt()).toContain('对镜头感挑剔');
     const body = await readFile(path.join(dir, 'PERSONA.md'), 'utf8');
     expect(body.split('\n').filter(Boolean)).toHaveLength(2);
@@ -80,5 +82,26 @@ describe('dream', () => {
     await dream.flush();
 
     expect(complete).not.toHaveBeenCalled();
+  });
+
+  // 对齐 Cortico：破坏性覆盖不拦写入，靠「摘要点名 + 每次写进 Git 可取回旧版」兜底
+  it('整理结果大幅缩水时照常写入，但摘要点名且旧版在 Git 里可取回', { timeout: 20000 }, async () => {
+    const { dir, notes, persona } = await setup();
+    const long = Array.from(
+      { length: 12 },
+      (_, i) => `- [2026-10-10] 第${i}条自我认知，写得长一点才好触发缩水判定`,
+    ).join('\n');
+    await notes.write('PERSONA.md', `${long}\n`);
+
+    const complete = vi.fn(async () => ({ content: '- 只剩这一条\nSUMMARY: 蒸馏完成', toolCalls: [] }));
+    const dream = createDream({ llm: { complete }, notes, persona, every: 1 });
+
+    dream.tick();
+    await vi.waitFor(() => expect(complete).toHaveBeenCalledTimes(1));
+    await vi.waitFor(() => expect(dream.summary()).toContain('蒸馏完成'));
+
+    expect(dream.summary()).toContain('[缩水提示]');
+    expect(await readFile(path.join(dir, 'PERSONA.md'), 'utf8')).toContain('只剩这一条');
+    expect(await notes.gitLog('PERSONA.md', 5)).toContain('write: PERSONA.md');
   });
 });

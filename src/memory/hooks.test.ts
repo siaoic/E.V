@@ -81,7 +81,8 @@ describe('memory toolkit', () => {
     const memory = await toolkit();
     expect(await memory.run('persona_update', '{"note":"我喜欢先嘴硬"}')).toBe('（当前没有人格工作区）');
 
-    const persona = await openPersonaStore(await mkdtemp(path.join(tmpdir(), 'persona-')));
+    const personaDir = await mkdtemp(path.join(tmpdir(), 'persona-'));
+    const persona = await openPersonaStore(await openNoteWorkspace(personaDir));
     const withPersona = await toolkit({ persona });
     expect(await withPersona.run('persona_update', '{"note":"我喜欢先嘴硬"}')).toBe('（已沉淀：我喜欢先嘴硬）');
     expect(persona.prompt()).toContain('我喜欢先嘴硬');
@@ -119,7 +120,8 @@ describe('memory toolkit', () => {
   });
 
   it('persona_revise 修订或收回自我认知，未命中提示', async () => {
-    const persona = await openPersonaStore(await mkdtemp(path.join(tmpdir(), 'persona-')));
+    const personaDir = await mkdtemp(path.join(tmpdir(), 'persona-revise-'));
+    const persona = await openPersonaStore(await openNoteWorkspace(personaDir));
     const memory = await toolkit({ persona });
     await memory.run('persona_update', '{"note":"我喜欢先嘴硬"}');
 

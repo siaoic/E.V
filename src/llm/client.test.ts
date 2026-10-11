@@ -1,5 +1,5 @@
 import { describe, expect, it, vi } from 'vitest';
-import { createLlmClient } from './client.ts';
+import { createLlmClient, isRateLimited } from './client.ts';
 
 describe('createLlmClient', () => {
   it('向 chat/completions 发送带鉴权的请求，并返回首条回复文本', async () => {
@@ -126,7 +126,7 @@ describe('createLlmClient', () => {
     }
   });
 
-  it('连续超时耗尽重试次数后抛错', async () => {
+  it('连续超时时总预算到点即放弃，不再把 4 次超时硬扛完', async () => {
     vi.useFakeTimers();
     try {
       const fetch = vi.fn((_url: URL | RequestInfo, init?: RequestInit) =>
@@ -140,10 +140,79 @@ describe('createLlmClient', () => {
       const expectation = expect(pending).rejects.toThrow('aborted');
       await vi.advanceTimersByTimeAsync(40000);
       await expectation;
-      expect(fetch).toHaveBeenCalledTimes(4);
+      // 7s 超时 + 1s 退避 + 7s 超时 = 15s 预算耗尽，收工；此前会硬扛满 4 次（约 35s），
+      // 而窗口是链条上唯一的节拍器，挂住 35 秒就是 35 秒不说话
+      expect(fetch).toHaveBeenCalledTimes(2);
     } finally {
       vi.useRealTimers();
     }
+  });
+
+  it('一直 429 时也有界失败，不会把窗口永久挂住', async () => {
+    vi.useFakeTimers();
+    try {
+      const fetch = vi.fn(async () => new Response('{"error":{"code":"1302"}}', { status: 429 }));
+      const client = createLlmClient({ baseUrl: 'https://example.test/v1', apiKey: 'KEY', model: 'm1', fetch });
+
+      const pending = client.complete([{ role: 'user', content: '嗨' }]);
+      const captured = pending.catch((error: unknown) => error);
+      await vi.advanceTimersByTimeAsync(30000);
+      const error = await captured;
+      // 4 次尝试（1s/2s/4s 退避）后抛错。此前这条路径是裸 `continue`、没有次数判断：
+      // 账户一旦被限流，这里会每 4 秒重试一次、永不返回，windowRunning 卡住，直播无限期不说话
+      expect(fetch).toHaveBeenCalledTimes(4);
+      expect((error as Error).message).toMatch(/429/);
+      // 带上限流标记，窗口层据此降温（否则恢复动作继续打接口，把配额焊死）
+      expect(isRateLimited(error)).toBe(true);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('baseUrl 末尾带斜杠时不会拼出双斜杠路径', async () => {
+    const fetch = vi.fn(async () =>
+      new Response(JSON.stringify({ choices: [{ message: { role: 'assistant', content: 'ok' } }] }), {
+        status: 200,
+        headers: { 'content-type': 'application/json' },
+      }),
+    );
+    const client = createLlmClient({ baseUrl: 'https://example.test/v1/', apiKey: 'KEY', model: 'm1', fetch });
+
+    await client.complete([{ role: 'user', content: '嗨' }]);
+
+    const [url] = fetch.mock.calls[0] as unknown as [string, RequestInit];
+    expect(url).toBe('https://example.test/v1/chat/completions');
+  });
+
+  it('端点不认 extraBody 时去掉重发一次，之后不再带', async () => {
+    let calls = 0;
+    const fetch = vi.fn(async (_url: URL | RequestInfo, _init?: RequestInit) => {
+      calls += 1;
+      return calls === 1
+        ? new Response(JSON.stringify({ error: { message: '"thinking" is not supported', code: 'unsupported_parameter' } }), {
+            status: 400,
+            headers: { 'content-type': 'application/json' },
+          })
+        : new Response(JSON.stringify({ choices: [{ message: { role: 'assistant', content: 'ok' } }] }), {
+            status: 200,
+            headers: { 'content-type': 'application/json' },
+          });
+    });
+    const client = createLlmClient({
+      baseUrl: 'https://example.test/v1',
+      apiKey: 'KEY',
+      model: 'm1',
+      extraBody: { thinking: { type: 'disabled' } },
+      fetch,
+    });
+
+    expect((await client.complete([{ role: 'user', content: '嗨' }])).content).toBe('ok');
+    await client.complete([{ role: 'user', content: '再来一句' }]);
+
+    const bodyOf = (index: number) => JSON.parse((fetch.mock.calls[index][1] as RequestInit).body as string);
+    expect(bodyOf(0).thinking).toEqual({ type: 'disabled' });
+    expect(bodyOf(1).thinking).toBeUndefined();
+    expect(bodyOf(2).thinking).toBeUndefined();
   });
 
   it('user 消息支持文本+图片混合内容，原样透传', async () => {
@@ -196,6 +265,11 @@ describe('createLlmClient', () => {
     const fetch = vi.fn(async () => new Response('unauthorized', { status: 401 }));
     const client = createLlmClient({ baseUrl: 'https://example.test/v1', apiKey: 'BAD', model: 'm1', fetch });
 
-    await expect(client.complete([{ role: 'user', content: '嗨' }])).rejects.toThrow('401');
+    const error = await client.complete([{ role: 'user', content: '嗨' }]).catch((e: unknown) => e);
+
+    expect((error as Error).message).toContain('401');
+    // 永久错误不重试、也不该被窗口层当成限流（那会白等十个心跳）
+    expect(isRateLimited(error)).toBe(false);
+    expect(fetch).toHaveBeenCalledTimes(1);
   });
 });

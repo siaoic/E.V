@@ -20,5 +20,6 @@ export function createGame<T extends GameHooks = GameHooks>(
 
 export function catalogLine(id: string): string {
   const entry = GAME_CATALOG.find((game) => game.id === id);
-  return entry ? `（本场可以玩的游戏：${entry.name}——${entry.description}）` : '';
+  // 措辞刻意保持"可选"：这是菜单，不是任务；想玩才开，不玩也没关系
+  return entry ? `（本场可以玩的游戏：${entry.name}——${entry.description}；想玩的时候自己开一局就行，不玩也没关系）` : '';
 }

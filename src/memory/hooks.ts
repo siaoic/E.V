@@ -8,6 +8,8 @@ export type MemoryToolkit = {
   tools: ToolDefinition[];
   run(name: string, rawArguments: string): Promise<string>;
   recentDigest(limit: number): string;
+  /** 人格常驻前缀：宪法种子 + PERSONA.md，进系统提示词头部；人格层缺席时返回空串 */
+  prompt(): string;
   /** 每窗口注入：按话题/上一句召回相关记忆，开场附「别重复」摘要 */
   context(input: { topic?: string; lastSpoken?: string; opening: boolean }): Promise<string>;
   /** 机械唤起：批量取观众档案首行，无档案的观众不返回 */
@@ -237,6 +239,7 @@ export function createMemoryToolkit(workspace: MemoryWorkspace, helpers: MemoryT
     `[#${record.id}] ${record.image ? `[图] ${record.image} — ` : ''}${record.text}`;
   return {
     tools: MEMORY_TOOLS,
+    prompt: () => helpers.persona?.prompt() ?? '',
     async run(name, rawArguments) {
       const args = parseArguments(rawArguments);
       if (name === 'memory_save') {
@@ -308,10 +311,8 @@ export function createMemoryToolkit(workspace: MemoryWorkspace, helpers: MemoryT
             const p = notePath(args.path);
             if (!p) return '（路径要在 notes/ 或 viewers/ 下）';
             if (typeof args.content !== 'string' || !args.content.trim()) return '（content 不能是空的）';
-            const { shrinkFrom } = await helpers.notes.write(p, args.content);
-            return shrinkFrom === undefined
-              ? `（已写入 ${p}）`
-              : `（已写入 ${p}，但比原来短了一半以上：原来 ${shrinkFrom} 字。如果不是有意精简，用 git_log/git_show 找回旧版）`;
+            const { shrinkNote: note } = await helpers.notes.write(p, args.content);
+            return note === undefined ? `（已写入 ${p}）` : `（已写入 ${p}；${note}）`;
           }
           if (name === 'note_read') {
             const p = notePath(args.path);

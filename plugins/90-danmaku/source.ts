@@ -1,7 +1,7 @@
 import { buildAuthPacket } from './auth.ts';
 import { decodeCommands, encodePacket, Operation } from './codec.ts';
 import { decodeGiftV2, type GiftEvent } from './gift-v2.ts';
-import { type DanmakuEvent, type HeartbeatEvent, normalizeCommand, type SuperChatEvent } from './normalize.ts';
+import { type DanmakuEvent, type GuardEvent, type HeartbeatEvent, normalizeCommand, type SuperChatEvent } from './normalize.ts';
 
 export type DanmakuSocket = { send(packet: Buffer): void; close(): void };
 
@@ -14,7 +14,7 @@ export type BiliDanmakuSourceOptions = {
   token?: string;
   heartbeatMs?: number;
   connect(handlers: DanmakuSocketHandlers): DanmakuSocket;
-  onEvent(event: DanmakuEvent | SuperChatEvent | GiftEvent | HeartbeatEvent): void;
+  onEvent(event: DanmakuEvent | SuperChatEvent | GiftEvent | GuardEvent | HeartbeatEvent): void;
 };
 
 const RECONNECT_BASE_MS = 1000;

@@ -47,13 +47,15 @@ describe('NoteWorkspace', () => {
     expect(await notes.gitLog(undefined, 5).then((s) => s.split('\n').length)).toBeGreaterThan(0);
   });
 
-  it('覆写缩水过半时返回 shrinkFrom', { timeout: 7000 }, async () => {
+  it('覆写缩水过半时回执点名要消失的小节', { timeout: 7000 }, async () => {
     const notes = await openNoteWorkspace(await tmpDir());
-    const long = Array.from({ length: 40 }, (_, i) => `第${i}行的内容`).join('\n');
+    const long = Array.from({ length: 40 }, (_, i) => `## 第${i}节\n内容内容内容内容`).join('\n\n');
 
     await notes.write('notes/long.md', long);
-    expect((await notes.write('notes/long.md', '短了')).shrinkFrom).toBe(long.length);
-    expect((await notes.write('notes/long.md', '短的但比上一版长一点，不触发')).shrinkFrom).toBeUndefined();
+    const shrunk = await notes.write('notes/long.md', '## 第0节\n只留这一节');
+    expect(shrunk.shrinkNote).toContain('[缩水提示]');
+    expect(shrunk.shrinkNote).toContain('## 第1节');
+    expect((await notes.write('notes/long.md', '## 第0节\n只留这一节，稍微补一点点内容但还是很短')).shrinkNote).toBeUndefined();
   });
 
   it('路径越出工作区被拒绝', async () => {
@@ -74,5 +76,29 @@ describe('NoteWorkspace', () => {
     const git = promisify(execFile);
     const { stdout } = await git('git', ['log', '--oneline'], { cwd: dir });
     expect(stdout).toContain('write: notes/a.md');
+  });
+
+  // 检查点链路要跑 7 次 git 进程，Windows 上每次约 0.4s，超时放宽
+  it('出厂基线 checkpoint0 自动建立；检查点可建立、可回滚', { timeout: 20000 }, async () => {
+    const notes = await openNoteWorkspace(await tmpDir());
+
+    expect((await notes.checkpoints()).map((c) => c.name)).toContain('checkpoint0');
+
+    await notes.write('notes/a.md', '第一版');
+    await notes.checkpoint('重写前', '重写前的检查点');
+    await notes.write('notes/a.md', '被写坏的内容');
+    expect(await notes.read('notes/a.md')).toBe('被写坏的内容');
+
+    expect((await notes.checkpoints()).map((c) => c.name)).toContain('重写前');
+
+    await notes.rollback('重写前');
+    expect(await notes.read('notes/a.md')).toBe('第一版');
+  });
+
+  it('检查点名形状不合法、或检查点不存在时都明确抛错', { timeout: 7000 }, async () => {
+    const notes = await openNoteWorkspace(await tmpDir());
+
+    await expect(notes.checkpoint('-bad')).rejects.toThrow('检查点名');
+    await expect(notes.rollback('不存在的检查点')).rejects.toThrow();
   });
 });

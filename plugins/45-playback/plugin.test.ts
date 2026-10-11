@@ -71,7 +71,7 @@ describe('playback plugin', () => {
     expect(completed).toHaveBeenCalledWith({ sentence: '好句' });
   });
 
-  it('播报中到达的回复全部排队按序播完，不会被丢弃', async () => {
+  it('播报中到达的回复一句都不丢；队首插队下后到的先播（用户决定 2026-10-11）', async () => {
     const pending: Deferred[] = [];
     const speaker: Speaker = {
       speak: vi.fn<(sentence: string) => Promise<void>>(() => {
@@ -85,8 +85,8 @@ describe('playback plugin', () => {
     await root.plugin(apply, {});
 
     root.emit('agent/reply', reply('正在播'));
-    root.emit('agent/reply', reply('待播一'));
-    root.emit('agent/reply', reply('待播二'));
+    root.emit('agent/reply', reply('先到的'));
+    root.emit('agent/reply', reply('后到的'));
     await flush();
     pending[0].resolve();
     await flush();
@@ -95,8 +95,11 @@ describe('playback plugin', () => {
     pending[2].resolve();
     await flush();
 
+    // 三句都播、一句不丢；但插队语义让最后产出的那句接在正在播的后面，先到的往后让位。
+    // 要回到"按入队顺序全部播完"，把 plugin.ts 里 enqueueFront 换回注释中的 enqueue 即可。
     expect(speaker.speak).toHaveBeenCalledTimes(3);
-    expect(speaker.speak).toHaveBeenNthCalledWith(2, '待播一');
-    expect(speaker.speak).toHaveBeenNthCalledWith(3, '待播二');
+    expect(speaker.speak).toHaveBeenNthCalledWith(1, '正在播');
+    expect(speaker.speak).toHaveBeenNthCalledWith(2, '后到的');
+    expect(speaker.speak).toHaveBeenNthCalledWith(3, '先到的');
   });
 });

@@ -37,7 +37,11 @@ export const apply = Object.assign(
       for (const effect of effects) void play(effect.sentence);
     }
 
-    ctx.on('agent/reply', (reply: AgentReply) => playNext(queue.enqueue(reply.text)));
+    // 用户决定（2026-10-11）：一律插到队首——最新产出的一句优先播，当前句一播完就接上它。
+    // 排尾那行保留不删，需要回退时取消注释、把下面这行注掉即可。
+    // 代价：同一批排了多句时会倒序（后生成的先播），细节见 playback-queue.ts 的注释。
+    // ctx.on('agent/reply', (reply: AgentReply) => playNext(queue.enqueue(reply.text)));
+    ctx.on('agent/reply', (reply: AgentReply) => playNext(queue.enqueueFront(reply.text)));
   },
   { inject: ['speaker'] },
 );

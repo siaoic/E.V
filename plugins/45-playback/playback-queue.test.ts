@@ -47,4 +47,30 @@ describe('PlaybackQueue', () => {
     queue.playbackCompleted();
     expect(queue.waiting).toBe(1);
   });
+
+  it('队首插队：排到已等待的句子前面，当前句播完先播它', () => {
+    const queue = new PlaybackQueue();
+    queue.enqueue('正在播');
+    queue.enqueue('预生成的下句');
+
+    expect(queue.enqueueFront('谢谢舰长')).toEqual([]);
+
+    expect(queue.playbackCompleted()).toEqual([{ type: 'play', sentence: '谢谢舰长' }]);
+    expect(queue.playbackCompleted()).toEqual([{ type: 'play', sentence: '预生成的下句' }]);
+  });
+
+  it('队首插队不丢句：waiting 把插队句一起算上', () => {
+    const queue = new PlaybackQueue();
+    queue.enqueue('正在播');
+    queue.enqueue('待播一');
+    queue.enqueueFront('插队句');
+
+    expect(queue.waiting).toBe(2);
+  });
+
+  it('空闲时插队与排尾等价：立刻开始播', () => {
+    const queue = new PlaybackQueue();
+
+    expect(queue.enqueueFront('第一句')).toEqual([{ type: 'play', sentence: '第一句' }]);
+  });
 });

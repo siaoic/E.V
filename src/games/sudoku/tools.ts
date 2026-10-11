@@ -16,6 +16,10 @@ export type SudokuToolkit = {
   describe(): string;
   isActive(): boolean;
   snapshot(): BoardSnapshot;
+  /** 未开局时唯一该暴露的工具：她只有想玩的时候才自己开一局 */
+  openers?: string[];
+  /** 未开局时注入的那一行菜单（由插件填目录文案） */
+  menu?: string;
 };
 
 const GAME_PROMPT =
@@ -136,6 +140,8 @@ export function createSudokuToolkit(
   return {
     prompt: GAME_PROMPT,
     tools: SUDOKU_TOOLS,
+    // 没开局时只暴露这一件：想玩才开，没开就不把工具箱摆出来诱导她
+    openers: ['sudoku_new'],
     isActive: () => game !== undefined && !game.solved,
     describe() {
       if (!game) return `（数独：${NO_GAME}）`;

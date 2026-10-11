@@ -1,10 +1,14 @@
 import { describe, expect, it, vi } from 'vitest';
-import type { AssistantReply, ChatMessage, ToolCall, ToolDefinition } from './client.ts';
+import type { AssistantReply, ChatMessage, ToolDefinition } from './client.ts';
 import { replyToWindow } from './reply.ts';
 
 const event = (uname: string, text: string) => ({ type: 'danmaku' as const, uid: 1, uname, text, timestamp: 0 });
 const say = (content: string | null): AssistantReply => ({ content, toolCalls: [] });
-const readCall = (id = 'call_1'): ToolCall => ({ id, type: 'function', function: { name: 'read_danmaku', arguments: '{}' } });
+const callTool = (name: string, args = '{}', id = 'c1') => ({
+  id,
+  type: 'function' as const,
+  function: { name, arguments: args },
+});
 const callOf = (complete: { mock: { calls: unknown[][] } }, index: number) =>
   complete.mock.calls[index] as unknown as [ChatMessage[], ToolDefinition[] | undefined];
 
@@ -16,173 +20,212 @@ describe('replyToWindow', () => {
     expect(reply).toEqual({ text: '刚吃完凉面', replyTo: [] });
   });
 
-  it('默认窗口提供 read_danmaku 工具，用户消息为讲故事而不是弹幕列表', async () => {
+  it('弹幕直接进 user 消息：没有 read_danmaku 工具，一轮就说完', async () => {
     const complete = vi.fn(async () => say('好'));
-    await replyToWindow({ complete }, () => [event('a', 'b')], ['前一句']);
+    const reply = await replyToWindow({ complete }, () => [event('测试观众', '今天唱什么歌？')], ['前一句']);
 
     const [messages, tools] = callOf(complete, 0);
-    expect(tools?.map((tool) => tool.function.name)).toEqual(['read_danmaku']);
+    expect(tools).toEqual([]);
     expect(messages).toEqual([
       { role: 'system', content: expect.any(String) },
       { role: 'assistant', content: '前一句' },
-      { role: 'user', content: '（接着讲你的故事）' },
+      { role: 'user', content: '[#1] 测试观众: 今天唱什么歌？\n（接着讲你的故事）' },
     ]);
+    expect(reply).toEqual({ text: '好', replyTo: [event('测试观众', '今天唱什么歌？')] });
+    expect(complete).toHaveBeenCalledTimes(1);
   });
 
-  it('需要换话题时用户消息提示换个新话题', async () => {
-    const complete = vi.fn(async () => say('新话题来了'));
-    await replyToWindow({ complete }, () => [], [], { changeTopic: true });
+  it('分层的呈现方式：相关逐条，气氛聚合成一行计数', async () => {
+    const complete = vi.fn(async () => say('好'));
+    const asked = event('测试观众', '今天唱什么歌？');
+    await replyToWindow({ complete }, () => [asked, event('路人', '晚安')], []);
 
     expect(callOf(complete, 0)[0].at(-1)).toEqual({
       role: 'user',
-      content: '（你已经聊这个话题有一阵子了，自然地换一个新话题吧）',
+      content: '[#1] 测试观众: 今天唱什么歌？\n（另有 1 条闲聊）\n（接着讲你的故事）',
     });
   });
 
-  it('模型调用 read_danmaku 后拿到弹幕作为工具结果，再据此开口', async () => {
-    const complete = vi
-      .fn<(messages: ChatMessage[], tools?: ToolDefinition[]) => Promise<AssistantReply>>()
-      .mockResolvedValueOnce({ content: null, toolCalls: [readCall('c1')] })
-      .mockResolvedValueOnce(say('谢谢你的弹幕'));
-    const batch = [event('测试观众', '今天唱什么歌'), event('路人', '晚安')];
+  it('没有条目时不注入弹幕段', async () => {
+    const complete = vi.fn(async () => say('那我接着讲'));
+    await replyToWindow({ complete }, () => [], []);
 
-    const reply = await replyToWindow({ complete }, () => batch, []);
+    expect(callOf(complete, 0)[0].at(-1)).toEqual({ role: 'user', content: '（接着讲你的故事）' });
+  });
 
-    expect(reply).toEqual({ text: '谢谢你的弹幕', replyTo: batch });
-    const [secondMessages] = callOf(complete, 1);
-    expect(secondMessages).toContainEqual({
-      role: 'tool',
-      tool_call_id: 'c1',
-      content: '[#1] 测试观众: 今天唱什么歌\n[#1] 路人: 晚安',
+  it('节奏水位进 user 段：排在弹幕之后、窗口提示之前', async () => {
+    const complete = vi.fn(async () => say('好'));
+    await replyToWindow({ complete }, () => [event('a', '在吗？')], [], {
+      statusContext: '（直播状态：待播队列空）',
     });
-    expect(secondMessages.at(-1)).toEqual({ role: 'user', content: '（工具结果已返回，接着说）' });
+
+    expect(callOf(complete, 0)[0].at(-1)).toEqual({
+      role: 'user',
+      content: '[#1] a: 在吗？\n（直播状态：待播队列空）\n（接着讲你的故事）',
+    });
   });
 
-  it('读取弹幕为空时工具结果说明没有新弹幕', async () => {
-    const complete = vi
-      .fn<(messages: ChatMessage[], tools?: ToolDefinition[]) => Promise<AssistantReply>>()
-      .mockResolvedValueOnce({ content: null, toolCalls: [readCall('c1')] })
-      .mockResolvedValueOnce(say('那我接着讲'));
-
-    const reply = await replyToWindow({ complete }, () => [], []);
-
-    expect(reply).toEqual({ text: '那我接着讲', replyTo: [] });
-    expect(callOf(complete, 1)[0]).toContainEqual({ role: 'tool', tool_call_id: 'c1', content: '（当前没有新弹幕）' });
-  });
-
-  it('没读过弹幕时不允许沉默：空回复后追加一次开口提示再生成', async () => {
-    const complete = vi
-      .fn<(messages: ChatMessage[], tools?: ToolDefinition[]) => Promise<AssistantReply>>()
-      .mockResolvedValueOnce(say('（空）'))
-      .mockResolvedValueOnce(say('我接着讲'));
-
-    const reply = await replyToWindow({ complete }, () => [], []);
-
-    expect(reply).toEqual({ text: '我接着讲', replyTo: [] });
-    expect(callOf(complete, 1)[0].at(-1)).toEqual({ role: 'user', content: '（这一句必须开口，说一两句接着讲）' });
-  });
-
-  it('提示后仍然沉默则返回空，不再无限重试', async () => {
+  it('沉默是合法态：空回复直接结束，不再追问"必须开口"', async () => {
     const complete = vi.fn(async () => say(''));
-
-    const reply = await replyToWindow({ complete }, () => [], []);
-
-    expect(reply).toEqual({ text: '', replyTo: [] });
-    expect(complete).toHaveBeenCalledTimes(2);
-  });
-
-  it('读过弹幕后，模型可以以（空）保持沉默，不追加开口提示', async () => {
-    const complete = vi
-      .fn<(messages: ChatMessage[], tools?: ToolDefinition[]) => Promise<AssistantReply>>()
-      .mockResolvedValueOnce({ content: null, toolCalls: [readCall()] })
-      .mockResolvedValueOnce(say('（空）'));
 
     const reply = await replyToWindow({ complete }, () => [event('a', 'b')], []);
 
-    expect(reply).toEqual({ text: '', replyTo: [event('a', 'b')] });
-    expect(complete).toHaveBeenCalledTimes(2);
+    expect(reply.text).toBe('');
+    expect(complete).toHaveBeenCalledTimes(1);
+    const system = String(callOf(complete, 0)[0][0].content);
+    expect(system).toContain('沉默是你的合法态');
+    expect(system).not.toContain('没看过弹幕');
+    expect(system).not.toContain('read_danmaku');
   });
 
-  it('未知工具名返回未知工具结果，不读取弹幕', async () => {
-    const readDanmaku = vi.fn(() => [event('a', 'b')]);
+  it('回复（空）同样视为沉默，一次调用结束', async () => {
+    const complete = vi.fn(async () => say('（空）'));
+    const asked = event('a', '在吗？');
+
+    const reply = await replyToWindow({ complete }, () => [asked], []);
+
+    expect(reply).toEqual({ text: '', replyTo: [asked] });
+    expect(complete).toHaveBeenCalledTimes(1);
+  });
+
+  it('模型调未知工具（比如已经删掉的 read_danmaku）只拿到未知工具结果', async () => {
+    const takeItems = vi.fn(() => [event('a', 'b')]);
     const complete = vi
       .fn<(messages: ChatMessage[], tools?: ToolDefinition[]) => Promise<AssistantReply>>()
-      .mockResolvedValueOnce({
-        content: null,
-        toolCalls: [{ id: 'x', type: 'function', function: { name: 'dance', arguments: '{}' } }],
-      })
+      .mockResolvedValueOnce({ content: null, toolCalls: [callTool('read_danmaku', '{}', 'x')] })
       .mockResolvedValueOnce(say('好'));
 
-    await replyToWindow({ complete }, readDanmaku, []);
+    await replyToWindow({ complete }, takeItems, []);
 
-    expect(readDanmaku).not.toHaveBeenCalled();
     expect(callOf(complete, 1)[0]).toContainEqual({ role: 'tool', tool_call_id: 'x', content: '（未知工具）' });
   });
 
   it('工具调用轮次有上限，超过后不再提供工具，只能输出文字', async () => {
-    const complete = vi
-      .fn<(messages: ChatMessage[], tools?: ToolDefinition[]) => Promise<AssistantReply>>()
-      .mockResolvedValue({ content: null, toolCalls: [readCall()] });
-    complete.mockResolvedValueOnce({ content: null, toolCalls: [readCall('c0')] });
-    complete.mockResolvedValueOnce({ content: null, toolCalls: [readCall('c1')] });
-    complete.mockResolvedValueOnce({ content: null, toolCalls: [readCall('c2')] });
+    const complete = vi.fn<(messages: ChatMessage[], tools?: ToolDefinition[]) => Promise<AssistantReply>>();
+    for (let i = 0; i < 3; i += 1) complete.mockResolvedValueOnce({ content: null, toolCalls: [callTool('dance', '{}', `c${i}`)] });
     complete.mockResolvedValueOnce(say('结束了'));
 
-    const reply = await replyToWindow({ complete }, () => [event('a', 'b')], []);
+    const reply = await replyToWindow({ complete }, () => [], []);
 
     expect(reply.text).toBe('结束了');
     expect(callOf(complete, 3)[1]).toBeUndefined();
   });
 
-  it('读到 SC 时以 SC 格式呈现，并提示优先回应', async () => {
-    const complete = vi
-      .fn<(messages: ChatMessage[], tools?: ToolDefinition[]) => Promise<AssistantReply>>()
-      .mockResolvedValueOnce({ content: null, toolCalls: [readCall('c1')] })
-      .mockResolvedValueOnce(say('谢谢富哥'));
+  it('SC 按普通弹幕呈现，不再附"优先回应"提示', async () => {
+    const complete = vi.fn(async () => say('谢谢富哥'));
     const superChat = { type: 'super-chat' as const, uid: 9, uname: '富哥', text: '唱一首', price: 30, timestamp: 0 };
 
     const reply = await replyToWindow({ complete }, () => [superChat], []);
 
     expect(reply).toEqual({ text: '谢谢富哥', replyTo: [superChat] });
-    expect(callOf(complete, 1)[0]).toContainEqual({
-      role: 'tool',
-      tool_call_id: 'c1',
-      content: '[#9] [SC ¥30] 富哥: 唱一首\n（有 SC，请优先回应）',
+    expect(callOf(complete, 0)[0].at(-1)).toEqual({
+      role: 'user',
+      content: '[#9] [SC ¥30] 富哥: 唱一首\n（接着讲你的故事）',
+    });
+    // 钱不产生回复义务
+    const system = String(callOf(complete, 0)[0][0].content);
+    expect(system).not.toContain('读到 SC');
+    expect(JSON.stringify(callOf(complete, 0)[0])).not.toContain('优先回应');
+  });
+
+  it('上舰按「[上舰] 舰长」呈现，等级决定称呼', async () => {
+    const complete = vi.fn(async () => say('哟，上舰了'));
+    const guard = { type: 'guard' as const, uid: 7, uname: '阿紫', guardLevel: 3, num: 2, price: 276000, timestamp: 0 };
+    const admiral = { type: 'guard' as const, uid: 8, uname: '乙', guardLevel: 2, num: 1, price: 1998000, timestamp: 0 };
+
+    await replyToWindow({ complete }, () => [guard, admiral], []);
+
+    expect(callOf(complete, 0)[0].at(-1)).toEqual({
+      role: 'user',
+      content: '[#7] 阿紫: [上舰] 舰长×2\n[#8] 乙: [上舰] 提督\n（接着讲你的故事）',
     });
   });
 
-  it('读弹幕后附上记得的观众档案首行（机械唤起）', async () => {
-    const complete = vi
-      .fn<(messages: ChatMessage[], tools?: ToolDefinition[]) => Promise<AssistantReply>>()
-      .mockResolvedValueOnce({ content: null, toolCalls: [readCall('c1')] })
-      .mockResolvedValueOnce(say('哦，是你'));
-    const viewerLines = vi.fn(async (uids: number[]) =>
-      uids.includes(1) ? '[#1] 常客，爱发猫图' : '',
-    );
+  it('礼物按礼物格式呈现', async () => {
+    const complete = vi.fn(async () => say('谢谢火箭'));
+    const gift = { type: 'gift' as const, uid: 2, uname: '土豪', giftName: '火箭', num: 1, price: 1000, coinType: 'gold', timestamp: 0 };
+
+    await replyToWindow({ complete }, () => [gift], []);
+
+    expect(callOf(complete, 0)[0].at(-1)).toEqual({
+      role: 'user',
+      content: '[#2] 土豪: [礼物] 火箭×1\n（接着讲你的故事）',
+    });
+  });
+
+  it('机械唤起：档案首行与弹幕同一段进 user 消息，一轮就能看到', async () => {
+    const complete = vi.fn(async () => say('哦，是你'));
+    const viewerLines = vi.fn(async (uids: number[]) => (uids.includes(1) ? '[#1] 常客，爱发猫图' : ''));
 
     await replyToWindow({ complete }, () => [event('猫奴', '我家猫又上桌了')], [], {
-      memory: { tools: [], run: async () => '', viewerLines },
+      viewerUids: [1],
+      memory: { tools: [], run: async () => '', prompt: () => '', viewerLines },
     });
 
     expect(viewerLines).toHaveBeenCalledWith([1]);
-    const toolMessage = callOf(complete, 1)[0].find((m) => m.role === 'tool');
-    expect(toolMessage?.content).toBe(
-      '[#1] 猫奴: 我家猫又上桌了\n（你记得的观众：\n[#1] 常客，爱发猫图）',
-    );
+    const user = String(callOf(complete, 0)[0].at(-1)?.content);
+    expect(user).toContain('（你记得的观众：\n[#1] 常客，爱发猫图）');
+    expect(complete).toHaveBeenCalledTimes(1);
+  });
+
+  it('没有首次出现的观众时不注入，也不白调 viewerLines', async () => {
+    const complete = vi.fn(async () => say('好'));
+    const viewerLines = vi.fn(async () => '不该被调用');
+
+    await replyToWindow({ complete }, () => [], [], {
+      viewerUids: [],
+      memory: { tools: [], run: async () => '', prompt: () => '', viewerLines },
+    });
+
+    expect(viewerLines).not.toHaveBeenCalled();
+    expect(callOf(complete, 0)[0].at(-1)).toEqual({ role: 'user', content: '（接着讲你的故事）' });
   });
 
   it('带工具调用的那一轮里的文字也会保留，和之后的话按顺序拼接', async () => {
     const complete = vi
       .fn<(messages: ChatMessage[], tools?: ToolDefinition[]) => Promise<AssistantReply>>()
-      .mockResolvedValueOnce({ content: '哎哟，我看看弹幕', toolCalls: [readCall('c1')] })
-      .mockResolvedValueOnce(say('谢谢大家'));
+      .mockResolvedValueOnce({ content: '顺便记一下', toolCalls: [callTool('memory_save', '{"text":"x"}')] })
+      .mockResolvedValueOnce(say('记下了'));
+    const memory = {
+      tools: [{ type: 'function' as const, function: { name: 'memory_save', description: '存', parameters: {} } }],
+      run: async () => '（已记住）',
+      prompt: () => '',
+    };
 
-    const reply = await replyToWindow({ complete }, () => [], []);
+    const reply = await replyToWindow({ complete }, () => [], [], { memory });
 
-    expect(reply.text).toBe('哎哟，我看看弹幕谢谢大家');
+    expect(reply.text).toBe('顺便记一下记下了');
   });
 
-  it('有游戏时提供游戏工具，工具调用交给游戏执行，并允许更多轮次', async () => {
+  it('没开局时不推她玩：只给可选菜单与开局工具，规则书与盘面都不注入', async () => {
+    const complete = vi.fn(async () => say('好'));
+    const run = vi.fn(() => '新的一局开始了');
+    const game = {
+      prompt: '（完整规则书：你正在玩数独，sudoku_place 落子…）',
+      menu: '（本场可以玩的游戏：数独；想玩的时候自己开一局就行，不玩也没关系）',
+      openers: ['sudoku_new'],
+      tools: [
+        { type: 'function' as const, function: { name: 'sudoku_new', description: '开一局', parameters: {} } },
+        { type: 'function' as const, function: { name: 'sudoku_place', description: '落子', parameters: {} } },
+      ],
+      run,
+      describe: () => '（数独：还没有开局，可以调用 sudoku_new 开一局）',
+      isActive: () => false,
+    };
+
+    await replyToWindow({ complete }, () => [], [], { game });
+
+    // 只暴露开局工具
+    expect(callOf(complete, 0)[1]?.map((tool) => tool.function.name)).toEqual(['sudoku_new']);
+    // 系统提示词里是菜单，不是规则书
+    const system = String(callOf(complete, 0)[0][0].content);
+    expect(system).toContain('不玩也没关系');
+    expect(system).not.toContain('完整规则书');
+    // 盘面描述（"还没有开局，可以调用 sudoku_new 开一局"）也不注入
+    expect(String(callOf(complete, 0)[0].at(-1)?.content)).not.toContain('还没有开局');
+  });
+
+  it('有游戏时只提供游戏工具，工具调用交给游戏执行，并允许更多轮次', async () => {
     const run = vi.fn(() => '已填入第 1 行第 1 列 = 5');
     const game = {
       prompt: '（游戏提示词）',
@@ -195,9 +238,7 @@ describe('replyToWindow', () => {
     for (let i = 0; i < 5; i += 1) {
       complete.mockResolvedValueOnce({
         content: `第${i}步`,
-        toolCalls: [
-          { id: `g${i}`, type: 'function', function: { name: 'sudoku_place', arguments: '{"row":1,"col":1,"value":5}' } },
-        ],
+        toolCalls: [callTool('sudoku_place', '{"row":1,"col":1,"value":5}', `g${i}`)],
       });
     }
     complete.mockResolvedValueOnce(say('完成'));
@@ -207,28 +248,23 @@ describe('replyToWindow', () => {
     expect(run).toHaveBeenCalledTimes(5);
     expect(run).toHaveBeenCalledWith('sudoku_place', '{"row":1,"col":1,"value":5}');
     expect(reply.text).toBe('第0步第1步第2步第3步第4步完成');
-    expect(callOf(complete, 0)[1]?.map((tool) => tool.function.name)).toEqual(['read_danmaku', 'sudoku_place']);
+    expect(callOf(complete, 0)[1]?.map((tool) => tool.function.name)).toEqual(['sudoku_place']);
   });
 
   it('一轮里的多个游戏动作只执行第一个，下一轮恢复', async () => {
     const run = vi.fn<(name: string, rawArguments: string) => string>(() => '已填入');
     const place = { type: 'function' as const, function: { name: 'sudoku_place', description: '落子', parameters: {} } };
     const game = { prompt: '（游戏提示词）', tools: [place], run, describe: () => '（数独进行中）', isActive: () => true };
-    const placeCall = (id: string) => ({
-      id,
-      type: 'function' as const,
-      function: { name: 'sudoku_place', arguments: `{"row":1,"col":${id},"value":5}` },
-    });
     const complete = vi
       .fn<(messages: ChatMessage[], tools?: ToolDefinition[]) => Promise<AssistantReply>>()
-      .mockResolvedValueOnce({ content: '想想', toolCalls: [placeCall('c0'), placeCall('c1')] })
-      .mockResolvedValueOnce({ content: null, toolCalls: [placeCall('c2')] })
+      .mockResolvedValueOnce({ content: '想想', toolCalls: [callTool('sudoku_place', '{"row":1,"col":0}', 'c0'), callTool('sudoku_place', '{"row":1,"col":1}', 'c1')] })
+      .mockResolvedValueOnce({ content: null, toolCalls: [callTool('sudoku_place', '{"row":1,"col":2}', 'c2')] })
       .mockResolvedValueOnce(say('填好了'));
 
     await replyToWindow({ complete }, () => [], [], { game });
 
     expect(run).toHaveBeenCalledTimes(2);
-    expect(run.mock.calls.map((call) => call[1])).toEqual(['{"row":1,"col":c0,"value":5}', '{"row":1,"col":c2,"value":5}']);
+    expect(run.mock.calls.map((call) => call[1])).toEqual(['{"row":1,"col":0}', '{"row":1,"col":2}']);
     expect(callOf(complete, 1)[0]).toContainEqual({
       role: 'tool',
       tool_call_id: 'c1',
@@ -255,10 +291,7 @@ describe('replyToWindow', () => {
     });
     const complete = vi
       .fn<(messages: ChatMessage[], tools?: ToolDefinition[]) => Promise<AssistantReply>>()
-      .mockResolvedValueOnce({
-        content: '先看看',
-        toolCalls: [{ id: 'g0', type: 'function', function: { name: 'sudoku_look', arguments: '{}' } }],
-      })
+      .mockResolvedValueOnce({ content: '先看看', toolCalls: [callTool('sudoku_look', '{}', 'g0')] })
       .mockResolvedValueOnce(say('填这里'));
 
     const reply = await replyToWindow({ complete }, () => [], [], { game, say: onSpeech, waitQuiet });
@@ -272,24 +305,27 @@ describe('replyToWindow', () => {
     const waitQuiet = vi.fn(async () => {});
     const complete = vi
       .fn<(messages: ChatMessage[], tools?: ToolDefinition[]) => Promise<AssistantReply>>()
-      .mockResolvedValueOnce({ content: null, toolCalls: [readCall()] })
+      .mockResolvedValueOnce({ content: null, toolCalls: [callTool('memory_save', '{"text":"x"}')] })
       .mockResolvedValueOnce(say('回应了'));
+    const memory = {
+      tools: [{ type: 'function' as const, function: { name: 'memory_save', description: '存', parameters: {} } }],
+      run: async () => '（已记住）',
+      prompt: () => '',
+    };
 
-    await replyToWindow({ complete }, () => [], [], { waitQuiet });
+    await replyToWindow({ complete }, () => [], [], { waitQuiet, memory });
 
     expect(waitQuiet).not.toHaveBeenCalled();
   });
 
-  it('话题文案：开场带话题、换话题带话题', async () => {
+  it('话题文案：只有开场窗口带话题池素材', async () => {
     const complete = vi.fn(async () => say('好'));
     await replyToWindow({ complete }, () => [], [], { topic: '天气' });
     expect(callOf(complete, 0)[0].at(-1)).toEqual({ role: 'user', content: '（开始直播了，开个头，可以聊聊：天气）' });
 
-    await replyToWindow({ complete }, () => [], [], { changeTopic: true, topic: '午饭' });
-    expect(callOf(complete, 1)[0].at(-1)).toEqual({
-      role: 'user',
-      content: '（你已经聊这个话题有一阵子了，自然地换个新话题吧，可以聊聊：午饭）',
-    });
+    // 已删除按句数换话题的机制：中段窗口只有"接着讲你的故事"
+    await replyToWindow({ complete }, () => [], [], {});
+    expect(callOf(complete, 1)[0].at(-1)).toEqual({ role: 'user', content: '（接着讲你的故事）' });
   });
 
   it('每窗口注入记忆上下文：开场带摘要，普通窗口带话题与上一句', async () => {
@@ -298,7 +334,7 @@ describe('replyToWindow', () => {
       async (input: { topic?: string; lastSpoken?: string; opening: boolean }) =>
         input.opening ? '（你之前讲过：打印机）' : `（相关：${input.topic ?? ''}|${input.lastSpoken ?? ''}）`,
     );
-    const memory = { tools: [], run: async () => '', context };
+    const memory = { tools: [], run: async () => '', prompt: () => '', context };
 
     await replyToWindow({ complete }, () => [], [], { opening: true, memory });
     expect(context).toHaveBeenCalledWith({ topic: undefined, lastSpoken: undefined, opening: true });
@@ -332,6 +368,7 @@ describe('replyToWindow', () => {
     const memory = {
       tools: [{ type: 'function' as const, function: { name: 'memory_save', description: '存', parameters: {} } }],
       run,
+      prompt: () => '',
     };
     const place = { type: 'function' as const, function: { name: 'sudoku_place', description: '落子', parameters: {} } };
     const game = { prompt: '', tools: [place], run: () => '已填入', describe: () => '', isActive: () => true };
@@ -339,10 +376,7 @@ describe('replyToWindow', () => {
       .fn<(messages: ChatMessage[], tools?: ToolDefinition[]) => Promise<AssistantReply>>()
       .mockResolvedValueOnce({
         content: null,
-        toolCalls: [
-          { id: 'g0', type: 'function', function: { name: 'sudoku_place', arguments: '{}' } },
-          { id: 'm0', type: 'function', function: { name: 'memory_save', arguments: '{"text":"x"}' } },
-        ],
+        toolCalls: [callTool('sudoku_place', '{}', 'g0'), callTool('memory_save', '{"text":"x"}', 'm0')],
       })
       .mockResolvedValueOnce(say('好'));
 
@@ -367,21 +401,5 @@ describe('replyToWindow', () => {
     const [messages] = callOf(complete, 0);
     expect(messages.at(-1)).toEqual({ role: 'user', content: '（数独进行中）\n（接着讲你的故事）' });
     expect(messages[0].content).toContain('sudoku_place');
-  });
-
-  it('礼物在工具结果中以礼物格式呈现', async () => {
-    const complete = vi
-      .fn<(messages: ChatMessage[], tools?: ToolDefinition[]) => Promise<AssistantReply>>()
-      .mockResolvedValueOnce({ content: null, toolCalls: [readCall('c1')] })
-      .mockResolvedValueOnce(say('谢谢火箭'));
-    const gift = { type: 'gift' as const, uid: 2, uname: '土豪', giftName: '火箭', num: 1, price: 1000, coinType: 'gold', timestamp: 0 };
-
-    await replyToWindow({ complete }, () => [gift], []);
-
-    expect(callOf(complete, 1)[0]).toContainEqual({
-      role: 'tool',
-      tool_call_id: 'c1',
-      content: '[#2] 土豪: [礼物] 火箭×1',
-    });
   });
 });

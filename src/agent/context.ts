@@ -13,6 +13,10 @@ export type ContextInput = {
   gameDescribe?: string;
   /** 记忆召回注入（别重复摘要、相关记忆、dream 摘要） */
   memoryContext?: string;
+  /** 弹幕注入（机械唤起的观众档案首行；将来分层弹幕也走这里）：进 user 段，在窗口提示之前 */
+  danmakuContext?: string;
+  /** 节奏水位（待播队列、自聊句数、连续空窗、热度）：只作数据、不下指令，一律事件单位（ADR-0008） */
+  statusContext?: string;
   /** 本窗口的提示词，收尾 */
   windowPrompt: string;
 };
@@ -25,6 +29,8 @@ export function buildContext(input: ContextInput): ChatMessage[] {
   const userParts: string[] = [];
   if (input.gameDescribe !== undefined) userParts.push(input.gameDescribe);
   if (input.memoryContext) userParts.push(input.memoryContext);
+  if (input.danmakuContext) userParts.push(input.danmakuContext);
+  if (input.statusContext) userParts.push(input.statusContext);
   userParts.push(input.windowPrompt);
   return [
     { role: 'system', content: system },

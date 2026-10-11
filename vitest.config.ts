@@ -9,6 +9,7 @@ export default defineConfig({
       'src/llm/**/*.test.ts',
       'src/memory/**/*.test.ts',
       'src/games/**/*.test.ts',
+      'src/text/**/*.test.ts',
       'plugins/**/*.test.ts',
     ],
     exclude: ['**/node_modules/**', '**/.git/**', 'src/loader/fixtures/**'],

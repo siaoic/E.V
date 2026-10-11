@@ -1,5 +1,4 @@
-import { appendFile, mkdir, readFile, writeFile } from 'node:fs/promises';
-import path from 'node:path';
+import type { NoteWorkspace } from './notes.ts';
 
 const SEED_FILE = 'CONSTITUTION.seed.md';
 const PERSONA_FILE = 'PERSONA.md';
@@ -13,10 +12,7 @@ const SEED_DRAFT = `# CONSTITUTION.seed.md
 你的发言永远来自记忆与真实经历，不编造没发生过的事；人格随记忆生长，任何自我认知都要能追溯到真实互动。
 
 ## 弹幕回应
-先看最新到的弹幕（时间优先），再从里面挑值得接的（内容优先）：回答你的问题、评论你言行的优先接；顺着话题延伸的选择性加入；刷屏、复读、无意义表情默认忽略。读到 SC 必须回应。
-
-## 换话题
-按句数自然换话题，不靠时间。换题素材按顺序选：话题池里想说还没说的；最近真实发生的事（游戏、弹幕、观众）；向观众提一个基于已知背景的具体问题。禁止为填补沉默堆砌语气词或重复句式。
+先看最新到的弹幕（时间优先），再从里面挑值得接的（内容优先）：回答你的问题、评论你言行的优先接；顺着话题延伸的选择性加入；刷屏、复读、无意义表情默认忽略。SC、礼物、上舰都只是弹幕里的一类消息——看见了接不接、怎么接由你决定，没有必须回应的东西；谢人也只谢人，不因为金额大小改变你是谁。
 
 ## 情感表达（迂回式）
 命令句包装关心：想说「小心点」，就说「別摔了，摔了可不管你……」。否定句表达肯定：想说「喜欢」，就说「也、也不是不喜欢啦」。嘴上说「随便你」，手上已经在帮忙。不说出口的部分比说出口的更重要，多用「……」留白。
@@ -42,52 +38,40 @@ export type PersonaStore = {
   append(note: string): Promise<void>;
   /** 精确匹配一整行并替换；replace 为空串即删除该行；没找到返回 false */
   revise(match: string, replace: string): Promise<boolean>;
-  /** 整档重写自我认知（dream 整理用） */
-  replace(entries: string[]): Promise<void>;
+  /** 整档重写自我认知（dream 整理用）；比上一版短很多时返回 shrinkNote，供日志与摘要点名 */
+  replace(entries: string[]): Promise<{ shrinkNote?: string }>;
 };
 
-export async function openPersonaStore(dir: string): Promise<PersonaStore> {
-  const seedPath = path.join(dir, SEED_FILE);
-  const personaPath = path.join(dir, PERSONA_FILE);
-  try {
-    await mkdir(dir, { recursive: true });
-    await writeFile(seedPath, SEED_DRAFT, { flag: 'wx', encoding: 'utf8' });
-  } catch {
-    // 已存在（wx 命中 EEXIST）或目录不可写：以现有文件为准
-  }
+// 人格档案不自己写文件：全部落进带 Git 版本的笔记工作区（对齐 Cortico 的「工作区即记忆」，
+// 每次写、改、删都有提交，旧版永远取回得来）。这样一次坏写入不会让人格无从追溯。
+export async function openPersonaStore(notes: NoteWorkspace): Promise<PersonaStore> {
   let seed = '';
-  let persona = '';
   try {
-    seed = await readFile(seedPath, 'utf8');
+    seed = await notes.read(SEED_FILE);
   } catch {
-    // 种子缺失不阻塞：人格层退化为仅自我认知
+    // 种子缺失：引导创建一次，创建后以文件为准（用户可手改，代码不再覆写）
+    try {
+      await notes.write(SEED_FILE, SEED_DRAFT);
+      seed = SEED_DRAFT;
+    } catch {
+      // 工作区不可写：人格层退化为仅自我认知
+    }
   }
-  try {
-    persona = await readFile(personaPath, 'utf8');
-  } catch {
-    // PERSONA.md 初始为空
-  }
-  let writer: Promise<void> = Promise.resolve();
-  const enqueue = (task: () => Promise<void>) => {
-    writer = writer.then(task).catch(() => {});
-    return writer;
-  };
+  let persona = await notes.read(PERSONA_FILE).catch(() => '');
+  const today = () => new Date().toISOString().slice(0, 10);
   return {
     prompt(): string {
       const parts = [seed.trim()];
-      const notes = persona.trim();
-      if (notes) parts.push(`# 自我认知（你自己沉淀的，同样作数）\n${notes}`);
+      const self = persona.trim();
+      if (self) parts.push(`# 自我认知（你自己沉淀的，同样作数）\n${self}`);
       return parts.filter(Boolean).join('\n\n');
     },
     async append(note: string): Promise<void> {
       const text = note.trim();
       if (!text) return;
-      const line = `- [${new Date().toISOString().slice(0, 10)}] ${text}`;
-      await enqueue(async () => {
-        await mkdir(dir, { recursive: true });
-        await appendFile(personaPath, `${line}\n`, 'utf8');
-        persona = `${persona}${persona && !persona.endsWith('\n') ? '\n' : ''}${line}\n`;
-      });
+      const line = `- [${today()}] ${text}`;
+      await notes.append(PERSONA_FILE, line);
+      persona = `${persona}${persona && !persona.endsWith('\n') ? '\n' : ''}${line}\n`;
     },
     async revise(match: string, replace: string): Promise<boolean> {
       const lines = persona.split('\n');
@@ -97,23 +81,18 @@ export async function openPersonaStore(dir: string): Promise<PersonaStore> {
       if (replace === '') next.splice(at, 1);
       else next[at] = replace;
       const body = next.join('\n');
-      await enqueue(async () => {
-        await mkdir(dir, { recursive: true });
-        await writeFile(personaPath, body ? `${body}\n` : '', 'utf8');
-      });
+      await notes.write(PERSONA_FILE, body ? `${body}\n` : '');
       persona = body;
       return true;
     },
-    async replace(entries: string[]): Promise<void> {
+    async replace(entries: string[]): Promise<{ shrinkNote?: string }> {
       const cleaned = entries.map((entry) => entry.trim()).filter(Boolean);
       const body = cleaned
-        .map((entry) => (entry.startsWith('- ') ? entry : `- [${new Date().toISOString().slice(0, 10)}] ${entry}`))
+        .map((entry) => (entry.startsWith('- ') ? entry : `- [${today()}] ${entry}`))
         .join('\n');
-      await enqueue(async () => {
-        await mkdir(dir, { recursive: true });
-        await writeFile(personaPath, body ? `${body}\n` : '', 'utf8');
-      });
+      const { shrinkNote } = await notes.write(PERSONA_FILE, body ? `${body}\n` : '');
       persona = body;
+      return shrinkNote ? { shrinkNote } : {};
     },
   };
 }

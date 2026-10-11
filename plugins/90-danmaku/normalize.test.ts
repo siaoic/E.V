@@ -70,6 +70,35 @@ describe('normalizeCommand', () => {
     });
   });
 
+  it('上舰 GUARD_BUY 映射为舰长事件：等级、月数、价格与开通时间', () => {
+    const command = {
+      cmd: 'GUARD_BUY',
+      data: { uid: 123456, username: '舰长大人', guard_level: 3, num: 3, price: 138000, start_time: 1791548931 },
+    };
+
+    expect(normalizeCommand(command)).toEqual({
+      type: 'guard',
+      uid: 123456,
+      uname: '舰长大人',
+      guardLevel: 3,
+      num: 3,
+      price: 138000,
+      timestamp: 1791548931000,
+    });
+  });
+
+  it('上舰字段缺失或写成字符串时不炸：等级兜底 0、月数兜底 1', () => {
+    expect(normalizeCommand({ cmd: 'GUARD_BUY', data: { uid: '7', username: '甲', guard_level: '1' } })).toEqual({
+      type: 'guard',
+      uid: 7,
+      uname: '甲',
+      guardLevel: 1,
+      num: 1,
+      price: 0,
+      timestamp: 0,
+    });
+  });
+
   it('跨房弹幕 DANMU_MSG_MIRROR 不产生观众弹幕事件', () => {
     const command = {
       cmd: 'DANMU_MSG_MIRROR',

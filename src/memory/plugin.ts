@@ -6,6 +6,7 @@ import { createEmbedder } from './embedding.ts';
 import { createMemoryToolkit } from './hooks.ts';
 import { openNoteWorkspace } from './notes.ts';
 import { openPersonaStore } from './persona.ts';
+import { createViewerBook } from './viewers.ts';
 import { MemoryWorkspace } from './workspace.ts';
 
 export type MemoryPluginConfig = {
@@ -23,8 +24,12 @@ export const apply = Object.assign(
     const memoryFile = config.file ?? 'workspace/memory.jsonl';
     const workspaceDir = path.dirname(memoryFile);
     const workspace = await MemoryWorkspace.open(memoryFile);
-    const persona = await openPersonaStore(workspaceDir);
+    // 笔记工作区先建：人格档案（CONSTITUTION.seed.md / PERSONA.md）、笔记、观众档案都落在这里，
+    // 每次写都进 Git（ADR-0004 的「人格权威轨」），所以一次坏写入永远有旧版可取回。
     const notes = await openNoteWorkspace(workspaceDir);
+    const persona = await openPersonaStore(notes);
+    // 观众档案：viewers/<uid>.md，读回靠 recall_viewer，机械唤起靠 viewerLines
+    const viewers = createViewerBook(notes);
     workspace.setEmbedder(
       createEmbedder({
         url: process.env.EMBEDDING_URL ?? 'http://127.0.0.1:8761',
@@ -43,6 +48,7 @@ export const apply = Object.assign(
         describeImage: llm.describeImage?.bind(llm),
         persona,
         notes,
+        viewers,
         dreamSummary: dream.summary,
       }),
     );

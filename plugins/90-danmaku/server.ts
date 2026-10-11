@@ -2,7 +2,12 @@ import { mixinKey, signWbi } from './wbi.ts';
 
 type FetchLike = typeof globalThis.fetch;
 
-export type DanmuServer = { token: string; hosts: { host: string; wssPort: number }[] };
+export type DanmuServer = {
+  token: string;
+  hosts: { host: string; wssPort: number }[];
+  /** SESSDATA 有效时 nav 返回的登录 uid；匿名连接为 undefined */
+  uid?: number;
+};
 
 const NAV_URL = 'https://api.bilibili.com/x/web-interface/nav';
 const HOME_URL = 'https://www.bilibili.com/';
@@ -17,33 +22,45 @@ export async function fetchBuvid3(fetch: FetchLike = globalThis.fetch): Promise<
   return cookie.slice('buvid3='.length).split(';')[0];
 }
 
-async function fetchWbiKey(fetch: FetchLike, buvid: string): Promise<string> {
-  const data = (await (await fetch(NAV_URL, { headers: requestHeaders(buvid) })).json()) as {
-    data: { wbi_img: { img_url: string; sub_url: string } };
-  };
-  const fileKey = (url: string) => url.slice(url.lastIndexOf('/') + 1).split('.')[0];
-  return mixinKey(fileKey(data.data.wbi_img.img_url), fileKey(data.data.wbi_img.sub_url));
+// 带 SESSDATA 时把登录 Cookie 一起送上去（buvid3 保留，风控要认它）
+function requestHeaders(buvid: string, sessdata?: string): Record<string, string> {
+  const cookies = [`buvid3=${buvid}`];
+  if (sessdata) cookies.push(`SESSDATA=${sessdata}`);
+  return { 'User-Agent': USER_AGENT, Cookie: cookies.join('; ') };
 }
 
-function requestHeaders(buvid: string): Record<string, string> {
-  return { 'User-Agent': USER_AGENT, Cookie: `buvid3=${buvid}` };
+// nav 一次给两样东西：WBI 签名密钥，以及登录态下的 uid
+async function fetchNavInfo(fetch: FetchLike, buvid: string, sessdata?: string): Promise<{ key: string; uid?: number }> {
+  const response = await fetch(NAV_URL, { headers: requestHeaders(buvid, sessdata) });
+  const body = (await response.json()) as {
+    data?: { mid?: number; wbi_img?: { img_url: string; sub_url: string } };
+  };
+  const info = body.data;
+  if (info?.wbi_img === undefined) throw new Error('nav 未返回 wbi_img：Cookie 失效或触发风控');
+  const fileKey = (url: string) => url.slice(url.lastIndexOf('/') + 1).split('.')[0];
+  return {
+    key: mixinKey(fileKey(info.wbi_img.img_url), fileKey(info.wbi_img.sub_url)),
+    uid: typeof info.mid === 'number' && info.mid > 0 ? info.mid : undefined,
+  };
 }
 
 export async function fetchDanmuServer({
   roomId,
   buvid,
+  sessdata,
   fetch = globalThis.fetch,
   now = Date.now(),
 }: {
   roomId: number;
   buvid: string;
+  sessdata?: string;
   fetch?: FetchLike;
   now?: number;
 }): Promise<DanmuServer> {
-  const key = await fetchWbiKey(fetch, buvid);
+  const { key, uid } = await fetchNavInfo(fetch, buvid, sessdata);
   const params = signWbi({ id: roomId, type: 0 }, key, String(Math.floor(now / 1000)));
   const query = new URLSearchParams(Object.entries(params).map(([k, v]) => [k, String(v)]));
-  const response = await fetch(`${DANMU_INFO_URL}?${query}`, { headers: requestHeaders(buvid) });
+  const response = await fetch(`${DANMU_INFO_URL}?${query}`, { headers: requestHeaders(buvid, sessdata) });
   const data = (await response.json()) as {
     code: number;
     message?: string;
@@ -53,5 +70,6 @@ export async function fetchDanmuServer({
   return {
     token: data.data.token,
     hosts: data.data.host_list.map((h) => ({ host: h.host, wssPort: h.wss_port })),
+    uid,
   };
 }

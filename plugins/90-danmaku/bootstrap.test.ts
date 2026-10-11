@@ -51,4 +51,44 @@ describe('resolveConnect', () => {
     // 只有 nav（WBI）+ getDanmuInfo 两次，没有首页取 buvid 的请求
     expect(fetch).toHaveBeenCalledTimes(2);
   });
+
+  it('sessdata 透传到 B站请求，并把登录 uid 带出来', async () => {
+    const fetch = vi.fn(async (url: string | URL | Request, _init?: RequestInit) => {
+      if (String(url).includes('/web-interface/nav')) {
+        return new Response(
+          JSON.stringify({ code: 0, data: { mid: 123456, wbi_img: NAV_BODY.data.wbi_img } }),
+          { status: 200 },
+        );
+      }
+      return new Response(JSON.stringify(DANMU_INFO_BODY), { status: 200 });
+    });
+
+    const resolved = await resolveConnect({
+      roomId: 22748536,
+      buvid: 'GIVEN',
+      sessdata: 'SESSDATA-VALUE',
+      fetch: fetch as unknown as typeof globalThis.fetch,
+    });
+
+    expect(resolved.uid).toBe(123456);
+    for (const call of fetch.mock.calls) {
+      expect((call[1]?.headers as Record<string, string>).Cookie).toBe('buvid3=GIVEN; SESSDATA=SESSDATA-VALUE');
+    }
+  });
+
+  it('不传 sessdata 时保持匿名（无 uid、Cookie 只有 buvid3）', async () => {
+    const fetch = vi.fn(async (url: string | URL | Request, _init?: RequestInit) => {
+      if (String(url).includes('/web-interface/nav')) return new Response(JSON.stringify(NAV_BODY), { status: 200 });
+      return new Response(JSON.stringify(DANMU_INFO_BODY), { status: 200 });
+    });
+
+    const resolved = await resolveConnect({
+      roomId: 22748536,
+      buvid: 'GIVEN',
+      fetch: fetch as unknown as typeof globalThis.fetch,
+    });
+
+    expect(resolved.uid).toBeUndefined();
+    expect((fetch.mock.calls[0][1]?.headers as Record<string, string>).Cookie).toBe('buvid3=GIVEN');
+  });
 });

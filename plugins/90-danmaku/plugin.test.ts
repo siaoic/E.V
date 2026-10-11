@@ -1,7 +1,9 @@
 import { Context } from '@deepseek-ai/cordis';
 import { describe, expect, it, type Mock, vi } from 'vitest';
+import { substituteEnv } from '../../src/loader/config.ts';
+import { buildAuthPacket } from './auth.ts';
 import { Operation } from './codec.ts';
-import { apply } from './plugin.ts';
+import { apply, config } from './plugin.ts';
 import type { DanmakuSocketHandlers } from './source.ts';
 
 function frame(operation: number, ver: number, body: Buffer): Buffer {
@@ -61,5 +63,40 @@ describe('danmaku plugin', () => {
 
     await fiber.dispose();
     expect(socket.close).toHaveBeenCalledTimes(1);
+  });
+
+  it('显式配的 uid 优先，认证包用它（匿名默认 0 不让位）', async () => {
+    let handlers: DanmakuSocketHandlers | undefined;
+    const socket = {
+      send: vi.fn<(packet: Buffer) => void>(),
+      close: vi.fn<() => void>(),
+    };
+    const root = new Context();
+
+    const fiber = await root.plugin(apply, {
+      roomId: 22625027,
+      uid: 999,
+      buvid: 'BUVID',
+      connect: (h) => {
+        handlers = h;
+        return socket;
+      },
+    });
+
+    handlers?.onOpen();
+    expect(socket.send).toHaveBeenCalledWith(buildAuthPacket({ roomId: 22625027, uid: 999, buvid: 'BUVID', token: '' }));
+    await fiber.dispose();
+  });
+});
+
+describe('danmaku config', () => {
+  it('房间号、SESSDATA、心跳都由环境变量填，缺 SESSDATA 时是空串', () => {
+    expect(substituteEnv(config, { ROOM_ID: '22748536', SESSDATA: 'a%2Cb' })).toEqual({
+      roomId: '22748536',
+      uid: 0,
+      sessdata: 'a%2Cb',
+      heartbeatMs: '2000',
+    });
+    expect(substituteEnv(config, {})).toMatchObject({ roomId: '22748536', sessdata: '' });
   });
 });
