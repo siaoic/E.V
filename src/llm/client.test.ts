@@ -247,17 +247,20 @@ describe('createLlmClient', () => {
       }),
     );
     const client = createLlmClient({
-      baseUrl: 'https://example.test/v1', apiKey: 'KEY', model: 'm1',
-      visionModel: 'glm-4v-flash', visionBaseUrl: 'https://vlm.example/v1', fetch,
+      baseUrl: 'https://example.test/v1',
+      apiKey: 'KEY',
+      model: 'vision-capable-model',
+      fetch,
     });
 
     const caption = await client.describeImage({ image: 'data:image/jpeg;base64,BBBB' });
 
     expect(caption).toBe('一只橘猫趴在键盘上');
+    // 视觉得走主模型与主端点：现在的模型自带视觉，没有单独的 VISION_MODEL/VISION_BASE_URL
     const [url, init] = fetch.mock.calls[0] as unknown as [string, RequestInit];
-    expect(url).toBe('https://vlm.example/v1/chat/completions');
+    expect(url).toBe('https://example.test/v1/chat/completions');
     const body = JSON.parse(init.body as string);
-    expect(body.model).toBe('glm-4v-flash');
+    expect(body.model).toBe('vision-capable-model');
     expect(body.messages[0].content[1].image_url.url).toBe('data:image/jpeg;base64,BBBB');
   });
 

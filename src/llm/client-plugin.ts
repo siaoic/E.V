@@ -5,10 +5,6 @@ export type LlmClientPluginConfig = {
   baseUrl: string;
   apiKey: string;
   model: string;
-  /** 视觉模型（如 glm-4v-flash）；留空则视图调用回落到 model */
-  visionModel?: string;
-  /** 视觉请求单独端点（如本地 llama.cpp 带 mmproj）；留空用 baseUrl */
-  visionBaseUrl?: string;
   /** 字符串形式的原始 JSON（env 替换后 parse），如 '{"thinking":{"type":"disabled"}}' */
   extraBody?: string;
 };
@@ -42,16 +38,12 @@ export const apply = Object.assign(
     const configured = parseExtraBody(config.extraBody);
     const extraBody = configured ?? defaultExtraBody(config.baseUrl);
     if (!configured && extraBody) console.log('[llm] 未配置 LLM_EXTRA_BODY，按智谱端点默认关闭 thinking');
-    const visionModel = config.visionModel?.trim() || undefined;
-    const visionBaseUrl = config.visionBaseUrl?.trim() || undefined;
     ctx.provide(
       'llm',
       createLlmClient({
         baseUrl: config.baseUrl,
         apiKey: config.apiKey,
         model: config.model,
-        visionModel,
-        visionBaseUrl,
         extraBody,
       }),
     );
@@ -63,7 +55,5 @@ export const config = {
   baseUrl: '${LLM_BASE_URL}',
   apiKey: '${LLM_API_KEY}',
   model: '${LLM_MODEL}',
-  visionModel: '${VISION_MODEL:-}',
-  visionBaseUrl: '${VISION_BASE_URL:-}',
   extraBody: '${LLM_EXTRA_BODY:-}',
 };

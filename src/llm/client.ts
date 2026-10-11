@@ -29,7 +29,7 @@ export function isRateLimited(error: unknown): error is RateLimitedError {
 
 export type LlmPort = {
   complete(messages: ChatMessage[], tools?: ToolDefinition[], options?: { timeoutMs?: number }): Promise<AssistantReply>;
-  /** 视图能力：给一张图（data URL 或 http 地址）返回一句描述；未配视觉模型时用默认模型 */
+  /** 视图能力：给一张图（data URL 或 http 地址）返回一句描述，走主模型（现用模型自带视觉） */
   describeImage?(input: { image: string; prompt?: string }): Promise<string>;
 };
 
@@ -37,10 +37,6 @@ export type LlmClientOptions = {
   baseUrl: string;
   apiKey: string;
   model: string;
-  /** 视觉模型（如 glm-4v-flash）；不配则视图调用回落到 model */
-  visionModel?: string;
-  /** 视觉请求单独的端点（如本地 llama.cpp 带 mmproj）；不配则用 baseUrl */
-  visionBaseUrl?: string;
   extraBody?: Record<string, unknown>;
   fetch?: typeof globalThis.fetch;
 };
@@ -64,14 +60,11 @@ export function createLlmClient({
   baseUrl,
   apiKey,
   model,
-  visionModel,
-  visionBaseUrl,
   extraBody,
   fetch = globalThis.fetch,
 }: LlmClientOptions) {
   // 端点地址末尾的斜杠会让 `${base}/chat/completions` 变成 `//chat/completions`，统一去掉
   const rootUrl = baseUrl.replace(/\/+$/, '');
-  const visionRootUrl = visionBaseUrl?.replace(/\/+$/, '');
   // extraBody 是端点专属开关（如智谱的 thinking）。端点不认时（400 里点名了字段）去掉重发一次并记住，
   // 否则每个窗口都白撞一次 400，整条发言链断在第一次请求上。
   let extraBodyDropped = false;
@@ -158,9 +151,9 @@ export function createLlmClient({
     async describeImage(input: { image: string; prompt?: string }): Promise<string> {
       const call = () =>
         requestWithRetry(
-          visionRootUrl ?? rootUrl,
+          rootUrl,
           bodyFor({
-            model: visionModel ?? model,
+            model,
             messages: [
               {
                 role: 'user',
